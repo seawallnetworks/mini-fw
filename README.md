@@ -1,7 +1,8 @@
 # mini-fw
 
 An IPv4 L4 host firewall built on eBPF, with Cisco IOS-style numbered access lists.
-See [`docs/implementation.md`](docs/implementation.md) for a detailed description of
+See [`docs/user-manual.md`](docs/user-manual.md) for the operator manual,
+[`docs/implementation.md`](docs/implementation.md) for a detailed description of
 what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 
 **Current state: step 1, stateless ACLs in a single XDP program, inbound
