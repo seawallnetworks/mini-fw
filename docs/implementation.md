@@ -54,9 +54,9 @@ does today.** Where the two disagree, §10 explains why.
                                                ▼
  /sys/fs/bpf/mfw/  (bpffs, mode 0700)
    state/acl_db      HASH   every defined ACE         (userspace only)
-   state/bindings    ARRAY  which list is bound        (userspace only)
-   maps/acl_std      ARRAY  compiled standard list ─┐
-   maps/acl_ext      ARRAY  compiled extended list ─┤ read by XDP
+   state/bindings    HASH   lists bound per interface (userspace only)
+   maps/rulesets     HASH_OF_MAPS  ifindex → that  ─┐
+                     interface's compiled lists     │ read by XDP
    maps/config       ARRAY  flags, generation      ─┤
    maps/stats        PERCPU counters               ─┘ written by XDP
    link/xdp_<if>     pinned bpf_link (keeps the program attached)
@@ -72,8 +72,10 @@ Key properties:
   The pinned link keeps the XDP program attached after `mfw attach` exits.
 - **One BPF object.** `bpf/mfw.bpf.o` is embedded in the `mfw` binary as a
   libbpf skeleton (`bpf/mfw.skel.h`), so there is no `.o` to install.
-- **Maps are host-global.** Every attached interface runs the same program
-  against the same maps (design K14).
+- **Rulesets are per interface.** Every attached interface runs the same
+  program, which looks up the ruleset of the interface the packet arrived
+  on (`ingress_ifindex`). An interface with no ruleset is fail-open. This
+  replaces the design's shared maps (K14).
 - **Two layers of ACL state.** Userspace keeps the full list definitions in
   `state/`. Only bound lists are compiled ("materialized") into the
   dataplane maps in `maps/` (§6).
@@ -84,7 +86,7 @@ Key properties:
 bpf/mfw.h            shared UAPI: mfw_rule, mfw_config, stat ids (single source of truth)
 bpf/mfw.bpf.c        XDP program: parser, standard + extended matching
 include/mfw_uapi.h   userspace wrapper that includes bpf/mfw.h
-src/mfw_cli.h        CLI-internal declarations, exit codes, pin paths, binding slots
+src/mfw_cli.h        CLI-internal declarations, exit codes, pin paths, struct mfw_binding
 src/main.c           command dispatch, usage text
 src/acl_parse.c      Cisco ACE parser and formatter (pure C, no libbpf)
 src/acl.c            ACL store, bindings, materialization, show commands
@@ -171,35 +173,39 @@ other field is ignored, so a standard ACE applies to all IPv4 protocols.
 Prefix 0 matches everything. A prefix above 32 never matches (defensive; the
 CLI never writes one).
 
-**Bound detection:** both maps are packed from index 0, and the scan stops at
-the first entry with `enabled = 0`. If index 0 is empty, the list is unbound
-(`MATCH_UNBOUND`). If the scan runs out without a match, the result is
-`MATCH_MISS`.
+**Finding the ruleset:** the program looks up `ctx->ingress_ifindex` in
+`maps/rulesets`, which yields that interface's inner map, and then entry 0
+of the inner map, the interface's `struct mfw_ruleset` (§4.2). That is two
+map lookups per packet, however many ACEs there are. Without a ruleset,
+both lists count as unbound.
 
-**Implicit deny:** userspace appends a synthetic ACE with
-`MFW_RULE_F_IMPLICIT` to every bound extended list. When the scan reaches it,
-`match_ext` returns `MATCH_MISS`, which the program drops and counts as
-`ext_implicit_deny`. This keeps implicit drops separate from explicit `deny`
-ACEs in the stats. A bound list with no ACEs therefore contains only the
-synthetic ACE and drops all IPv4.
+**Bound detection:** `std_acl` / `ext_acl` in the ruleset name the bound
+lists; 0 means unbound (`MATCH_UNBOUND`). The scans stop at `n_std` /
+`n_ext`. If a scan runs out without a match, the result is `MATCH_MISS`.
+
+**Implicit deny:** running off the end of a bound extended list
+(`ext_acl != 0`) returns `MATCH_MISS`, which the program drops and counts as
+`ext_implicit_deny`, separately from explicit `deny` ACEs. A bound list with
+no ACEs (`n_ext = 0`) therefore drops all IPv4.
 
 ### 3.4 Verifier strategy
 
 A 128-iteration loop whose body contains every extended-match branch
-exceeded the verifier's 1M-instruction limit. Two techniques fix it:
+exceeded the verifier's 1M-instruction limit. The fix is a **global
+function for the per-ACE match**: `mfw_ext_ace_match` is non-static and
+`__noinline`, so the verifier checks it **once**, independently, instead of
+re-exploring its branches on every iteration. It must NULL-check its
+pointer arguments for that reason.
 
-1. **Separate loop key.** The loop counter `i` stays in a register, and a
-   copy `key = i` is passed to `bpf_map_lookup_elem`. Taking `&i` spills the
-   counter to the stack, and the verifier then flags the loop as infinite.
-2. **Global function for the per-ACE match.** `mfw_ext_ace_match` is
-   non-static and `__noinline`, so the verifier checks it **once**,
-   independently, instead of re-exploring its branches on every iteration.
-   It must NULL-check its pointer arguments for that reason.
+The loops index the ruleset directly (`&rs->ext[i]`), bounded by the
+`MFW_MAX_*_ACES` constants and cut short at `n_std` / `n_ext`, so there is
+no map lookup inside them.
 
 Result: the whole program (64-entry standard loop plus 128-entry extended
-loop) verifies in about **16K instructions** (measured with
-`bpftool -d prog loadall`). Global functions taking pointer arguments need
-**kernel 5.12+**, which is why the minimum is above the design's 5.10.
+loop) verifies in about **16K instructions** (15,680 on kernel 6.8; read
+`verified_insns` from `bpf_prog_get_info_by_fd()` after loading). Global
+functions taking pointer arguments need **kernel 5.12+**, which is why the
+minimum is above the design's 5.10.
 
 ---
 
@@ -211,14 +217,14 @@ All shared types are in `bpf/mfw.h`, fixed-width with explicit padding.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `acl_id` | `u16` | 1–99 standard, 100–199 extended (the synthetic implicit deny carries its list's id) |
-| `seq` | `u16` | sequence number; `0xffff` for the synthetic implicit deny |
+| `acl_id` | `u16` | 1–99 standard, 100–199 extended |
+| `seq` | `u16` | sequence number |
 | `action` | `u8` | `MFW_ACTION_DENY` = 0, `MFW_ACTION_ALLOW` = 1 |
 | `proto` | `u8` | 0 = any; otherwise the IPv4 protocol number |
 | `direction` | `u8` | always `MFW_DIR_INGRESS` in step 1 (kept for ABI) |
-| `enabled` | `u8` | 0 terminates the scan |
+| `enabled` | `u8` | set to 1 by the parser; BPF scans by `n_std` / `n_ext` instead |
 | `kind` | `u8` | `MFW_ACL_STANDARD` = 1, `MFW_ACL_EXTENDED` = 2 |
-| `flags` | `u8` | `MFW_RULE_F_ESTABLISHED` (bit 0), `MFW_RULE_F_IMPLICIT` (bit 1) |
+| `flags` | `u8` | `MFW_RULE_F_ESTABLISHED` (bit 0) |
 | `src`, `dst` | `mfw_cidr` | `addr` (network order) + `prefix` 0–32, normalized (host bits cleared) |
 | `sport`, `dport` | `mfw_port_range` | inclusive `min..max`, host order; `(0,0)` = any |
 | `rule_id` | `u32` | `(acl_id << 16) \| seq`, the same as the `acl_db` key |
@@ -226,25 +232,39 @@ All shared types are in `bpf/mfw.h`, fixed-width with explicit padding.
 Port 0 cannot be filtered, because `(0,0)` is the "any" sentinel. The CLI
 rejects `eq 0`.
 
-### 4.2 `struct mfw_config` (8 bytes)
+### 4.2 `struct mfw_ruleset` (8,464 bytes)
+
+Everything one interface enforces, compiled from its bindings:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `std_acl` | `u16` | bound standard list, 0 = none |
+| `ext_acl` | `u16` | bound extended list, 0 = none (fail-open) |
+| `n_std` | `u16` | `std[0 .. n_std)` are in use |
+| `n_ext` | `u16` | `ext[0 .. n_ext)` are in use; a bound list may have 0 |
+| `generation` | `u32` | `config.generation` when it was built |
+| `std` | `mfw_rule[64]` | the standard list's ACEs, in `seq` order |
+| `ext` | `mfw_rule[128]` | the extended list's ACEs, in `seq` order |
+
+### 4.3 `struct mfw_config` (8 bytes)
 
 | Field | Meaning |
 |-------|---------|
 | `default_action` | ABI only. Always DENY and ignored by BPF (design K10) |
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
-| `abi_version` | `MFW_ABI_VERSION` (1). `attach` refuses pinned maps with another version |
+| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets). `attach` refuses pinned maps with another version |
 | `generation` | bumped after each successful materialization |
 
-### 4.3 Maps
+### 4.4 Maps
 
 | Pin | Type | Key → value | Max | Writer | Reader |
 |-----|------|-------------|-----|--------|--------|
-| `maps/acl_std` | ARRAY | `u32` → `mfw_rule` | 64 | CLI | XDP |
-| `maps/acl_ext` | ARRAY | `u32` → `mfw_rule` | 128 | CLI | XDP |
+| `maps/rulesets` | HASH_OF_MAPS | ifindex → inner map | 64 (`MFW_MAX_IFACES`) | CLI | XDP |
+| (inner, not pinned) | ARRAY | `0` → `mfw_ruleset` | 1 | CLI, once | XDP |
 | `maps/config` | ARRAY | `0` → `mfw_config` | 1 | CLI | XDP |
 | `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | XDP | CLI |
 | `state/acl_db` | HASH | `(acl<<16)\|seq` → `mfw_rule` | 4096 | CLI | CLI |
-| `state/bindings` | ARRAY | slot → `mfw_binding` | 2 | CLI | CLI |
+| `state/bindings` | HASH | ifindex → `mfw_binding` | 64 | CLI | CLI |
 
 `maps/*` are created by libbpf at the first `attach` (`LIBBPF_PIN_BY_NAME`
 with pin root `/sys/fs/bpf/mfw/maps`) and reused on later attaches.
@@ -252,10 +272,21 @@ with pin root `/sys/fs/bpf/mfw/maps`) and reused on later attaches.
 the first time a command needs them, so lists can be defined before any
 `attach`. The kernel never reads `state/`.
 
-`mfw_binding` is `{ u16 acl_id; u16 pad; char ifname[16]; }`. Slot 0 is the
-standard list, slot 1 the extended list. `acl_id = 0` means unbound.
+An inner map is kept alive only by the outer map's reference: the CLI
+creates it, fills it, stores its fd in `maps/rulesets` and closes it. It
+is never written again (§6.3). The inner maps are created without BTF,
+and the BPF object declares their template with `key_size` /
+`value_size`, because clang emits `struct mfw_ruleset` there only as a
+forward declaration.
 
-### 4.4 Stats
+`mfw_binding` is `{ u16 std_acl; u16 ext_acl; char ifname[16]; }`; a list
+number of 0 means unbound. The name is shown by `show`, and lets the CLI
+notice an ifindex that now belongs to another interface.
+
+The CLI checks the type and value size of existing `state/` pins and
+refuses ones left by an older mini-fw (detach with `--purge-maps` first).
+
+### 4.5 Stats
 
 Each packet increments **exactly one outcome** and **at most one reason**.
 
@@ -282,7 +313,7 @@ at the end** so existing pinned maps keep their layout.
 
 ```text
 /sys/fs/bpf/mfw/          0700, root only
-  maps/{acl_std,acl_ext,config,stats}
+  maps/{rulesets,config,stats}
   state/{acl_db,bindings}
   link/xdp_<ifname>
 ```
@@ -349,35 +380,47 @@ with no ACEs is open; a bound extended list with no ACEs denies all IPv4.
 `mfw ip access-group <list> in <if>`:
 
 - `<if>` must be attached, otherwise exit 3.
-- The list number picks the slot: 1–99 → standard, 100–199 → extended.
-  Binding a list number with no ACEs is allowed.
-- Binding replaces whatever list was in that slot, with a note on stderr.
-  **Bindings are host-global**: the interface name is recorded only for
-  display, and the policy applies on every attached interface.
+- Each interface has two slots. The list number picks one: 1–99 →
+  standard, 100–199 → extended. Binding a list number with no ACEs is
+  allowed.
+- Binding replaces whatever list was in that slot **on that interface**.
+  Other interfaces keep their own lists.
 - `out` is rejected with exit 4 ("egress is not filtered").
 - If materialization fails, the previous binding is restored.
 
-`mfw no ip access-group [<list>] in <if>` clears both slots, or only the
-slot holding `<list>`.
+`mfw no ip access-group [<list>] in <if>` clears both of the interface's
+slots, or only the slot holding `<list>`. It works for an interface that
+is detached or gone, too. Bindings survive `detach`, so a re-attach puts
+the same lists back.
 
 ### 6.3 Materialization (`mfw_materialize`)
 
 Called after every change to ACEs or bindings, and at the end of `attach`.
 
-1. Load every ACE from `acl_db` and sort by `(acl_id, seq)`.
-2. Standard: copy the ACEs of the bound standard list. Maximum 64.
-3. Extended: copy the ACEs of the bound extended list, then append the
-   synthetic implicit deny. Maximum 128 including that entry, so a bound
-   extended list holds at most 127 user ACEs.
-4. Set `direction = MFW_DIR_INGRESS` on every compiled entry.
-5. If `maps/acl_std` or `maps/acl_ext` is not pinned (nothing attached yet),
-   stop here successfully. `attach` will materialize later.
-6. Write all 64 + 128 entries: new entries first, then zero the rest.
-7. Increment `config.generation`.
+1. If `maps/rulesets` is not pinned (nothing attached yet), stop here
+   successfully. `attach` will materialize later.
+2. Load every ACE from `acl_db` and sort by `(acl_id, seq)`.
+3. For each binding whose interface is attached and still has that
+   ifindex, compile a `struct mfw_ruleset`: the ACEs of its standard list
+   (maximum 64) and of its extended list (maximum 128; the implicit deny
+   takes no entry). Every ACE gets `direction = MFW_DIR_INGRESS`.
+   **All rulesets are compiled before anything is installed**, so a list
+   that is too long changes nothing.
+4. Increment `config.generation` and stamp it on every ruleset.
+5. Install each ruleset: create a new inner map, write the ruleset into
+   it, then store it in `maps/rulesets` under the ifindex. That last
+   update is the switch.
+6. Delete every other entry of `maps/rulesets`, so interfaces that lost
+   their bindings become fail-open.
 
-**Not atomic.** Entries are written one at a time. While a write is in
-progress, the XDP program can see a mix of old and new entries. This is
-accepted for a single-admin tool (see §8.4 for options).
+**Atomic per interface.** An installed inner map is never written again,
+and the switch in step 5 is one map update. A packet holds the inner map
+it looked up until it is done (RCU), and the kernel frees the old one only
+after that, so each packet sees the old ruleset or the new one, never a
+mix. Different interfaces switch one after another, so for a few
+microseconds they may run different generations.
+
+`mfw detach` deletes the interface's entry from `maps/rulesets`.
 
 ---
 
@@ -472,16 +515,21 @@ port constraints or `established`. A large UDP datagram allowed by
 the implicit deny. Either permit by address (`permit udp host X any`) or set
 `drop-ipv4-fragments 1` to drop all fragments consistently.
 
-### 8.3 Host-global policy
+### 8.3 Per-interface policy
 
-All interfaces share one set of maps. You cannot bind different lists on
-different interfaces in step 1.
+Each interface has its own standard and extended slot, at most 64
+interfaces (`MFW_MAX_IFACES`). Policy follows the interface the packet
+arrived on, so VLAN subinterfaces share their parent's lists: XDP runs on
+the parent, and the tags are peeled before matching.
 
-### 8.4 Non-atomic updates
+If an interface is deleted and re-created, it gets a new ifindex and loses
+its XDP program. Its binding stays, but is not installed until the
+interface is attached again.
 
-See §6.3. If this matters later, the usual fix is double buffering: two map
-pairs plus an active-index entry in `config`, flipped after the new pair is
-fully written.
+### 8.4 Updates
+
+Each interface switches atomically to its new ruleset (§6.3). An update
+that touches several interfaces switches them one after another.
 
 ### 8.5 Performance
 
@@ -517,20 +565,23 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 | Suite | Command | Needs | Covers |
 |-------|---------|-------|--------|
 | Parser | `make test` | nothing | wildcard→prefix, field values, normalization, canonical round trips, every rejection rule |
-| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, stats |
-| End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic between two network namespaces: attach and re-attach, standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, no TC filters, CLI validation, detach and purge |
+| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), stats |
+| End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic between two network namespaces over two veth pairs: attach and re-attach, standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, no TC filters, CLI validation, detach and purge |
 
 Notes:
 
-- `test_bpf` loads the skeleton with pinning disabled, so it touches no
-  interface and no pins.
+- `test_bpf` loads the skeleton with pinning disabled and runs in its own
+  network namespace with two dummy interfaces, whose ifindexes it passes
+  as `ingress_ifindex`. It touches no host interface and no pins.
 - `smoke-test.sh` uses `nsenter --net` rather than `ip netns exec`, because
   the latter remounts `/sys` and hides the host's bpffs. It refuses to run
   if `/sys/fs/bpf/mfw` already exists, so it cannot clobber a live
   installation.
-- To verify the verifier budget after changes:
-  `sudo bpftool -d prog loadall bpf/mfw.bpf.o /sys/fs/bpf/t 2>&1 | grep processed`.
-  Then remove `/sys/fs/bpf/t` and any maps pinned under `/sys/fs/bpf/`.
+- To check the verifier budget after changes, load the skeleton with
+  pinning disabled (as `test_bpf` does) and read `verified_insns` from
+  `bpf_prog_get_info_by_fd()`. `bpftool prog loadall` also works, but it
+  pins the `LIBBPF_PIN_BY_NAME` maps under `/sys/fs/bpf/`, which you then
+  have to remove.
 
 ---
 
@@ -544,10 +595,11 @@ Notes:
 | Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
 | Fragment tracking | Cilium-style port recovery, TC | none; port ACEs cannot match non-first fragments | Deferred |
 | ACL definitions | not specified (examples define lists before attach) | `state/acl_db` + `state/bindings` pinned maps | No config file, survives process exit, cleared on reboot like other pins |
-| Bound detection | sketch checked "index 0 enabled", per direction | index 0 empty = unbound | Single direction; the design's sketch would also have been wrong for out-only bindings |
-| Implicit deny | trailing synthetic `deny ip any any` | same, flagged `MFW_RULE_F_IMPLICIT` | Counted separately from explicit denies |
+| Maps (K14, K16) | `acl_std` / `acl_ext` shared by every interface | `rulesets` map-in-map: one `mfw_ruleset` per ifindex | Different lists per interface; atomic updates |
+| Bound detection | sketch checked "index 0 enabled", per direction | `std_acl` / `ext_acl` in the ruleset | Explicit; no sentinel entries |
+| Implicit deny | trailing synthetic `deny ip any any` | running off the end of a bound extended list | Counted separately from explicit denies; takes no ACE slot |
 | `established` | not in design | added (Cisco-compatible) | Makes stateless reply handling practical |
-| Stats ids | TC/CT/frag ids | XDP-only set (§4.4) | Nothing shipped; clean layout, append-only from now on |
+| Stats ids | TC/CT/frag ids | XDP-only set (§4.5) | Nothing shipped; clean layout, append-only from now on |
 | Kernel | 5.10+ | 5.12+ | Global BPF function with pointer arguments (§3.4) |
 | `rule_id` delete | `no ip access-list N <rule_id\|seq>` | by `seq` only | `rule_id` equals `(acl << 16) \| seq` anyway |
 | clsact management | meta markers, TC attach | none | No TC |
@@ -563,9 +615,7 @@ Roughly in order of value for the local-VM use case:
    (observe-only, no filtering). The lookup can stay in XDP or move with the
    extended list; see design.md §Conntrack for the Cilium-based model.
 2. **Fragment port recovery**, so port ACEs work for fragmented UDP.
-3. **Atomic rule updates** via double-buffered maps (§8.4).
-4. **Per-ACE hit counters** for `show ip access-lists` (IOS-style
+3. **Per-ACE hit counters** for `show ip access-lists` (IOS-style
    `(N matches)`).
+4. **Per-interface stats**, as a per-CPU map keyed by ifindex.
 5. **XDP SYN cookies** once the target kernel is 6.9+ (§8.6).
-6. **Per-interface policy**, if more than one interface ever needs a
-   different list.

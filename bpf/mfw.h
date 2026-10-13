@@ -3,6 +3,8 @@
  *
  * Step 1 (stateless, ingress only): standard and extended ACLs both run in
  * one XDP program. Egress is not filtered (local-VM protection only).
+ * Each interface has its own ruleset (struct mfw_ruleset), found by the
+ * ifindex the packet arrived on.
  */
 #ifndef MFW_H
 #define MFW_H
@@ -11,8 +13,9 @@
 
 #define MFW_MAX_STD_ACES       64     /* standard ACL map */
 #define MFW_MAX_EXT_ACES       128    /* extended ACL map */
+#define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
 #define MFW_PIN_PATH           "/sys/fs/bpf/mfw"
-#define MFW_ABI_VERSION        1
+#define MFW_ABI_VERSION        2      /* 2: per-interface rulesets */
 
 /* Rule action */
 enum mfw_action {
@@ -43,7 +46,6 @@ enum mfw_acl_kind {
 
 /* mfw_rule.flags */
 #define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* Cisco "established": TCP with ACK or RST */
-#define MFW_RULE_F_IMPLICIT     (1 << 1)  /* synthetic trailing "deny ip any any" */
 
 struct mfw_cidr {
     __be32 addr;   /* IPv4 network address, big-endian wire order ONLY */
@@ -59,9 +61,8 @@ struct mfw_port_range {
 /*
  * One ACE — Cisco "access-list N …" line.
  * Same layout for standard and extended; standard match ignores
- * dst/proto/ports. Maps acl_std and acl_ext both hold mfw_rule[], packed
- * from index 0 (first !enabled entry terminates the scan; an empty map
- * means the list is not bound).
+ * dst/proto/ports. A ruleset holds them packed from index 0; its n_std /
+ * n_ext say how many are in use.
  */
 struct mfw_rule {
     __u16 acl_id;       /* 1–99 standard, 100–199 extended */
@@ -69,7 +70,7 @@ struct mfw_rule {
     __u8  action;       /* MFW_ACTION_ALLOW / DENY */
     __u8  proto;        /* 0=any/ip; ignored for standard */
     __u8  direction;    /* MFW_DIR_*; always MFW_DIR_INGRESS in step 1 */
-    __u8  enabled;
+    __u8  enabled;      /* set by the parser; BPF scans by count */
     __u8  kind;         /* MFW_ACL_STANDARD | MFW_ACL_EXTENDED */
     __u8  flags;        /* MFW_RULE_F_* */
     __u8  pad0[2];
@@ -79,6 +80,24 @@ struct mfw_rule {
     struct mfw_port_range dport;
     __u32 rule_id;      /* stable id for delete */
     __u32 pad1;
+};
+
+/*
+ * Everything one interface enforces: its bound standard and extended
+ * lists, compiled. The value of the single entry of an inner map in the
+ * "rulesets" map-in-map. Userspace never changes an installed one: it
+ * fills a new inner map and swaps it in, so a packet sees either the old
+ * ruleset or the new one, never a mix.
+ */
+struct mfw_ruleset {
+    __u16 std_acl;      /* bound standard list, 0 = none (std pass) */
+    __u16 ext_acl;      /* bound extended list, 0 = none (fail-open) */
+    __u16 n_std;        /* std[0 .. n_std) in use */
+    __u16 n_ext;        /* ext[0 .. n_ext) in use; a miss is the implicit deny */
+    __u32 generation;   /* mfw_config.generation when it was built */
+    __u32 pad;
+    struct mfw_rule std[MFW_MAX_STD_ACES];
+    struct mfw_rule ext[MFW_MAX_EXT_ACES];
 };
 
 struct mfw_config {

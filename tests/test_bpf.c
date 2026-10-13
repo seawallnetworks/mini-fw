@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* Dataplane tests via BPF_PROG_TEST_RUN: feed crafted frames to the XDP
- * program and check verdicts. Needs root; touches no interface or pins. */
+ * program and check verdicts. Needs root. Runs in a private network
+ * namespace with two dummy interfaces, so the per-interface rulesets have
+ * real ifindexes; touches no host interface or pins. */
+#define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <net/if.h>
+#include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/in.h>
@@ -18,6 +25,7 @@
 
 static struct mfw_bpf *skel;
 static int failures;
+static __u32 if0, if1;           /* the dummy interfaces mfwt0, mfwt1 */
 
 #define CHECK(cond, ...) do { \
     if (!(cond)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); \
@@ -98,11 +106,14 @@ static int build(const struct pkt_spec *s, __u8 *buf)
     return p - buf;
 }
 
-static int run(struct bpf_program *prog, const struct pkt_spec *s)
+/* The packet as if it arrived on ifindex. */
+static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s)
 {
     __u8 buf[256];
-    LIBBPF_OPTS(bpf_test_run_opts, opts, .data_in = buf, .data_size_in = build(s, buf),
-                .repeat = 1);
+    int len = build(s, buf);
+    struct xdp_md ctx = { .data_end = len, .ingress_ifindex = ifindex };
+    LIBBPF_OPTS(bpf_test_run_opts, opts, .data_in = buf, .data_size_in = len,
+                .ctx_in = &ctx, .ctx_size_in = sizeof(ctx), .repeat = 1);
 
     if (bpf_prog_test_run_opts(bpf_program__fd(prog), &opts)) {
         perror("bpf_prog_test_run_opts");
@@ -112,22 +123,24 @@ static int run(struct bpf_program *prog, const struct pkt_spec *s)
     return opts.retval;
 }
 
-#define XDP(...)    run(skel->progs.mfw_xdp,        &(struct pkt_spec){ __VA_ARGS__ })
+/* on if0 unless said otherwise */
+#define XDP(...)        run(skel->progs.mfw_xdp, if0, &(struct pkt_spec){ __VA_ARGS__ })
+#define XDP_ON(i, ...)  run(skel->progs.mfw_xdp, (i), &(struct pkt_spec){ __VA_ARGS__ })
 
 /* ---- rule loading (mirrors acl.c materialization) ---- */
 
-static struct mfw_rule std[MFW_MAX_STD_ACES], ext[MFW_MAX_EXT_ACES];
-static int n_std, n_ext;
+static struct mfw_ruleset rs;   /* being built */
 
+/* Clears the ruleset being built and every installed one. */
 static void reset(void)
 {
     struct mfw_config cfg = { .abi_version = MFW_ABI_VERSION };
     __u32 k = 0;
 
-    n_std = n_ext = 0;
-    memset(std, 0, sizeof(std));
-    memset(ext, 0, sizeof(ext));
+    memset(&rs, 0, sizeof(rs));
     bpf_map_update_elem(bpf_map__fd(skel->maps.config), &k, &cfg, BPF_ANY);
+    bpf_map_delete_elem(bpf_map__fd(skel->maps.rulesets), &if0);
+    bpf_map_delete_elem(bpf_map__fd(skel->maps.rulesets), &if1);
 }
 
 static void add(const char *line)
@@ -145,25 +158,34 @@ static void add(const char *line)
         return;
     }
     r.direction = MFW_DIR_INGRESS;
-    if (r.kind == MFW_ACL_STANDARD)
-        std[n_std++] = r;
-    else
-        ext[n_ext++] = r;
+    if (r.kind == MFW_ACL_STANDARD) {
+        rs.std_acl = r.acl_id;
+        rs.std[rs.n_std++] = r;
+    } else {
+        rs.ext_acl = r.acl_id;
+        rs.ext[rs.n_ext++] = r;
+    }
 }
 
-static void implicit_deny(void)
+/* Swaps the ruleset built so far in on ifindex, as acl.c does. */
+static void commit_on(__u32 ifindex)
 {
-    struct mfw_rule r = { .action = MFW_ACTION_DENY, .direction = MFW_DIR_INGRESS, .enabled = 1,
-                          .kind = MFW_ACL_EXTENDED, .flags = MFW_RULE_F_IMPLICIT };
-    ext[n_ext++] = r;
+    __u32 zero = 0;
+    int fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "mfw_ruleset", sizeof(__u32),
+                            sizeof(struct mfw_ruleset), 1, NULL);
+
+    if (fd < 0 || bpf_map_update_elem(fd, &zero, &rs, BPF_ANY) ||
+        bpf_map_update_elem(bpf_map__fd(skel->maps.rulesets), &ifindex, &fd, BPF_ANY)) {
+        perror("install ruleset");
+        failures++;
+    }
+    if (fd >= 0)
+        close(fd);   /* the outer map holds the inner one now */
 }
 
 static void commit(void)
 {
-    for (__u32 i = 0; i < MFW_MAX_STD_ACES; i++)
-        bpf_map_update_elem(bpf_map__fd(skel->maps.acl_std), &i, &std[i], BPF_ANY);
-    for (__u32 i = 0; i < MFW_MAX_EXT_ACES; i++)
-        bpf_map_update_elem(bpf_map__fd(skel->maps.acl_ext), &i, &ext[i], BPF_ANY);
+    commit_on(if0);
 }
 
 #define TCP .proto = IPPROTO_TCP
@@ -172,8 +194,11 @@ static void commit(void)
 static void test_unbound(void)
 {
     reset();
+    CHECK(XDP(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+          "no ruleset: open");
     commit();
-    CHECK(XDP(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS, "xdp open");
+    CHECK(XDP(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+          "ruleset with nothing bound: open");
 }
 
 static void test_standard_xdp(void)
@@ -205,7 +230,6 @@ static void test_extended(void)
     add("100 permit tcp any host 10.0.0.5 eq 22");
     add("100 permit udp any eq 53 any");
     add("100 permit icmp any any");
-    implicit_deny();
     commit();
     CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == XDP_PASS, "ssh ok");
     CHECK(XDP(.src = "10.0.0.66", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == XDP_DROP,
@@ -223,7 +247,7 @@ static void test_extended(void)
 
     /* empty bound list = implicit deny only */
     reset();
-    implicit_deny();
+    rs.ext_acl = 101;
     commit();
     CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == XDP_DROP,
           "empty bound ext list denies");
@@ -236,7 +260,6 @@ static void test_combined(void)
     add("10 deny host 203.0.113.66");
     add("10 permit 203.0.113.0 0.0.0.255");
     add("100 permit tcp any any eq 22");
-    implicit_deny();
     commit();
     CHECK(XDP(.src = "203.0.113.66", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_DROP,
           "std deny beats ext permit");
@@ -252,7 +275,6 @@ static void test_established(void)
 {
     reset();
     add("100 permit tcp any any established");
-    implicit_deny();
     commit();
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x02) == XDP_DROP, "SYN blocked");
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == XDP_PASS, "SYN-ACK ok");
@@ -265,7 +287,6 @@ static void test_fragments(void)
     reset();
     add("100 permit udp any any eq 4789");
     add("100 permit ip host 3.3.3.3 any");
-    implicit_deny();
     commit();
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_PASS,
           "first frag has ports");
@@ -293,22 +314,60 @@ static void test_full_tables(void)
         add(line);
     }
     add("10 deny host 192.0.2.1");
-    for (int i = 0; i < MFW_MAX_EXT_ACES - 2; i++) {
+    for (int i = 0; i < MFW_MAX_EXT_ACES - 1; i++) {
         snprintf(line, sizeof(line), "100 permit tcp any any eq %d", 1000 + i);
         add(line);
     }
     add("100 permit tcp any any eq 9");
-    implicit_deny();
     commit();
     CHECK(XDP(.src = "192.0.2.1", .dst = "1.1.1.1", UDP) == XDP_DROP, "64th std ACE");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == XDP_PASS, "127th ext ACE");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == XDP_DROP, "128th = implicit");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == XDP_PASS, "128th ext ACE");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == XDP_DROP,
+          "past the 128th: implicit deny");
+}
+
+/* Each interface is judged by its own lists; others are untouched. */
+static void test_per_interface(void)
+{
+    reset();
+    add("100 permit tcp any any eq 22");
+    commit_on(if0);
+
+    memset(&rs, 0, sizeof(rs));
+    add("10 deny host 192.0.2.9");
+    commit_on(if1);
+
+    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_DROP,
+          "if0: extended implicit deny");
+    CHECK(XDP_ON(if1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+          "if1: no extended list, not on the blacklist");
+    CHECK(XDP_ON(if0, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_PASS,
+          "if0: if1's blacklist does not apply");
+    CHECK(XDP_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+          "if1: its blacklist");
+    CHECK(XDP_ON(1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+          "lo: no ruleset, open");
+
+    /* replace if0's ruleset: the new one applies, if1 keeps its own */
+    memset(&rs, 0, sizeof(rs));
+    add("100 permit tcp any any eq 80");
+    commit_on(if0);
+    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+          "if0: swapped ruleset applies");
+    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+          "if0: old ruleset gone");
+    CHECK(XDP_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+          "if1: unchanged by if0's swap");
+
+    /* removing if0's entry makes it fail-open again */
+    bpf_map_delete_elem(bpf_map__fd(skel->maps.rulesets), &if0);
+    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_PASS,
+          "if0: entry removed, open");
 }
 
 static void test_corrupt(void)
 {
     reset();
-    commit();
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == XDP_DROP, "ihl<5 xdp");
 }
 
@@ -325,11 +384,29 @@ static __u64 stat(__u32 id)
     return sum;
 }
 
+/* A private network namespace with two dummy interfaces. */
+static int setup_netns(void)
+{
+    if (unshare(CLONE_NEWNET)) {
+        perror("unshare(CLONE_NEWNET) (root needed)");
+        return -1;
+    }
+    if (system("ip link add mfwt0 type dummy && ip link add mfwt1 type dummy")) {
+        fprintf(stderr, "cannot create dummy interfaces\n");
+        return -1;
+    }
+    if0 = if_nametoindex("mfwt0");
+    if1 = if_nametoindex("mfwt1");
+    return if0 && if1 ? 0 : -1;
+}
+
 int main(void)
 {
     LIBBPF_OPTS(bpf_object_open_opts, opts);
     struct bpf_map *m;
 
+    if (setup_netns())
+        return 1;
     skel = mfw_bpf__open_opts(&opts);
     if (!skel) {
         perror("open");
@@ -349,6 +426,7 @@ int main(void)
     test_established();
     test_fragments();
     test_full_tables();
+    test_per_interface();
     test_corrupt();
 
     /* every XDP run counted exactly one outcome */

@@ -270,6 +270,8 @@ int cmd_detach(int argc, char **argv)
     }
 
     /* Best effort: tolerate a vanished interface. */
+    if (if_nametoindex(ifname))
+        mfw_forget_iface(if_nametoindex(ifname));
     link_path(path, sizeof(path), ifname);
     unlink(path);  /* last reference → kernel detaches XDP */
 

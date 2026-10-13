@@ -5,7 +5,7 @@
 
 #include "mfw_cli.h"
 
-#define MFW_VERSION "0.1.0 (stateless ACL)"
+#define MFW_VERSION "0.2.0 (stateless ACL, per-interface)"
 
 static void usage(FILE *f)
 {

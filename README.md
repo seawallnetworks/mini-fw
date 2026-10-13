@@ -16,8 +16,10 @@ covers PR1–PR4, cut down to ingress and XDP, plus a minimal `stats`/`set`.
 | Standard | 1–99 | source IP | **pass** (blacklist) |
 | Extended | 100–199 | proto, src, dst, ports, `established` | **deny** (implicit) |
 
-Each inbound IPv4 packet is checked against the **standard list first**. An
-explicit `deny` drops it. A `permit` or no match moves on to the **extended
+Each interface has its own lists: one standard and one extended list can be
+bound to it with `ip access-group … in <iface>`. Each inbound IPv4 packet is
+checked against the lists of the interface it arrived on, the **standard
+list first**. An explicit `deny` drops it. A `permit` or no match moves on to the **extended
 list**, which then permits or drops it. A standard `permit` does **not**
 bypass the extended list.
 
@@ -73,16 +75,11 @@ Exit codes: 0 ok, 1 usage, 2 kernel/libbpf, 3 not attached, 4 validation.
 - **Non-first IPv4 fragments carry no ports.** They only match ACEs without
   port constraints or `established`. `mfw set drop-ipv4-fragments 1` drops all
   fragments.
-- **Bindings are host-global.** All attached interfaces share one set of maps
-  (design K14). The interface name in `access-group` must be attached and is
-  recorded for display only.
-- **Rule updates are not atomic.** Maps are rewritten entry by entry (single
-  writer, best effort).
 
 ## Implementation notes (step 1 vs `design.md`)
 
-- **ACL store.** Lists live in two userspace-only pinned maps,
-  `/sys/fs/bpf/mfw/state/{acl_db,bindings}`. That way they can be defined before
+- **ACL store.** Lists and per-interface bindings live in two userspace-only
+  pinned maps, `/sys/fs/bpf/mfw/state/{acl_db,bindings}`. That way they can be defined before
   `attach` without a config file. Like every other pin, they are cleared on reboot.
 - **XDP only, ingress only.** Both lists run in XDP. The design's TC ingress
   and egress programs, `access-group … out`, and the egress list order are
@@ -92,9 +89,15 @@ Exit codes: 0 ok, 1 usage, 2 kernel/libbpf, 3 not attached, 4 validation.
 - **Per-packet cost.** XDP runs before GRO, so the extended list is scanned
   for every wire packet, not once per merged GRO packet as in TC. That is the
   trade-off for dropping disallowed traffic as early as possible.
-- **Implicit deny.** It is materialized as a trailing ACE flagged
-  `MFW_RULE_F_IMPLICIT`, so stats can tell it apart from explicit deny ACEs. A
-  list is unbound exactly when its map is empty.
+- **Per-interface rulesets.** `maps/rulesets` is a map-in-map keyed by ifindex.
+  Each attached interface with bindings gets an inner map holding one
+  `struct mfw_ruleset`: its standard and extended ACEs, compiled. The design's
+  shared `acl_std`/`acl_ext` maps (K14) are gone.
+- **Atomic updates.** A change builds a new inner map and swaps it in with one
+  map update, so a packet sees the whole old ruleset or the whole new one.
+- **Implicit deny.** Running off the end of a bound extended list drops the
+  packet and counts `ext_implicit_deny`, separately from explicit deny ACEs. It
+  takes no ACE slot, so an extended list holds 128 ACEs.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
 - **Attach.** XDP uses a pinned `bpf_link` (native mode, falling back to

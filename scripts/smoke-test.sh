@@ -3,6 +3,9 @@
 # End-to-end smoke test for stateless mini-fw in two network namespaces:
 #
 #   [mfw-cli 10.200.0.1] --veth-- [mfw-fw 10.200.0.2, mfw attached on veth-fw]
+#   [mfw-cli 10.201.0.1] --veth-- [mfw-fw 10.201.0.2, mfw attached on veth-fw2]
+#
+# The second pair checks that each interface enforces only its own lists.
 #
 # Uses nsenter --net (not "ip netns exec") so the host's /sys/fs/bpf stays
 # visible and pins persist between mfw invocations. Needs root.
@@ -11,6 +14,7 @@ set -u
 MFW=${MFW:-$(cd "$(dirname "$0")/.." && pwd)/mfw}
 CLI=mfw-cli FW=mfw-fw
 CLI_IP=10.200.0.1 FW_IP=10.200.0.2
+CLI_IP2=10.201.0.1 FW_IP2=10.201.0.2
 PASS=0 FAIL=0
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
@@ -28,6 +32,7 @@ cleanup() {
     for ns in "$CLI" "$FW"; do
         ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
     done
+    mfw detach -i veth-fw2 >/dev/null 2>&1
     mfw detach -i veth-fw --purge-maps >/dev/null 2>&1
     ip netns del "$CLI" 2>/dev/null
     ip netns del "$FW" 2>/dev/null
@@ -45,6 +50,7 @@ expect() {  # expect ok|fail "description" cmd...
 }
 
 ping_fw()  { in_cli ping -c1 -W1 "$FW_IP"; }
+ping_fw2() { in_cli ping -c1 -W1 "$FW_IP2"; }
 tcp_to_fw()  { in_cli nc -z -w1 "$FW_IP" "$1"; }
 tcp_to_cli() { in_fw  nc -z -w1 "$CLI_IP" "$1"; }
 udp_echo_fw() { in_cli bash -c "echo hi | nc -u -w1 $FW_IP $1 | grep -q hi"; }
@@ -52,6 +58,7 @@ stat_of() { mfw stats --json | python3 -c "import json,sys; print(json.load(sys.
 
 reset_policy() {
     mfw no ip access-group in veth-fw >/dev/null 2>&1
+    mfw no ip access-group in veth-fw2 >/dev/null 2>&1
     for l in 10 20 100 101 110; do mfw no ip access-list $l >/dev/null 2>&1; done
 }
 
@@ -61,8 +68,12 @@ ip netns add "$CLI"; ip netns add "$FW"
 ip link add veth-cli netns "$CLI" type veth peer name veth-fw netns "$FW"
 in_cli ip addr add $CLI_IP/24 dev veth-cli; in_cli ip link set veth-cli up; in_cli ip link set lo up
 in_fw  ip addr add $FW_IP/24  dev veth-fw;  in_fw  ip link set veth-fw up;  in_fw  ip link set lo up
+ip link add veth-cli2 netns "$CLI" type veth peer name veth-fw2 netns "$FW"
+in_cli ip addr add $CLI_IP2/24 dev veth-cli2; in_cli ip link set veth-cli2 up
+in_fw  ip addr add $FW_IP2/24  dev veth-fw2;  in_fw  ip link set veth-fw2 up
 # GRO on the peer lets native veth XDP see normal frames; harmless otherwise.
 in_cli ethtool -K veth-cli gro on >/dev/null 2>&1 || true
+in_cli ethtool -K veth-cli2 gro on >/dev/null 2>&1 || true
 
 # listeners: TCP 8080/8081 on fw, TCP 9090 on cli, UDP echo 5353 on fw
 for port in 8080 8081; do
@@ -125,6 +136,26 @@ reset_policy
 echo "== empty extended list bound = deny all IPv4"
 mfw ip access-group 101 in veth-fw   # list 101 has no ACEs
 expect fail "ping with bound empty list" ping_fw
+reset_policy
+
+echo "== per-interface lists"
+expect ok "attach second interface" mfw attach -i veth-fw2
+mfw ip access-list 100 permit tcp any any eq 8080
+mfw ip access-group 100 in veth-fw
+expect fail "veth-fw: ping hits list 100's implicit deny" ping_fw
+expect ok   "veth-fw2: no list, ping passes" ping_fw2
+mfw ip access-list 20 deny host $CLI_IP2
+mfw ip access-group 20 in veth-fw2
+expect fail "veth-fw2: its own blacklist" ping_fw2
+expect ok   "veth-fw: list 20 not applied there" tcp_to_fw 8080
+expect ok   "show ip access-group lists both" \
+    bash -c "$MFW show ip access-group | grep -q 'veth-fw  .*100' &&
+             $MFW show ip access-group | grep -q 'veth-fw2 .*20'"
+mfw no ip access-group in veth-fw
+expect ok   "veth-fw: unbound, ping passes" ping_fw
+expect fail "veth-fw2: still blocked" ping_fw2
+expect ok   "detach veth-fw2" mfw detach -i veth-fw2
+expect ok   "veth-fw2: detached, ping passes" ping_fw2
 reset_policy
 
 echo "== XDP only; egress is never filtered"

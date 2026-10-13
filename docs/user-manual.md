@@ -62,7 +62,7 @@ mfw version
 ```
 
 ```text
-mfw 0.1.0 (stateless ACL), ABI 1
+mfw 0.2.0 (stateless ACL, per-interface), ABI 2
 ```
 
 On Debian/Ubuntu the build dependencies are:
@@ -120,9 +120,10 @@ Writing rules and enforcing them are separate steps, as on Cisco IOS:
 2. `mfw ip access-group <list> in <iface>` **binds** the list. From now on
    it is enforced, and later edits to the list take effect immediately.
 
-You can bind at most **one standard and one extended list** at a time.
-Bindings apply to **all attached interfaces** (the interface name is
-recorded for display only).
+Each interface can have **one standard and one extended list** bound, and
+different interfaces can have different lists. A packet is checked against
+the lists of the interface it arrived on. An attached interface with no
+lists bound accepts everything.
 
 ### 3.4 Replies are inbound too
 
@@ -470,15 +471,20 @@ reply rule (§3.4).
 ```bash
 sudo mfw show ip access-lists          # all lists; bound ones are marked [in <iface>]
 sudo mfw show ip access-lists 100      # one list
-sudo mfw show ip access-group          # what is bound
+sudo mfw show ip access-group          # what is bound, per interface
+sudo mfw show ip access-group eth0     # one interface
 ```
 
 ```text
-standard in  list 10  (via eth0)
-extended in  list 100 (via eth0)
+Interface        Standard in  Extended in
+eth0             10           100
+eth1             -            110
 ```
 
-An unbound slot shows `not set (fail-open)`.
+`-` means no list of that kind is bound (fail-open for that list). An
+interface whose lists are kept but which is no longer attached is marked
+`(not attached)`. With nothing bound anywhere, it prints
+`No access-group set: fail-open`.
 
 ---
 
@@ -487,14 +493,14 @@ An unbound slot shows `not set (fail-open)`.
 | Command | What it does |
 |---------|--------------|
 | `mfw attach -i <iface> [--xdp-mode native\|generic\|auto]` | Load mini-fw on an interface. Default mode `auto` tries native XDP, then falls back to generic. Running it again on the same interface replaces the program without a gap. |
-| `mfw detach -i <iface>` | Remove mini-fw from an interface. Lists and bindings are kept. |
+| `mfw detach -i <iface>` | Remove mini-fw from an interface. Lists and bindings are kept, and apply again after the next `attach`. |
 | `mfw detach -i <iface> --purge-maps` | Also delete all lists, bindings and counters. Refused while other interfaces are still attached. |
 | `mfw ip access-list <list> [<seq>] …` | Add a rule (§5). |
 | `mfw no ip access-list <list> [<seq>]` | Delete a rule or a whole list. |
-| `mfw ip access-group <list> in <iface>` | Bind a list. Replaces any list of the same kind that was bound. The interface must be attached. |
-| `mfw no ip access-group [<list>] in <iface>` | Unbind both lists, or just `<list>`. |
+| `mfw ip access-group <list> in <iface>` | Bind a list to that interface. Replaces the list of the same kind bound there; other interfaces are not affected. The interface must be attached. |
+| `mfw no ip access-group [<list>] in <iface>` | Unbind both of the interface's lists, or just `<list>`. |
 | `mfw show ip access-lists [<list>]` | Print lists. |
-| `mfw show ip access-group [<iface>]` | Print bindings. |
+| `mfw show ip access-group [<iface>]` | Print bindings per interface. |
 | `mfw stats [--json]` | Print counters. |
 | `mfw set drop-ipv4-fragments 0\|1` | 1 drops every IPv4 fragment. Default 0. |
 | `mfw set-default deny` | Accepted for Cisco compatibility; does nothing. `allow` is rejected. |
@@ -605,7 +611,7 @@ sudo rm -r /sys/fs/bpf/mfw               # removes all state
 | `load BPF object: …` | kernel too old (< 5.12), no BTF, or not root | check §1.2; rerun with `MFW_DEBUG=1` to see the verifier log |
 | `XDP attach on eth0 (auto): …` (or `native` / `generic`) | another XDP program is already attached, or the driver rejects XDP | check `ip link show eth0` for an existing `xdp` program and remove it; try `--xdp-mode generic` |
 | `eth0 is not attached` when binding | `access-group` needs an attached interface | `mfw attach -i eth0` first |
-| `pinned maps have ABI N, expected 1` | state left by a different mfw version | `mfw detach -i <iface> --purge-maps`, then attach again |
+| `pinned maps have ABI N, expected 2`, or `… is from an older mini-fw` | state left by a different mfw version | `mfw detach -i <iface> --purge-maps`, then attach again |
 | DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show ip access-lists`; watch `ext_implicit_deny` / `ext_deny` while testing |
@@ -622,7 +628,8 @@ Useful low-level checks:
 ```bash
 ip link show eth0                                   # shows "xdp" or "xdpgeneric" when attached
 sudo bpftool prog show name mfw_xdp
-sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/acl_ext
+sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/rulesets   # ifindex → inner map id
+sudo bpftool map dump id <inner map id>                       # that interface's ruleset
 ```
 
 ---
@@ -637,7 +644,9 @@ accepts then go through netfilter as usual.
 No. mini-fw only filters inbound traffic.
 
 **Can I use different lists on different interfaces?**
-Not currently. Bindings apply to every attached interface.
+Yes. Bind each interface's lists with `ip access-group … in <iface>`. A
+packet is checked against the lists of the interface it arrived on. VLAN
+subinterfaces share their parent's lists.
 
 **What happens if I attach but bind nothing?**
 Nothing is blocked. mfw only counts packets.

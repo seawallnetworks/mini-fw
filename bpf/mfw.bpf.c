@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* mini-fw dataplane — step 1: stateless, ingress-only ACLs for a local host.
- * One XDP program evaluates, in order:
+ * One XDP program, attached to every protected interface, looks up the
+ * ruleset of the interface the packet arrived on and evaluates, in order:
  *
  *   1. standard ACL (1–99): source-only blacklist; explicit deny → DROP,
  *      permit or miss → continue.
  *   2. extended ACL (100–199): permit → PASS; deny or no match → DROP
  *      (implicit deny when bound).
  *
- * Egress is not filtered. Unbound lists are fail-open. Non-IPv4 always
- * passes. No conntrack yet, so return traffic must be permitted explicitly
+ * Egress is not filtered. Unbound lists, and interfaces without a ruleset,
+ * are fail-open. Non-IPv4 always passes. No conntrack yet, so return traffic must be permitted explicitly
  * (or via "established").
  */
 #include <linux/bpf.h>
@@ -37,21 +38,23 @@ struct vlan_hdr {
     __be16 h_vlan_encapsulated_proto;
 };
 
-struct {
+/* ifindex → inner map holding that interface's one mfw_ruleset. Sizes,
+ * not BTF types: clang emits struct mfw_ruleset only as a forward
+ * declaration here, and userspace creates the inner maps without BTF. */
+struct ruleset_map {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MFW_MAX_STD_ACES);
-    __type(key, __u32);
-    __type(value, struct mfw_rule);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} acl_std SEC(".maps");
+    __uint(max_entries, 1);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct mfw_ruleset));
+};
 
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MFW_MAX_EXT_ACES);
+    __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+    __uint(max_entries, MFW_MAX_IFACES);
     __type(key, __u32);
-    __type(value, struct mfw_rule);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
-} acl_ext SEC(".maps");
+    __array(values, struct ruleset_map);
+} rulesets SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -90,7 +93,7 @@ enum {
     MATCH_DENY    = 0,
     MATCH_PERMIT  = 1,
     MATCH_MISS    = -1,  /* list bound, no explicit ACE matched */
-    MATCH_UNBOUND = -2,  /* map holds no ACE: no access-group */
+    MATCH_UNBOUND = -2,  /* no access-group for this list */
 };
 
 #define TCP_FLAG_RST 0x04
@@ -210,16 +213,17 @@ static __always_inline int port_any(const struct mfw_port_range *r)
 }
 
 /* Standard ACL: blacklist. Callers treat only MATCH_DENY as drop. */
-static __always_inline int match_std(__be32 saddr)
+static __always_inline int match_std(const struct mfw_ruleset *rs, __be32 saddr)
 {
     int i;
 
+    if (!rs || !rs->std_acl)
+        return MATCH_UNBOUND;
     for (i = 0; i < MFW_MAX_STD_ACES; i++) {
-        __u32 key = i;  /* separate key: verifier must keep i in a register */
-        struct mfw_rule *r = bpf_map_lookup_elem(&acl_std, &key);
+        const struct mfw_rule *r = &rs->std[i];
 
-        if (!r || !r->enabled)
-            return i ? MATCH_MISS : MATCH_UNBOUND;  /* ACEs packed from 0 */
+        if (i >= rs->n_std)
+            break;
         if (!cidr_match(saddr, &r->src))
             continue;
         return r->action == MFW_ACTION_ALLOW ? MATCH_PERMIT : MATCH_DENY;
@@ -253,24 +257,36 @@ __noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_info
     return 1;
 }
 
-/* Extended ACL. Reaching the synthetic implicit-deny ACE reports MATCH_MISS
- * (counted separately from explicit deny ACEs). */
-static __always_inline int match_ext(const struct pkt_info *p)
+/* Extended ACL. Running off the end of a bound list reports MATCH_MISS:
+ * the implicit deny, counted separately from explicit deny ACEs. A bound
+ * list with no ACEs denies everything. */
+static __always_inline int match_ext(const struct mfw_ruleset *rs,
+                                     const struct pkt_info *p)
 {
     int i;
 
+    if (!rs || !rs->ext_acl)
+        return MATCH_UNBOUND;
     for (i = 0; i < MFW_MAX_EXT_ACES; i++) {
-        __u32 key = i;  /* separate key: verifier must keep i in a register */
-        struct mfw_rule *r = bpf_map_lookup_elem(&acl_ext, &key);
+        const struct mfw_rule *r = &rs->ext[i];
 
-        if (!r || !r->enabled)
-            return i ? MATCH_MISS : MATCH_UNBOUND;
-        if (r->flags & MFW_RULE_F_IMPLICIT)
-            return MATCH_MISS;
+        if (i >= rs->n_ext)
+            break;
         if (mfw_ext_ace_match(r, p))
             return r->action == MFW_ACTION_ALLOW ? MATCH_PERMIT : MATCH_DENY;
     }
     return MATCH_MISS;
+}
+
+/* The ruleset of the interface the packet arrived on, or NULL. */
+static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex)
+{
+    __u32 zero = 0;
+    void *inner = bpf_map_lookup_elem(&rulesets, &ifindex);
+
+    if (!inner)
+        return NULL;
+    return bpf_map_lookup_elem(inner, &zero);
 }
 
 SEC("xdp")
@@ -279,6 +295,7 @@ int mfw_xdp(struct xdp_md *ctx)
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct pkt_info p = {};
+    const struct mfw_ruleset *rs;
     int pr = parse_pkt(data, data_end, &p);
     int std;
 
@@ -295,15 +312,17 @@ int mfw_xdp(struct xdp_md *ctx)
         goto drop;
     }
 
+    rs = ruleset_of(ctx->ingress_ifindex);
+
     /* 1. Standard blacklist: only an explicit deny is final. */
-    std = match_std(p.saddr);
+    std = match_std(rs, p.saddr);
     if (std == MATCH_DENY) {
         stat_inc(MFW_STAT_STD_DENY);
         goto drop;
     }
 
     /* 2. Extended list decides everything else. */
-    switch (match_ext(&p)) {
+    switch (match_ext(rs, &p)) {
     case MATCH_PERMIT:
         stat_inc(MFW_STAT_EXT_PERMIT);
         goto pass;

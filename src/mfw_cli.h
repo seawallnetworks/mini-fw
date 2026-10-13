@@ -20,17 +20,12 @@
 
 #define MFW_ACL_DB_MAX 4096
 
-/* bindings map index: ingress only (egress is not filtered); both run in XDP */
-enum mfw_bind_slot {
-    MFW_BIND_STD_IN = 0,   /* standard list (1-99) */
-    MFW_BIND_EXT_IN,       /* extended list (100-199) */
-    MFW_BIND_MAX,
-};
-
+/* state/bindings: ifindex → the inbound lists bound on that interface
+ * (egress is not filtered; both lists run in XDP) */
 struct mfw_binding {
-    __u16 acl_id;      /* 0 = unbound */
-    __u16 pad;
-    char  ifname[16];  /* informational: maps are host-global in v1 */
+    __u16 std_acl;     /* standard list (1-99), 0 = none */
+    __u16 ext_acl;     /* extended list (100-199), 0 = none */
+    char  ifname[16];  /* for display and to notice a reused ifindex */
 };
 
 /* acl_db key: one ACE per (list, seq) */
@@ -64,8 +59,11 @@ int cmd_no_access_list(int argc, char **argv);
 int cmd_access_group(int argc, char **argv, int negate);
 int cmd_show_access_lists(int argc, char **argv);
 int cmd_show_access_group(int argc, char **argv);
-/* Push bound lists into acl_std/acl_ext if dataplane maps are pinned. */
+/* Build each attached interface's ruleset and swap it in, if the dataplane
+ * maps are pinned. */
 int mfw_materialize(void);
+/* Remove ifindex's ruleset (detach); bindings are kept for a re-attach. */
+void mfw_forget_iface(__u32 ifindex);
 
 /* ---- loader.c ---- */
 int cmd_attach(int argc, char **argv);
