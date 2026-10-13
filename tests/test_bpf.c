@@ -127,7 +127,7 @@ static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s
 #define XDP(...)        run(skel->progs.mfw_xdp, if0, &(struct pkt_spec){ __VA_ARGS__ })
 #define XDP_ON(i, ...)  run(skel->progs.mfw_xdp, (i), &(struct pkt_spec){ __VA_ARGS__ })
 
-/* ---- rule loading (mirrors acl.c materialization) ---- */
+/* ---- rule loading (mirrors mfw_policy_compile() and dataplane.c) ---- */
 
 static struct mfw_ruleset rs;   /* being built */
 
@@ -167,7 +167,7 @@ static void add(const char *line)
     }
 }
 
-/* Swaps the ruleset built so far in on ifindex, as acl.c does. */
+/* Swaps the ruleset built so far in on ifindex, as dataplane.c does. */
 static void commit_on(__u32 ifindex)
 {
     __u32 zero = 0;

@@ -267,7 +267,7 @@ Everything one interface enforces, compiled from its bindings:
 |-------|---------|
 | `default_action` | ABI only. Always DENY and ignored by BPF (design K10) |
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
-| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets). `attach` refuses pinned maps with another version |
+| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets). mfwd refuses to start on pinned maps with another version |
 | `generation` | bumped after each successful materialization |
 
 ### 4.4 Maps
