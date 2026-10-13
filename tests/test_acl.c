@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "mfw_cli.h"
+#include "mfw_policy.h"
 
 static int failures;
 
@@ -39,20 +39,29 @@ static void roundtrip(const char *line, const char *want)
     char err[160], out[160];
     int rc = parse(line, &r, err);
 
-    CHECK(rc == EXIT_OK, "'%s' rejected: %s", line, err);
+    CHECK(rc == 0, "'%s' rejected: %s", line, err);
     if (rc)
         return;
     mfw_format_ace(&r, out, sizeof(out));
     CHECK(!strcmp(out, want), "'%s' → '%s', want '%s'", line, out, want);
+
+    struct mfw_rule r2;
+
+    CHECK(mfw_parse_ace_line(line, &r2, err, sizeof(err)) == 0 && !memcmp(&r, &r2, sizeof(r)),
+          "'%s': mfw_parse_ace_line differs", line);
 }
 
-static void reject(const char *line, int want_rc)
+/* Must be refused, with a reason; mfw_parse_ace_line() must agree. */
+static void reject(const char *line)
 {
     struct mfw_rule r;
-    char err[160] = "";
+    char err[160] = "", err2[160] = "";
     int rc = parse(line, &r, err);
 
-    CHECK(rc == want_rc, "'%s' rc=%d want %d (%s)", line, rc, want_rc, err);
+    CHECK(rc == -1 && *err, "'%s' rc=%d, want -1 and a reason (%s)", line, rc, err);
+    rc = mfw_parse_ace_line(line, &r, err2, sizeof(err2));
+    CHECK(rc == -1 && !strcmp(err, err2), "'%s': mfw_parse_ace_line rc=%d (%s)",
+          line, rc, err2);
 }
 
 static void test_wildcard(void)
@@ -121,23 +130,23 @@ int main(void)
     roundtrip("150 permit 47 any any", "permit 47 any any");
 
     /* Rejections */
-    reject("0 deny any", EXIT_VALIDATION);
-    reject("200 deny ip any any", EXIT_VALIDATION);
-    reject("10 deny host 10.0.0.1 eq 22", EXIT_VALIDATION);       /* ports on std */
-    reject("10 deny host 10.0.0.1 host 10.0.0.2", EXIT_VALIDATION); /* dst on std */
-    reject("10 deny 10.0.0.0 0.0.2.255", EXIT_VALIDATION);       /* non-contiguous */
-    reject("10 deny 10.0.0.0/33", EXIT_VALIDATION);
-    reject("10 deny host 300.1.1.1", EXIT_VALIDATION);
-    reject("100 permit icmp any eq 5 any", EXIT_VALIDATION);     /* ports on icmp */
-    reject("100 permit ip any any eq 80", EXIT_VALIDATION);
-    reject("100 permit udp any any established", EXIT_VALIDATION);
-    reject("100 permit tcp any any range 90 80", EXIT_VALIDATION);
-    reject("100 permit tcp any any eq 0", EXIT_VALIDATION);      /* port 0 = any sentinel */
-    reject("100 permit tcp 10.0.0.1 any", EXIT_VALIDATION);      /* ext needs wildcard/host */
-    reject("100 permit bogus any any", EXIT_VALIDATION);
-    reject("100 permit", EXIT_USAGE);
-    reject("100 frob ip any any", EXIT_VALIDATION);
-    reject("100 0 permit ip any any", EXIT_VALIDATION);          /* seq 0 */
+    reject("0 deny any");
+    reject("200 deny ip any any");
+    reject("10 deny host 10.0.0.1 eq 22");       /* ports on std */
+    reject("10 deny host 10.0.0.1 host 10.0.0.2"); /* dst on std */
+    reject("10 deny 10.0.0.0 0.0.2.255");       /* non-contiguous */
+    reject("10 deny 10.0.0.0/33");
+    reject("10 deny host 300.1.1.1");
+    reject("100 permit icmp any eq 5 any");     /* ports on icmp */
+    reject("100 permit ip any any eq 80");
+    reject("100 permit udp any any established");
+    reject("100 permit tcp any any range 90 80");
+    reject("100 permit tcp any any eq 0");      /* port 0 = any sentinel */
+    reject("100 permit tcp 10.0.0.1 any");      /* ext needs wildcard/host */
+    reject("100 permit bogus any any");
+    reject("100 permit");
+    reject("100 frob ip any any");
+    reject("100 0 permit ip any any");          /* seq 0 */
 
     if (failures) {
         printf("%d failure(s)\n", failures);

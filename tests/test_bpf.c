@@ -20,7 +20,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-#include "mfw_cli.h"
+#include "mfw_policy.h"
 #include "mfw.skel.h"
 
 static struct mfw_bpf *skel;

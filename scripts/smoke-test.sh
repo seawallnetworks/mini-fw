@@ -1,46 +1,56 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
-# End-to-end smoke test for stateless mini-fw in two network namespaces:
+# End-to-end smoke test: real traffic through mfwd in two network
+# namespaces.
 #
-#   [mfw-cli 10.200.0.1] --veth-- [mfw-fw 10.200.0.2, mfw attached on veth-fw]
-#   [mfw-cli 10.201.0.1] --veth-- [mfw-fw 10.201.0.2, mfw attached on veth-fw2]
+#   [mfw-cli 10.200.0.1] --veth-- [mfw-fw 10.200.0.2  veth-fw ]
+#   [mfw-cli 10.201.0.1] --veth-- [mfw-fw 10.201.0.2  veth-fw2]
 #
-# The second pair checks that each interface enforces only its own lists.
-#
-# Uses nsenter --net (not "ip netns exec") so the host's /sys/fs/bpf stays
-# visible and pins persist between mfw invocations. Needs root.
+# mfwd runs in mfw-fw with its own pin root, socket and state directory,
+# so this runs next to a live mini-fw without touching it. The second veth
+# pair checks that each interface enforces only its own lists. Needs root.
 set -u
 
-MFW=${MFW:-$(cd "$(dirname "$0")/.." && pwd)/mfw}
-CLI=mfw-cli FW=mfw-fw
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+MFWD=$ROOT/mfwd MFW=$ROOT/mfw
+CLI=mfw-cli-$$ FW=mfw-fw-$$
 CLI_IP=10.200.0.1 FW_IP=10.200.0.2
 CLI_IP2=10.201.0.1 FW_IP2=10.201.0.2
-PASS=0 FAIL=0
+PINS=/sys/fs/bpf/mfw-smoke-$$
+TMP=$(mktemp -d)
+SOCK=$TMP/sock
+PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
-[[ -x $MFW ]] || { echo "build first: make"; exit 1; }
-if [[ -e /sys/fs/bpf/mfw ]]; then
-    echo "/sys/fs/bpf/mfw already exists; refusing to clobber a live mini-fw"
-    exit 1
-fi
+[[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
 
 in_cli() { ip netns exec "$CLI" "$@"; }
 in_fw()  { ip netns exec "$FW" "$@"; }
-mfw()    { nsenter --net=/var/run/netns/$FW "$MFW" "$@"; }
+mfw()    { "$MFW" -s "$SOCK" "$@"; }
+
+start_mfwd() {
+    # nsenter (not ip netns exec, which hides the host's bpffs) execs mfwd
+    nsenter --net=/var/run/netns/$FW "$MFWD" -s "$SOCK" -p "$PINS" -d "$TMP/state" \
+        >>"$TMP/log" 2>&1 &
+    PID=$!
+    for _ in $(seq 50); do mfw ping >/dev/null 2>&1 && return; sleep 0.1; done
+    echo "mfwd did not start:"; cat "$TMP/log"; exit 1
+}
+stop_mfwd() { kill "$PID"; wait "$PID" 2>/dev/null; PID=; }
 
 cleanup() {
+    [[ -n $PID ]] && stop_mfwd
+    "$MFWD" -P -p "$PINS" -d "$TMP/state" >/dev/null 2>&1
     for ns in "$CLI" "$FW"; do
         ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
+        ip netns del "$ns" 2>/dev/null
     done
-    mfw detach -i veth-fw2 >/dev/null 2>&1
-    mfw detach -i veth-fw --purge-maps >/dev/null 2>&1
-    ip netns del "$CLI" 2>/dev/null
-    ip netns del "$FW" 2>/dev/null
+    rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 expect() {  # expect ok|fail "description" cmd...
-    local want=$1 desc=$2; shift 2
+    local want=$1 desc=$2 got; shift 2
     if "$@" >/dev/null 2>&1; then got=ok; else got=fail; fi
     if [[ $got == "$want" ]]; then
         PASS=$((PASS + 1)); echo "  ok   $desc"
@@ -49,6 +59,9 @@ expect() {  # expect ok|fail "description" cmd...
     fi
 }
 
+# the policy, one item per argument
+policy() { printf '%s\n' "$@" | mfw apply >/dev/null; }
+
 ping_fw()  { in_cli ping -c1 -W1 "$FW_IP"; }
 ping_fw2() { in_cli ping -c1 -W1 "$FW_IP2"; }
 tcp_to_fw()  { in_cli nc -z -w1 "$FW_IP" "$1"; }
@@ -56,21 +69,14 @@ tcp_to_cli() { in_fw  nc -z -w1 "$CLI_IP" "$1"; }
 udp_echo_fw() { in_cli bash -c "echo hi | nc -u -w1 $FW_IP $1 | grep -q hi"; }
 stat_of() { mfw stats --json | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
-reset_policy() {
-    mfw no ip access-group in veth-fw >/dev/null 2>&1
-    mfw no ip access-group in veth-fw2 >/dev/null 2>&1
-    for l in 10 20 100 101 110; do mfw no ip access-list $l >/dev/null 2>&1; done
-}
-
 # ---- topology ----
-cleanup
 ip netns add "$CLI"; ip netns add "$FW"
 ip link add veth-cli netns "$CLI" type veth peer name veth-fw netns "$FW"
-in_cli ip addr add $CLI_IP/24 dev veth-cli; in_cli ip link set veth-cli up; in_cli ip link set lo up
-in_fw  ip addr add $FW_IP/24  dev veth-fw;  in_fw  ip link set veth-fw up;  in_fw  ip link set lo up
 ip link add veth-cli2 netns "$CLI" type veth peer name veth-fw2 netns "$FW"
-in_cli ip addr add $CLI_IP2/24 dev veth-cli2; in_cli ip link set veth-cli2 up
-in_fw  ip addr add $FW_IP2/24  dev veth-fw2;  in_fw  ip link set veth-fw2 up
+in_cli ip addr add $CLI_IP/24 dev veth-cli; in_cli ip addr add $CLI_IP2/24 dev veth-cli2
+in_fw  ip addr add $FW_IP/24 dev veth-fw;   in_fw  ip addr add $FW_IP2/24 dev veth-fw2
+for i in veth-cli veth-cli2 lo; do in_cli ip link set $i up; done
+for i in veth-fw veth-fw2 lo; do in_fw ip link set $i up; done
 # GRO on the peer lets native veth XDP see normal frames; harmless otherwise.
 in_cli ethtool -K veth-cli gro on >/dev/null 2>&1 || true
 in_cli ethtool -K veth-cli2 gro on >/dev/null 2>&1 || true
@@ -91,95 +97,82 @@ sleep 0.5
 echo "== baseline (no mini-fw)"
 expect ok "ping" ping_fw
 
-echo "== attach, nothing bound (fail-open)"
-expect ok "attach" mfw attach -i veth-fw
+echo "== mfwd running, empty policy"
+start_mfwd
 expect ok "ping" ping_fw
-expect ok "tcp 8080" tcp_to_fw 8080
-expect ok "re-attach replaces in place" mfw attach -i veth-fw
-expect ok "ping after re-attach" ping_fw
+expect ok "nothing attached" bash -c "! ip -n $FW link show veth-fw | grep -q ' xdp'"
 
-echo "== standard ACL @ XDP (blacklist)"
-mfw ip access-list 10 deny host $CLI_IP
-mfw ip access-list 10 permit any
-mfw ip access-group 10 in veth-fw
+echo "== standard list (blacklist)"
+policy "acl 10 10 deny host $CLI_IP" "acl 10 20 permit any" "bind veth-fw in 10"
+expect ok   "XDP attached by the policy" bash -c "ip -n $FW link show veth-fw | grep -q ' xdp'"
 expect fail "ping from denied host" ping_fw
 expect ok   "std_deny counted" test "$(stat_of std_deny)" -gt 0
-mfw no ip access-list 10 10
+policy "acl 10 20 permit any" "bind veth-fw in 10"
 expect ok   "ping after removing the deny ACE" ping_fw
-mfw ip access-list 10 5 deny 10.200.0.0 0.0.0.255
+policy "acl 10 5 deny 10.200.0.0 0.0.0.255" "acl 10 20 permit any" "bind veth-fw in 10"
 expect fail "ping denied by wildcard ACE at seq 5" ping_fw
-reset_policy
-expect ok   "ping after unbinding" ping_fw
+policy "acl 10 10 deny host 192.0.2.1" "bind veth-fw in 10"
+expect ok   "ping not on the blacklist (no implicit deny)" ping_fw
+policy
+expect ok   "empty policy: ping" ping_fw
+expect ok   "empty policy: detached" bash -c "! ip -n $FW link show veth-fw | grep -q ' xdp'"
 
-echo "== standard list, miss → pass (no implicit deny)"
-mfw ip access-list 10 deny host 192.0.2.1
-mfw ip access-group 10 in veth-fw
-expect ok "ping (not on blacklist)" ping_fw
-reset_policy
-
-echo "== extended ACL @ XDP (implicit deny)"
-mfw ip access-list 100 permit tcp any host $FW_IP eq 8080
-mfw ip access-list 100 permit icmp any any
-mfw ip access-list 100 permit udp any any eq 5353
-mfw ip access-group 100 in veth-fw
+echo "== extended list (implicit deny)"
+EXT=("acl 100 10 permit tcp any host $FW_IP eq 8080"
+     "acl 100 20 permit icmp any any"
+     "acl 100 30 permit udp any any eq 5353")
+policy "${EXT[@]}" "bind veth-fw in 100"
 expect ok   "tcp 8080 permitted" tcp_to_fw 8080
 expect fail "tcp 8081 implicit deny" tcp_to_fw 8081
 expect ok   "ping permitted" ping_fw
 expect ok   "udp 5353 echo (egress never filtered)" udp_echo_fw 5353
 expect fail "outbound tcp: SYN-ACK hits implicit deny (stateless)" tcp_to_cli 9090
 expect ok   "ext_implicit_deny counted" test "$(stat_of ext_implicit_deny)" -gt 0
-mfw ip access-list 100 permit tcp any any established
+policy "${EXT[@]}" "acl 100 40 permit tcp any any established" "bind veth-fw in 100"
 expect ok   "outbound tcp with 'established'" tcp_to_cli 9090
 expect fail "inbound SYN to 8081 still denied" tcp_to_fw 8081
-reset_policy
-
-echo "== empty extended list bound = deny all IPv4"
-mfw ip access-group 101 in veth-fw   # list 101 has no ACEs
-expect fail "ping with bound empty list" ping_fw
-reset_policy
+policy "bind veth-fw in 101"
+expect fail "bound empty extended list denies all IPv4" ping_fw
 
 echo "== per-interface lists"
-expect ok "attach second interface" mfw attach -i veth-fw2
-mfw ip access-list 100 permit tcp any any eq 8080
-mfw ip access-group 100 in veth-fw
+policy "acl 100 10 permit tcp any any eq 8080" "bind veth-fw in 100"
 expect fail "veth-fw: ping hits list 100's implicit deny" ping_fw
-expect ok   "veth-fw2: no list, ping passes" ping_fw2
-mfw ip access-list 20 deny host $CLI_IP2
-mfw ip access-group 20 in veth-fw2
+expect ok   "veth-fw2: not bound, ping passes" ping_fw2
+policy "acl 100 10 permit tcp any any eq 8080" "acl 20 10 deny host $CLI_IP2" \
+       "bind veth-fw in 100" "bind veth-fw2 in 20"
 expect fail "veth-fw2: its own blacklist" ping_fw2
 expect ok   "veth-fw: list 20 not applied there" tcp_to_fw 8080
-expect ok   "show ip access-group lists both" \
-    bash -c "$MFW show ip access-group | grep -q 'veth-fw  .*100' &&
-             $MFW show ip access-group | grep -q 'veth-fw2 .*20'"
-mfw no ip access-group in veth-fw
+policy "acl 20 10 deny host $CLI_IP2" "bind veth-fw2 in 20"
 expect ok   "veth-fw: unbound, ping passes" ping_fw
 expect fail "veth-fw2: still blocked" ping_fw2
-expect ok   "detach veth-fw2" mfw detach -i veth-fw2
-expect ok   "veth-fw2: detached, ping passes" ping_fw2
-reset_policy
+
+echo "== mfwd down: filtering goes on"
+stop_mfwd
+expect fail "veth-fw2 still blocked without mfwd" ping_fw2
+start_mfwd
+expect fail "veth-fw2 still blocked after restart" ping_fw2
+expect ok   "policy kept" bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
+policy
 
 echo "== XDP only; egress is never filtered"
+policy "acl 100 10 permit ip any any" "bind veth-fw in 100"
 expect ok   "no TC filters attached" \
-    bash -c "! nsenter --net=/var/run/netns/$FW tc filter show dev veth-fw ingress | grep -q . &&
-             ! nsenter --net=/var/run/netns/$FW tc filter show dev veth-fw egress | grep -q ."
-expect ok   "XDP program attached" \
-    bash -c "nsenter --net=/var/run/netns/$FW ip link show veth-fw | grep -q xdp"
-expect fail "access-group out rejected" mfw ip access-group 100 out veth-fw
+    bash -c "! ip netns exec $FW tc filter show dev veth-fw ingress | grep -q . &&
+             ! ip netns exec $FW tc filter show dev veth-fw egress | grep -q ."
+expect fail "bind ... out refused" policy "bind veth-fw out 100"
+expect fail "ports on a standard list refused" policy "acl 10 10 deny host 1.1.1.1 eq 22"
+expect fail "non-contiguous wildcard refused" policy "acl 10 10 deny 10.0.0.0 0.0.2.255"
+expect ok   "refusals left the policy in place" ping_fw
 
-echo "== CLI validation"
-expect fail "ports on standard list" mfw ip access-list 10 deny host 1.1.1.1 eq 22
-expect fail "non-contiguous wildcard" mfw ip access-list 10 deny 10.0.0.0 0.0.2.255
-expect fail "access-group on unattached iface" mfw ip access-group 10 in lo
-expect fail "set-default allow" mfw set-default allow
+echo "== stats"
+expect ok "stats json" bash -c "$MFW -s $SOCK stats --json | python3 -m json.tool"
 
-echo "== stats: one outcome per packet"
-expect ok "stats json" mfw stats --json
-
-echo "== detach --purge-maps"
-expect ok "detach" mfw detach -i veth-fw --purge-maps
-expect ok "pins removed" test ! -e /sys/fs/bpf/mfw
-expect ok "ping after detach" ping_fw
-expect ok "tcp 8081 after detach" tcp_to_fw 8081
+echo "== purge"
+stop_mfwd
+expect ok "mfwd -P" "$MFWD" -P -p "$PINS" -d "$TMP/state"
+expect ok "pins removed" test ! -e "$PINS"
+expect ok "ping after purge" ping_fw
+expect ok "tcp 8081 after purge" tcp_to_fw 8081
 
 echo
 echo "smoke: $PASS passed, $FAIL failed"

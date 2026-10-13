@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
-/* Cisco IOS ACE parsing / formatting. No libbpf, no kernel: unit-testable. */
+/* Cisco IOS ACE parsing / formatting. No libbpf, no kernel: unit-testable.
+ * Part of libmfw.a. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -7,16 +8,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mfw_cli.h"
+#include "mfw_policy.h"
 
-static int fail(char *err, size_t len, int code, const char *fmt, ...)
+/* Puts the message in err and returns -1. */
+static int fail(char *err, size_t len, const char *fmt, ...)
 {
     va_list ap;
 
     va_start(ap, fmt);
     vsnprintf(err, len, fmt, ap);
     va_end(ap);
-    return code;
+    return -1;
 }
 
 static int parse_uint(const char *s, long min, long max, long *out)
@@ -75,20 +77,19 @@ static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
 
     memset(c, 0, sizeof(*c));
     if (!tok)
-        return fail(err, errlen, EXIT_USAGE, "missing address");
+        return fail(err, errlen, "missing address");
 
     if (!strcmp(tok, "any")) {
         (*i)++;
-        return EXIT_OK;
+        return 0;
     }
     if (!strcmp(tok, "host")) {
         if (*i + 1 >= argc || mfw_parse_ipv4(argv[*i + 1], &a))
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "'host' needs an IPv4 address");
+            return fail(err, errlen, "'host' needs an IPv4 address");
         c->addr = a;
         c->prefix = 32;
         *i += 2;
-        return EXIT_OK;
+        return 0;
     }
 
     const char *slash = strchr(tok, '/');
@@ -98,39 +99,37 @@ static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         size_t n = slash - tok;
 
         if (n >= sizeof(ip))
-            return fail(err, errlen, EXIT_VALIDATION, "bad CIDR '%s'", tok);
+            return fail(err, errlen, "bad CIDR '%s'", tok);
         memcpy(ip, tok, n);
         ip[n] = '\0';
         if (mfw_parse_ipv4(ip, &a) || parse_uint(slash + 1, 0, 32, &p))
-            return fail(err, errlen, EXIT_VALIDATION, "bad CIDR '%s'", tok);
+            return fail(err, errlen, "bad CIDR '%s'", tok);
         c->prefix = (__u8)p;
         c->addr = a & prefix_mask(c->prefix);
         (*i)++;
-        return EXIT_OK;
+        return 0;
     }
 
     if (mfw_parse_ipv4(tok, &a))
-        return fail(err, errlen, EXIT_VALIDATION, "bad address '%s'", tok);
+        return fail(err, errlen, "bad address '%s'", tok);
 
     if (*i + 1 < argc && mfw_parse_ipv4(argv[*i + 1], &w) == 0) {
         int pfx = mfw_wildcard_to_prefix(w);
 
         if (pfx < 0)
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "non-contiguous wildcard '%s' not supported",
+            return fail(err, errlen, "non-contiguous wildcard '%s' not supported",
                         argv[*i + 1]);
         c->prefix = (__u8)pfx;
         c->addr = a & prefix_mask(pfx);
         *i += 2;
-        return EXIT_OK;
+        return 0;
     }
     if (!bare_host_ok)
-        return fail(err, errlen, EXIT_VALIDATION,
-                    "'%s' needs a wildcard (or use 'host %s')", tok, tok);
+        return fail(err, errlen, "'%s' needs a wildcard (or use 'host %s')", tok, tok);
     c->addr = a;
     c->prefix = 32;
     (*i)++;
-    return EXIT_OK;
+    return 0;
 }
 
 /* Optional port operand: "eq N" | "range LO HI" | "gt N" | "lt N". */
@@ -143,30 +142,27 @@ static int parse_port(int argc, char **argv, int *i, int ports_ok,
     r->min = r->max = 0;
     if (!op || (strcmp(op, "eq") && strcmp(op, "range") &&
                 strcmp(op, "gt") && strcmp(op, "lt")))
-        return EXIT_OK;  /* omitted = any */
+        return 0;  /* omitted = any */
     if (!ports_ok)
-        return fail(err, errlen, EXIT_VALIDATION,
-                    "ports are only valid with tcp or udp");
+        return fail(err, errlen, "ports are only valid with tcp or udp");
 
     if (!strcmp(op, "range")) {
         if (*i + 2 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a) ||
             parse_uint(argv[*i + 2], 1, 65535, &b) || a > b)
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "'range' needs LO HI with 1 <= LO <= HI <= 65535");
+            return fail(err, errlen, "'range' needs LO HI with 1 <= LO <= HI <= 65535");
         *i += 3;
     } else {
         if (*i + 1 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a))
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "'%s' needs a port 1-65535", op);
+            return fail(err, errlen, "'%s' needs a port 1-65535", op);
         b = a;
         if (!strcmp(op, "gt")) {
             if (a == 65535)
-                return fail(err, errlen, EXIT_VALIDATION, "'gt 65535' matches nothing");
+                return fail(err, errlen, "'gt 65535' matches nothing");
             a = a + 1;
             b = 65535;
         } else if (!strcmp(op, "lt")) {
             if (a == 1)
-                return fail(err, errlen, EXIT_VALIDATION, "'lt 1' matches nothing");
+                return fail(err, errlen, "'lt 1' matches nothing");
             b = a - 1;
             a = 1;
         }
@@ -174,7 +170,7 @@ static int parse_port(int argc, char **argv, int *i, int ports_ok,
     }
     r->min = (__u16)a;
     r->max = (__u16)b;
-    return EXIT_OK;
+    return 0;
 }
 
 static int parse_proto(const char *s, __u8 *proto)
@@ -198,19 +194,17 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
 
     memset(out, 0, sizeof(*out));
     if (argc < 2)
-        return fail(err, errlen, EXIT_USAGE, "usage: access-list <list> [seq] permit|deny ...");
+        return fail(err, errlen, "expected <list> [seq] permit|deny ...");
     if (parse_uint(argv[i++], 1, 199, &acl))
-        return fail(err, errlen, EXIT_VALIDATION,
-                    "list number must be 1-99 (standard) or 100-199 (extended)");
+        return fail(err, errlen, "list number must be 1-99 (standard) or 100-199 (extended)");
 
     if (strcmp(argv[i], "permit") && strcmp(argv[i], "deny")) {
         if (parse_uint(argv[i], 1, 65535, &seq))
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "expected permit|deny or a sequence number 1-65535, got '%s'", argv[i]);
+            return fail(err, errlen, "expected permit|deny or a sequence number 1-65535, got '%s'", argv[i]);
         i++;
     }
     if (i >= argc || (strcmp(argv[i], "permit") && strcmp(argv[i], "deny")))
-        return fail(err, errlen, EXIT_USAGE, "expected permit|deny");
+        return fail(err, errlen, "expected permit|deny");
 
     out->acl_id = (__u16)acl;
     out->seq = (__u16)seq;
@@ -223,17 +217,15 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
         if (rc)
             return rc;
         if (i < argc)
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "standard lists (1-99) match source only; unexpected '%s'", argv[i]);
-        return EXIT_OK;
+            return fail(err, errlen, "standard lists (1-99) match source only; unexpected '%s'", argv[i]);
+        return 0;
     }
 
     out->kind = MFW_ACL_EXTENDED;
     if (i >= argc)
-        return fail(err, errlen, EXIT_USAGE, "extended ACE needs a protocol");
+        return fail(err, errlen, "extended ACE needs a protocol");
     if (parse_proto(argv[i], &out->proto))
-        return fail(err, errlen, EXIT_VALIDATION,
-                    "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)", argv[i]);
+        return fail(err, errlen, "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)", argv[i]);
     i++;
 
     int ports_ok = out->proto == MFW_PROTO_TCP || out->proto == MFW_PROTO_UDP;
@@ -246,14 +238,30 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
 
     if (i < argc && !strcmp(argv[i], "established")) {
         if (out->proto != MFW_PROTO_TCP)
-            return fail(err, errlen, EXIT_VALIDATION,
-                        "'established' is only valid with tcp");
+            return fail(err, errlen, "'established' is only valid with tcp");
         out->flags |= MFW_RULE_F_ESTABLISHED;
         i++;
     }
     if (i < argc)
-        return fail(err, errlen, EXIT_VALIDATION, "unexpected '%s'", argv[i]);
-    return EXIT_OK;
+        return fail(err, errlen, "unexpected '%s'", argv[i]);
+    return 0;
+}
+
+int mfw_parse_ace_line(const char *line, struct mfw_rule *out,
+                       char *err, size_t errlen)
+{
+    char buf[256], *argv[32], *save = NULL;
+    int argc = 0;
+
+    if (strlen(line) >= sizeof(buf))
+        return fail(err, errlen, "ACE too long");
+    snprintf(buf, sizeof(buf), "%s", line);
+    for (char *t = strtok_r(buf, " \t", &save); t; t = strtok_r(NULL, " \t", &save)) {
+        if (argc == 32)
+            return fail(err, errlen, "too many words");
+        argv[argc++] = t;
+    }
+    return mfw_parse_ace(argc, argv, out, err, errlen);
 }
 
 static size_t fmt_addr(const struct mfw_cidr *c, char *buf, size_t len)

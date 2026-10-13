@@ -1,0 +1,22 @@
+[Unit]
+Description=mini-fw daemon (eBPF/XDP inbound firewall)
+Documentation=https://github.com/seawallnetworks/mini-fw
+# Front ends such as sw_configd send the policy once mfwd is up.
+Before=sw_configd.service
+
+[Service]
+# root, but only with the capabilities BPF and XDP need
+ExecStart=/usr/local/sbin/mfwd
+Restart=on-failure
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON
+ProtectSystem=strict
+ReadWritePaths=/sys/fs/bpf /run
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+# Stopping mfwd does not stop filtering: XDP stays attached through the
+# pinned links. Use "mfwd -P" to remove mini-fw from every interface.
+
+[Install]
+WantedBy=multi-user.target

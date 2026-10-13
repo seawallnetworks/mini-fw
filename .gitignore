@@ -1,5 +1,9 @@
+build/
 *.o
-*.skel.h
 /mfw
+/mfwd
+/libmfw.a
 /tests/test_acl
+/tests/test_policy
 /tests/test_bpf
+*.d
