@@ -62,8 +62,13 @@ make test             # ACE and policy parser tests
 make test-bpf         # the BPF program on crafted packets (BPF_PROG_TEST_RUN, sudo)
 make test-mfwd        # mfwd on dummy interfaces: protocol, attach/detach, restarts (sudo)
 make smoke            # real traffic through mfwd in two network namespaces (sudo)
-sudo make install     # PREFIX=/usr/local; also installs mfwd.service
+sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
+
+`/usr/local/seawall` is the prefix shared by the Seawall stack
+(libcli-plus, sw_authd, sw_configd). Its `bin` and `sbin` are not on
+`PATH`; the examples below assume they are (see the
+[user manual](docs/user-manual.md#2-installation)).
 
 The root tests use their own pin root, socket and state directory, so they
 run next to a live mini-fw without touching it.

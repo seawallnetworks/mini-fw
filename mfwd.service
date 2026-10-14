@@ -6,7 +6,7 @@ Before=sw_configd.service
 
 [Service]
 # root, but only with the capabilities BPF and XDP need
-ExecStart=/usr/local/sbin/mfwd
+ExecStart=/usr/local/seawall/sbin/mfwd
 Restart=on-failure
 CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON
 ProtectSystem=strict

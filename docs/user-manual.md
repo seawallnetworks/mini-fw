@@ -69,7 +69,7 @@ sudo mount -t bpf bpf /sys/fs/bpf
 ```bash
 git clone git@github.com:seawallnetworks/mini-fw.git && cd mini-fw
 make                     # mfwd, mfw and libmfw.a
-sudo make install        # /usr/local/{sbin/mfwd,bin/mfw,lib/libmfw.a,include/*},
+sudo make install        # /usr/local/seawall/{sbin/mfwd,bin/mfw,lib/libmfw.a,include/*},
                          # /etc/systemd/system/mfwd.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now mfwd
@@ -82,7 +82,21 @@ mfw 0.3.0, ABI 2
 mfwd is running
 ```
 
-`PREFIX` and `DESTDIR` work as usual (`make install PREFIX=/opt/mfw`).
+`/usr/local/seawall` is the prefix shared by the Seawall stack
+(libcli-plus, sw_authd, sw_configd). `PREFIX` and `DESTDIR` work as usual
+(`make install PREFIX=/opt/mfw`), but the unit runs
+`/usr/local/seawall/sbin/mfwd` whatever `PREFIX` is.
+
+The prefix's `bin` and `sbin` are not on `PATH`, and this manual runs
+`mfw` and `mfwd` by name. Add them for login shells and for `sudo`, whose
+`secure_path` replaces `PATH`:
+
+```bash
+echo 'PATH=$PATH:/usr/local/seawall/sbin:/usr/local/seawall/bin' |
+    sudo tee /etc/profile.d/seawall.sh
+sudo visudo -f /etc/sudoers.d/seawall   # append the two directories to
+                                        # the secure_path in /etc/sudoers
+```
 
 On Debian/Ubuntu the build dependencies are:
 
@@ -612,7 +626,7 @@ sudo systemctl edit mfwd
 
 ```ini
 [Service]
-ExecStartPost=/usr/local/bin/mfw apply /etc/mfw/policy
+ExecStartPost=/usr/local/seawall/bin/mfw apply /etc/mfw/policy
 ```
 
 The interfaces must exist when this runs. An interface that appears later
@@ -625,9 +639,7 @@ is reported as missing until the policy is applied again.
 ```bash
 sudo systemctl disable --now mfwd
 sudo mfwd -P                         # detaches every interface, removes all state
-sudo rm /usr/local/sbin/mfwd /usr/local/bin/mfw /usr/local/lib/libmfw.a \
-        /usr/local/include/{mfw.h,mfw_policy.h,mfw_client.h} \
-        /etc/systemd/system/mfwd.service
+sudo make uninstall                  # in the source tree, with the same PREFIX
 ```
 
 Stopping mfwd alone does **not** stop the filtering.

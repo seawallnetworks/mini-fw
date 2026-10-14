@@ -4,7 +4,8 @@ CLANG     ?= clang
 CC        ?= cc
 ARCH      ?= $(shell uname -m | sed -e 's/x86_64/x86/' -e 's/aarch64/arm64/')
 MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
-PREFIX    ?= /usr/local
+# shared by the Seawall stack (libcli-plus, sw_authd, sw_configd)
+PREFIX    ?= /usr/local/seawall
 
 CFLAGS     ?= -O2 -g -Wall -Wextra
 CFLAGS     += -Iinclude -Ibpf -Isrc -Ibuild -MMD -MP
@@ -16,7 +17,7 @@ LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
 MFWD_OBJS  := build/mfwd.o build/dataplane.o
 HEADERS    := bpf/mfw.h include/mfw_policy.h include/mfw_client.h
 
-.PHONY: all clean test test-bpf test-mfwd smoke install
+.PHONY: all clean test test-bpf test-mfwd smoke install uninstall
 all: mfwd mfw libmfw.a
 
 build:
@@ -75,6 +76,13 @@ install: all
 	install -D -m 0644 libmfw.a $(DESTDIR)$(PREFIX)/lib/libmfw.a
 	install -D -m 0644 -t $(DESTDIR)$(PREFIX)/include $(HEADERS)
 	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
+
+# removes the files only: "mfwd -P" removes mini-fw from the interfaces
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/sbin/mfwd $(DESTDIR)$(PREFIX)/bin/mfw \
+	    $(DESTDIR)$(PREFIX)/lib/libmfw.a \
+	    $(addprefix $(DESTDIR)$(PREFIX)/include/,$(notdir $(HEADERS))) \
+	    $(DESTDIR)/etc/systemd/system/mfwd.service
 
 clean:
 	rm -rf build mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d
