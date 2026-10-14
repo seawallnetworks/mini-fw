@@ -147,6 +147,10 @@ static __always_inline int parse_pkt(void *data, void *data_end,
 
     if ((void *)(ip + 1) > data_end)
         return PARSE_ERR;
+    /* The kernel's own IPv4 sanity check (ip_rcv_core()), made early:
+     * frames the stack would drop as header errors, not a protocol
+     * filter. Other ethertypes passed above, and IP protocols other
+     * than TCP/UDP are left to the lists. */
     if (ip->version != 4 || ip->ihl < 5)
         return PARSE_ERR;
     __u32 ihl = ip->ihl * 4;
@@ -172,6 +176,8 @@ static __always_inline int parse_pkt(void *data, void *data_end,
     if (p->proto == IPPROTO_TCP) {
         struct tcphdr *th = l4;
 
+        /* A first fragment too short for its ports would slip past
+         * port ACEs (tiny-fragment attack, RFC 1858). */
         if ((void *)(th + 1) > data_end)
             return PARSE_ERR;
         p->sport = bpf_ntohs(th->source);

@@ -164,6 +164,16 @@ Rules to remember:
 | Fragment offset ≠ 0 (non-first fragment) | no ports parsed (`has_ports = 0`) |
 | ICMP and other protocols | no ports; ACE port fields are ignored |
 
+These drops are not a protocol filter. The IPv4 header checks are the
+kernel's own (`ip_rcv_core()` rejects the same packets as header errors),
+and TCP/UDP drop truncated headers too; mini-fw only drops them earlier.
+The one stricter case is a first fragment too short to hold its TCP or UDP
+header, which the kernel would reassemble: it is dropped so that a tiny
+first fragment cannot hide its ports from port ACEs (RFC 1858). Traffic
+mini-fw does not filter is never dropped by the parser: other ethertypes
+(IPv6, ARP, ...) pass, and IP protocols other than TCP and UDP (GRE, ESP,
+SCTP, ...) go to the lists with their port fields ignored.
+
 All parsing uses XDP direct packet access with explicit bounds checks. The
 VLAN loop is unrolled (two iterations), so the verifier sees fixed code.
 
