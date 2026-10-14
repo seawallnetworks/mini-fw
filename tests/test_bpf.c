@@ -232,8 +232,8 @@ static void test_standard_xdp(void)
     CHECK(XDP(.ethertype = ETH_P_ARP) == XDP_PASS, "ARP pass");
     CHECK(XDP(.ethertype = ETH_P_ARP, .vlans = 1) == XDP_PASS, "tagged ARP pass");
     CHECK(XDP(.ethertype = ETH_P_IPV6) == XDP_PASS, "IPv6 pass");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == XDP_PASS,
-          "non-first frag skips the standard list");
+    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == XDP_DROP,
+          "non-first frag still matches saddr");
 }
 
 static void test_extended(void)
@@ -312,8 +312,8 @@ static void test_fragments(void)
           "non-first frag skips the extended list");
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == XDP_PASS,
           "non-first frag of any protocol skips it");
-    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_PASS,
-          "non-first frag skips the standard list");
+    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP,
+          "non-first frag still hits a standard deny");
     CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_DROP,
           "first frag hits a standard deny");
 

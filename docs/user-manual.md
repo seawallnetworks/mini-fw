@@ -425,9 +425,10 @@ acl 100 130 permit tcp any any range 50000 50100
 ### 6.7 Large UDP messages (fragments)
 
 Only the first fragment of a large UDP datagram carries ports, so only
-the first fragment is checked against your rules. The later fragments
-skip the rules and go to the kernel, which can reassemble the datagram
-only if the first fragment got in. So a rule like
+the first fragment is checked against your extended rules. The later
+fragments are checked against the standard list (source address) only,
+then go to the kernel, which can reassemble the datagram only if the
+first fragment got in. So a rule like
 `permit udp any any eq 4789` accepts the whole datagram.
 
 TCP fragments at offset 1 are always dropped and counted as

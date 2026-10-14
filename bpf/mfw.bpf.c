@@ -315,12 +315,6 @@ int mfw_xdp(struct xdp_md *ctx)
         stat_inc(MFW_STAT_FRAG_DROP);
         goto drop;
     }
-    /* Non-first fragments skip the lists: the first fragment carries the
-     * ports and is filtered, and without it the kernel cannot reassemble
-     * the datagram, so the rest expires in its reassembly queue. */
-    if (pr == PARSE_LATER_FRAG)
-        goto pass;
-
     rs = ruleset_of(ctx->ingress_ifindex);
 
     /* 1. Standard blacklist: only an explicit deny is final. */
@@ -329,6 +323,13 @@ int mfw_xdp(struct xdp_md *ctx)
         stat_inc(MFW_STAT_STD_DENY);
         goto drop;
     }
+
+    /* Non-first fragments skip the extended list: the first fragment
+     * carries the ports and is filtered, and without it the kernel cannot
+     * reassemble the datagram, so the rest expires in its reassembly
+     * queue. */
+    if (pr == PARSE_LATER_FRAG)
+        goto pass;
 
     /* 2. Extended list decides everything else. */
     switch (match_ext(rs, &p)) {

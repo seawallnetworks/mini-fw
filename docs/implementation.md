@@ -39,7 +39,7 @@ does today.** Where the two disagree, §10 explains why.
 | Router / forward mode | Not a goal: the host is an endpoint |
 | Egress filtering | Outbound traffic always leaves untouched |
 | Conntrack | Replies to outbound connections must be permitted by rules (§8.1) |
-| IPv4 fragment tracking | Non-first fragments skip the lists; the kernel reassembles (§8.2) |
+| IPv4 fragment tracking | Non-first fragments skip the extended list; the kernel reassembles (§8.2) |
 | IPv6 / ARP filtering | Non-IPv4 always passes to the kernel |
 | SYN cookies in XDP | Rely on the kernel's own `tcp_syncookies` (§8.6) |
 | Rate limiting, logging per packet | Not implemented |
@@ -132,11 +132,11 @@ frame
   │
   ├─ fragment and config.drop_ipv4_fragments = 1 ........ DROP   (frag_drop)
   │
-  ├─ non-first fragment (offset ≠ 0) .................... PASS   (§8.2)
-  │
   ├─ 1. standard list (source IP)
   │     ├─ explicit deny ................................. DROP   (std_deny)
   │     └─ explicit permit, no match, or unbound ......... continue
+  │
+  ├─ non-first fragment (offset ≠ 0) .................... PASS   (§8.2)
   │
   └─ 2. extended list
         ├─ explicit permit ............................... PASS   (ext_permit)
@@ -164,7 +164,7 @@ Rules to remember:
 | TCP header (20 bytes) beyond packet end, offset-0 packet | DROP |
 | UDP header (8 bytes) beyond packet end, offset-0 packet | DROP |
 | `MF` set or fragment offset ≠ 0 | `is_frag = 1` |
-| Fragment offset ≠ 0 (non-first fragment) | no L4 header parsed; skips the lists (§8.2) |
+| Fragment offset ≠ 0 (non-first fragment) | no L4 header parsed; skips the extended list (§8.2) |
 | TCP, fragment offset = 1 (8 bytes) | DROP (`tcp_frag_off1`) |
 | ICMP and other protocols | no ports; ACE port fields are ignored |
 
@@ -198,7 +198,8 @@ other field is ignored, so a standard ACE applies to all IPv4 protocols.
 3. For TCP and UDP only:
    `sport` and `dport` are in range; `(0,0)` means any. If the ACE has
    `established`, the TCP flags must include ACK or RST. Every packet that
-   reaches the lists has its ports: non-first fragments never get here.
+   reaches the extended list has its ports: non-first fragments never get
+   here.
 4. For ICMP and other protocols, port fields and flags are ignored.
 
 **CIDR match:** `(addr & mask) == (rule.addr & mask)` in network byte order.
@@ -534,8 +535,10 @@ unsolicited SYNs. Conntrack is the real fix (§9).
 
 ### 8.2 Fragments
 
-Non-first fragments have no ports, so the lists cannot judge them. mini-fw
-passes them to the kernel without checking either list, and the first
+Non-first fragments have no ports, so the extended list cannot judge them.
+The standard list still applies, since it needs only the source address,
+so a blacklisted source cannot fill the reassembly queue. After it, mini-fw
+passes them to the kernel without the extended list, and the first
 fragment, which carries the ports, decides: it is filtered like any other
 packet, and if it is dropped the kernel can never reassemble the datagram.
 The later fragments then sit in the reassembly queue until `ipfrag_time`
@@ -543,8 +546,8 @@ expires, bounded by `ipfrag_high_thresh`. A later fragment cannot change
 what was checked either: Linux drops the whole datagram on overlapping
 fragments, and mini-fw drops TCP fragments at offset 1 (§3.2).
 
-The price is that any orphan fragment reaches that queue, from any source,
-to any port. `drop-ipv4-fragments 1` drops all fragments for those who want
+The price is that orphan fragments from any source the standard list does
+not deny reach that queue, to any port. `drop-ipv4-fragments 1` drops all fragments for those who want
 none.
 
 The reasoning does not hold for forwarded traffic, which is never
@@ -606,7 +609,7 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 |-------|---------|-------|--------|
 | ACE parser | `make test` | nothing | wildcard→prefix, field values, normalization, canonical round trips, every rejection rule |
 | Policy | `make test` | nothing | parse and canonical form with comments and CRLF, every refusal with its line number, size limits (64/128 bound, 4096 total, 64 interfaces), compile |
-| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first skip the lists, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), stats |
+| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first: standard list only, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), stats |
 | mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart keeps policy and filtering, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, purge, no daemon |
 | End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic through mfwd between two network namespaces over two veth pairs: standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, filtering while mfwd is down and after a restart, no TC filters, refused policies, purge |
 
@@ -635,7 +638,7 @@ Notes:
 | Extended list | TC ingress and egress | XDP, after the standard list | Earliest drop; a stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
 | Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
-| Fragment tracking | Cilium-style port recovery, TC | none; non-first fragments skip the lists (§8.2), TCP offset 1 dropped | Enough for local traffic; recovery deferred |
+| Fragment tracking | Cilium-style port recovery, TC | none; non-first fragments skip the extended list (§8.2), TCP offset 1 dropped | Enough for local traffic; recovery deferred |
 | Control plane | CLI loader compiling ACEs into the maps per command | mfwd daemon, whole-policy `APPLY` over a socket; `mfw` is a client | One writer; whole-policy checks; front ends (sw_configd) link `libmfw` |
 | ACL definitions | not specified (examples define lists before attach) | in the policy; mfwd saves the applied one in `/run/mfwd/policy` | The front end (or a policy file) is the source of truth |
 | Maps (K14, K16) | `acl_std` / `acl_ext` shared by every interface | `rulesets` map-in-map: one `mfw_ruleset` per ifindex | Different lists per interface; atomic updates |

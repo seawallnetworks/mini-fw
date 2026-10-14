@@ -113,9 +113,10 @@ The socket is root-only by default (`-m`, `-g` to change that).
 - **Outbound traffic always leaves, but its replies are inbound and get
   filtered.** If you bind an extended list, also permit those replies. Use `established` for
   TCP (matches ACK or RST) and source-port ACEs for UDP. Example: `permit udp any eq 53 any`.
-- **Non-first IPv4 fragments skip the access lists** and go to the kernel.
-  The first fragment carries the ports and is filtered as usual; if it is
-  dropped, the kernel cannot reassemble the datagram. TCP fragments at
+- **Non-first IPv4 fragments skip the extended list** and go to the kernel;
+  the standard list, which needs only the source, still applies. The first
+  fragment carries the ports and is filtered as usual; if it is dropped,
+  the kernel cannot reassemble the datagram. TCP fragments at
   offset 1 are always dropped (RFC 1858, counter `tcp_frag_off1`).
   `set drop-ipv4-fragments 1` drops all fragments.
 
