@@ -424,15 +424,17 @@ acl 100 130 permit tcp any any range 50000 50100
 
 ### 6.7 Large UDP messages (fragments)
 
-Only the first fragment of a large UDP datagram carries ports, so a rule
-like `permit udp any any eq 4789` lets the first fragment in and drops the
-rest. Either permit the sender by address:
+Only the first fragment of a large UDP datagram carries ports, so only
+the first fragment is checked against your rules. The later fragments
+skip the rules and go to the kernel, which can reassemble the datagram
+only if the first fragment got in. So a rule like
+`permit udp any any eq 4789` accepts the whole datagram.
 
-```text
-acl 100 140 permit udp host 192.0.2.50 any
-```
+TCP fragments at offset 1 are always dropped and counted as
+`tcp_frag_off1`. Real TCP stacks never send them; they are an attack
+(RFC 1858).
 
-or decide not to accept fragmented traffic at all:
+To refuse fragmented traffic altogether:
 
 ```text
 set drop-ipv4-fragments 1
@@ -518,6 +520,7 @@ ext_implicit_deny  256
 parse_err          0
 frag_drop          0
 non_ipv4           223
+tcp_frag_off1      0
 ```
 
 | Counter | Meaning |
@@ -532,10 +535,11 @@ non_ipv4           223
 | `parse_err` | dropped because the IPv4 or VLAN header was malformed |
 | `frag_drop` | dropped fragments (`drop-ipv4-fragments` is 1) |
 | `non_ipv4` | non-IPv4 packets passed through unchecked |
+| `tcp_frag_off1` | dropped TCP fragments at offset 1 (an attack, RFC 1858) |
 
 The counters cover all interfaces together. `xdp_pass + xdp_drop` is the
 total packet count. Counters are cumulative and are only reset by
-`mfwd -P`. To measure a period, take two readings and subtract.
+`mfwd -P`, or by an upgrade to a version with new counters. To measure a period, take two readings and subtract.
 
 **Rising `ext_implicit_deny` right after a change** usually means a missing
 reply rule (§3.4).
@@ -668,7 +672,7 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |
-| Large UDP transfers fail | non-first fragments dropped | §6.7 |
+| Large UDP transfers fail | `drop-ipv4-fragments 1`, or the first fragment is not permitted | §6.7 |
 | IPv6 traffic not filtered | by design: only IPv4 is filtered | disable IPv6 or use ip6tables/nftables for it |
 | `list 100 already has sequence N` | duplicate sequence number | renumber one of the rules |
 | `non-contiguous wildcard` | wildcard like `0.0.2.255` | use a contiguous wildcard or CIDR |

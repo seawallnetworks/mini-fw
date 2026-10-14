@@ -188,6 +188,19 @@ static void commit(void)
     commit_on(if0);
 }
 
+static __u64 stat(__u32 id)
+{
+    int ncpu = libbpf_num_possible_cpus();
+    struct mfw_stat_value vals[ncpu];
+    __u64 sum = 0;
+
+    if (bpf_map_lookup_elem(bpf_map__fd(skel->maps.stats), &id, vals))
+        return 0;
+    for (int i = 0; i < ncpu; i++)
+        sum += vals[i].count;
+    return sum;
+}
+
 #define TCP .proto = IPPROTO_TCP
 #define UDP .proto = IPPROTO_UDP
 
@@ -219,8 +232,8 @@ static void test_standard_xdp(void)
     CHECK(XDP(.ethertype = ETH_P_ARP) == XDP_PASS, "ARP pass");
     CHECK(XDP(.ethertype = ETH_P_ARP, .vlans = 1) == XDP_PASS, "tagged ARP pass");
     CHECK(XDP(.ethertype = ETH_P_IPV6) == XDP_PASS, "IPv6 pass");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == XDP_DROP,
-          "non-first frag still matches saddr");
+    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == XDP_PASS,
+          "non-first frag skips the standard list");
 }
 
 static void test_extended(void)
@@ -285,22 +298,43 @@ static void test_established(void)
 static void test_fragments(void)
 {
     reset();
+    add("10 deny host 6.6.6.6");
+    add("100 deny udp any any eq 53");
     add("100 permit udp any any eq 4789");
-    add("100 permit ip host 3.3.3.3 any");
     commit();
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_PASS,
           "first frag has ports");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP,
-          "non-first frag cannot match a port ACE (no frag tracking yet)");
-    CHECK(XDP(.src = "3.3.3.3", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_PASS,
-          "non-first frag matches a port-less ACE");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 53, .frag_off = 0x2000) == XDP_DROP,
+          "first frag hits a port deny");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 80, .frag_off = 0x2000) == XDP_DROP,
+          "first frag hits the implicit deny");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_PASS,
+          "non-first frag skips the extended list");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == XDP_PASS,
+          "non-first frag of any protocol skips it");
+    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_PASS,
+          "non-first frag skips the standard list");
+    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_DROP,
+          "first frag hits a standard deny");
+
+    __u64 off1 = stat(MFW_STAT_TCP_FRAG_OFF1);
+
+    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 1) == XDP_DROP,
+          "TCP frag at offset 1 dropped");
+    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 0x2001) == XDP_DROP,
+          "TCP frag at offset 1 with MF dropped");
+    CHECK(stat(MFW_STAT_TCP_FRAG_OFF1) == off1 + 2, "tcp_frag_off1 counted");
+    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 2) == XDP_PASS,
+          "TCP frag at offset 2 passes");
+    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", UDP, .frag_off = 1) == XDP_PASS,
+          "UDP frag at offset 1 passes");
 
     struct mfw_config cfg = { .abi_version = MFW_ABI_VERSION, .drop_ipv4_fragments = 1 };
     __u32 k = 0;
 
     bpf_map_update_elem(bpf_map__fd(skel->maps.config), &k, &cfg, BPF_ANY);
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 0x2000) == XDP_DROP, "strict: xdp");
-    CHECK(XDP(.src = "3.3.3.3", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP, "strict: non-first frag");
+    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP, "strict: non-first frag");
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789) == XDP_PASS, "strict: unfragmented ok");
 }
 
@@ -369,19 +403,6 @@ static void test_corrupt(void)
 {
     reset();
     CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == XDP_DROP, "ihl<5 xdp");
-}
-
-static __u64 stat(__u32 id)
-{
-    int ncpu = libbpf_num_possible_cpus();
-    struct mfw_stat_value vals[ncpu];
-    __u64 sum = 0;
-
-    if (bpf_map_lookup_elem(bpf_map__fd(skel->maps.stats), &id, vals))
-        return 0;
-    for (int i = 0; i < ncpu; i++)
-        sum += vals[i].count;
-    return sum;
 }
 
 /* A private network namespace with two dummy interfaces. */

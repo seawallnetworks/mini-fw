@@ -123,6 +123,7 @@ enum mfw_stat_id {
     MFW_STAT_PARSE_ERR,         /* corrupt IPv4 */
     MFW_STAT_FRAG_DROP,         /* drop_ipv4_fragments=1 */
     MFW_STAT_NON_IPV4,          /* passed untouched */
+    MFW_STAT_TCP_FRAG_OFF1,     /* TCP fragment at offset 1 (RFC 1858) */
     MFW_STAT_MAX,
 };
 

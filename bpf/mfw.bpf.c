@@ -75,18 +75,20 @@ struct {
 struct pkt_info {
     __be32 saddr;
     __be32 daddr;
-    __u16  sport;     /* host order; valid only if has_ports */
+    __u16  sport;     /* host order; 0 unless TCP/UDP */
     __u16  dport;
     __u8   proto;
     __u8   tcp_flags; /* byte 13 of the TCP header */
     __u8   is_frag;   /* MF set or offset != 0 */
-    __u8   has_ports; /* TCP/UDP header present (not a non-first fragment) */
+    __u8   pad;
 };
 
 enum {
-    PARSE_IPV4     = 0,
-    PARSE_NON_IPV4 = 1,
-    PARSE_ERR      = -1,
+    PARSE_IPV4       = 0,
+    PARSE_NON_IPV4   = 1,
+    PARSE_LATER_FRAG = 2,   /* non-first fragment: no L4 header */
+    PARSE_ERR        = -1,
+    PARSE_TCP_OFF1   = -2,  /* TCP fragment at offset 1 */
 };
 
 enum {
@@ -164,12 +166,16 @@ static __always_inline int parse_pkt(void *data, void *data_end,
     p->daddr = ip->daddr;
     p->proto = ip->protocol;
     p->is_frag = (frag & (IP_MF | IP_OFFSET)) != 0;
-    p->has_ports = 0;
     p->sport = p->dport = 0;
     p->tcp_flags = 0;
 
+    /* A TCP fragment at offset 1 (8 bytes) can only exist to overwrite
+     * the flags and window of the first fragment's header after it was
+     * checked (RFC 1858 §3.2); no real stack sends one. */
+    if ((frag & IP_OFFSET) == 1 && p->proto == IPPROTO_TCP)
+        return PARSE_TCP_OFF1;
     if (frag & IP_OFFSET)
-        return PARSE_IPV4;  /* non-first fragment: no L4 header */
+        return PARSE_LATER_FRAG;
 
     void *l4 = data + off + ihl;
 
@@ -183,7 +189,6 @@ static __always_inline int parse_pkt(void *data, void *data_end,
         p->sport = bpf_ntohs(th->source);
         p->dport = bpf_ntohs(th->dest);
         p->tcp_flags = ((__u8 *)th)[13];
-        p->has_ports = 1;
     } else if (p->proto == IPPROTO_UDP) {
         struct udphdr *uh = l4;
 
@@ -191,7 +196,6 @@ static __always_inline int parse_pkt(void *data, void *data_end,
             return PARSE_ERR;
         p->sport = bpf_ntohs(uh->source);
         p->dport = bpf_ntohs(uh->dest);
-        p->has_ports = 1;
     }
     return PARSE_IPV4;
 }
@@ -211,11 +215,6 @@ static __always_inline int port_in_range(__u16 port, const struct mfw_port_range
     if (r->min == 0 && r->max == 0)
         return 1;
     return port >= r->min && port <= r->max;
-}
-
-static __always_inline int port_any(const struct mfw_port_range *r)
-{
-    return r->min == 0 && r->max == 0;
 }
 
 /* Standard ACL: blacklist. Callers treat only MATCH_DENY as drop. */
@@ -250,11 +249,6 @@ __noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_info
         return 0;
     if (p->proto != IPPROTO_TCP && p->proto != IPPROTO_UDP)
         return 1;  /* ports ignored for ICMP and other protocols */
-    if (!p->has_ports)
-        /* Non-first fragment: no ports, so an ACE that constrains ports
-         * (or TCP flags) cannot match. */
-        return port_any(&r->sport) && port_any(&r->dport) &&
-               !(r->flags & MFW_RULE_F_ESTABLISHED);
     if (!port_in_range(p->sport, &r->sport) || !port_in_range(p->dport, &r->dport))
         return 0;
     if ((r->flags & MFW_RULE_F_ESTABLISHED) &&
@@ -313,10 +307,19 @@ int mfw_xdp(struct xdp_md *ctx)
         stat_inc(MFW_STAT_PARSE_ERR);
         goto drop;
     }
+    if (pr == PARSE_TCP_OFF1) {
+        stat_inc(MFW_STAT_TCP_FRAG_OFF1);
+        goto drop;
+    }
     if (p.is_frag && drop_frags()) {
         stat_inc(MFW_STAT_FRAG_DROP);
         goto drop;
     }
+    /* Non-first fragments skip the lists: the first fragment carries the
+     * ports and is filtered, and without it the kernel cannot reassemble
+     * the datagram, so the rest expires in its reassembly queue. */
+    if (pr == PARSE_LATER_FRAG)
+        goto pass;
 
     rs = ruleset_of(ctx->ingress_ifindex);
 

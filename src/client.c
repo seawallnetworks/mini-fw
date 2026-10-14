@@ -28,6 +28,7 @@ static const char *const stat_names[MFW_STAT_MAX] = {
     [MFW_STAT_PARSE_ERR]         = "parse_err",
     [MFW_STAT_FRAG_DROP]         = "frag_drop",
     [MFW_STAT_NON_IPV4]          = "non_ipv4",
+    [MFW_STAT_TCP_FRAG_OFF1]     = "tcp_frag_off1",
 };
 
 const char *mfw_stat_name(int id)

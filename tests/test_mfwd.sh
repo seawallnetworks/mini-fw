@@ -104,7 +104,7 @@ bind d0 in 100
 bind d1 in 110
 set drop-ipv4-fragments 0"
 expect ok "check accepts it" mfw check <(echo "$POLICY")
-expect ok "stats" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 10'"
+expect ok "stats" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
 
 echo "== refusals leave the policy in place"
 out=$(mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\nacl 10 10 deny 10.0.0.0 0.0.2.255\n') 2>&1)
@@ -150,6 +150,19 @@ start
 same "generation kept" "$(field generation)" 6
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
 grep -q "policy generation 6 is in place" "$LOG" && ok "log: in place" || bad "log: in place"
+
+echo "== stats map from an older build is replaced"
+if command -v bpftool >/dev/null; then
+    stop
+    rm "$PINS/maps/stats"
+    bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
+    start
+    same "generation kept" "$(field generation)" 6
+    expect ok "XDP stays on d0" xdp_on d0
+    expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
+else
+    echo "  skip (no bpftool)"
+fi
 
 echo "== lost pins: the saved policy is applied again"
 stop

@@ -191,6 +191,26 @@ static int libbpf_print(enum libbpf_print_level level, const char *fmt, va_list 
     return vfprintf(stderr, fmt, ap);
 }
 
+/* A pinned stats map from a build with fewer stats ids cannot be reused
+ * (libbpf refuses another max_entries), so it is removed and the load
+ * pins a new one: the counters restart, the rules and links stay. The old
+ * program keeps its own map until upgrade_links() replaces it. */
+static void drop_old_stats(const char *root)
+{
+    struct bpf_map_info info = {};
+    __u32 len = sizeof(info);
+    char path[PATH_MAX];
+    int fd;
+
+    snprintf(path, sizeof(path), "%s/maps/stats", root);
+    fd = bpf_obj_get(path);
+    if (fd < 0)
+        return;
+    if (!bpf_map_get_info_by_fd(fd, &info, &len) && info.max_entries != MFW_STAT_MAX)
+        unlink(path);
+    close(fd);
+}
+
 int mfw_dp_open(struct mfw_dp *dp, const char *root, const char *xdp_mode,
                 char *err, size_t errlen)
 {
@@ -210,6 +230,7 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, const char *xdp_mode,
     if (ensure_dir(maps) || ensure_dir(links))
         return fail(err, errlen, "create %s: %s", root, strerror(errno));
 
+    drop_old_stats(dp->root);
     libbpf_set_print(libbpf_print);
     LIBBPF_OPTS(bpf_object_open_opts, opts, .pin_root_path = maps);
     dp->skel = mfw_bpf__open_opts(&opts);
