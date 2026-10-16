@@ -196,7 +196,7 @@ baseline.
 Goal: a VM that accepts SSH from anywhere, blocks one abusive host, and can
 still reach the internet.
 
-Write `/etc/mfw/policy`:
+Write `/usr/local/seawall/etc/mfw/policy`:
 
 ```text
 # blacklist
@@ -217,8 +217,10 @@ bind eth0 in 100
 Then:
 
 ```bash
-sudo mfw check /etc/mfw/policy     # checks the file, sends nothing
-sudo mfw apply /etc/mfw/policy     # see §7 for doing this safely over SSH
+# check only reads the file and sends nothing; see §7 for applying it
+# safely over SSH
+sudo mfw check /usr/local/seawall/etc/mfw/policy
+sudo mfw apply /usr/local/seawall/etc/mfw/policy
 sudo mfw status
 sudo mfw stats
 ```
@@ -482,7 +484,7 @@ mfw show > /root/mfw.good
 DEADMAN=$!
 
 # 2. Apply
-mfw apply /etc/mfw/policy
+mfw apply /usr/local/seawall/etc/mfw/policy
 
 # 3. Open a NEW SSH session from your workstation. If it works, return to
 #    this shell and disarm:
@@ -631,7 +633,7 @@ sudo systemctl edit mfwd
 
 ```ini
 [Service]
-ExecStartPost=/usr/local/seawall/bin/mfw apply /etc/mfw/policy
+ExecStartPost=/usr/local/seawall/bin/mfw apply /usr/local/seawall/etc/mfw/policy
 ```
 
 The interfaces must exist when this runs. An interface that appears later
