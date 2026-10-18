@@ -19,8 +19,8 @@
 
 /* Rule action */
 enum mfw_action {
-    MFW_ACTION_DENY  = 0,
-    MFW_ACTION_ALLOW = 1,
+    MFW_ACTION_DENY   = 0,
+    MFW_ACTION_PERMIT = 1,
 };
 
 /* Direction flags (bitmask). Step 1 binds ingress only; kept for ABI. */
@@ -67,7 +67,7 @@ struct mfw_port_range {
 struct mfw_rule {
     __u16 acl_id;       /* 1–99 standard, 100–199 extended */
     __u16 seq;          /* line order; lower first */
-    __u8  action;       /* MFW_ACTION_ALLOW / DENY */
+    __u8  action;       /* MFW_ACTION_PERMIT / DENY */
     __u8  proto;        /* 0=any/ip; ignored for standard */
     __u8  direction;    /* MFW_DIR_*; always MFW_DIR_INGRESS in step 1 */
     __u8  enabled;      /* set by the parser; BPF scans by count */

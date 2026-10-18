@@ -252,7 +252,7 @@ All shared types are in `bpf/mfw.h`, fixed-width with explicit padding.
 |-------|------|---------|
 | `acl_id` | `u16` | 1–99 standard, 100–199 extended |
 | `seq` | `u16` | sequence number |
-| `action` | `u8` | `MFW_ACTION_DENY` = 0, `MFW_ACTION_ALLOW` = 1 |
+| `action` | `u8` | `MFW_ACTION_DENY` = 0, `MFW_ACTION_PERMIT` = 1 |
 | `proto` | `u8` | 0 = any; otherwise the IPv4 protocol number |
 | `direction` | `u8` | always `MFW_DIR_INGRESS` in step 1 (kept for ABI) |
 | `enabled` | `u8` | set to 1 by the parser; BPF scans by `n_std` / `n_ext` instead |

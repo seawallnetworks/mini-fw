@@ -410,8 +410,8 @@ Path: `bpf/mfw.h` (included by BPF) and mirrored as `include/mfw_uapi.h` for use
 
 /* Rule action */
 enum mfw_action {
-    MFW_ACTION_DENY  = 0,
-    MFW_ACTION_ALLOW = 1,
+    MFW_ACTION_DENY   = 0,
+    MFW_ACTION_PERMIT = 1,
 };
 
 /* Direction flags (bitmask) — ACL access-group only */
@@ -490,7 +490,7 @@ enum mfw_acl_kind {
 struct mfw_rule {
     __u16 acl_id;       /* 1–99 standard, 100–199 extended */
     __u16 seq;          /* line order; lower first */
-    __u8  action;       /* MFW_ACTION_ALLOW / DENY */
+    __u8  action;       /* MFW_ACTION_PERMIT / DENY */
     __u8  proto;        /* 0=any/ip; ignored for standard */
     __u8  direction;    /* MFW_DIR_* from access-group */
     __u8  enabled;
@@ -774,7 +774,7 @@ static __always_inline int match_std(__u8 dir_bit, __be32 saddr)
             continue;
         if (!cidr_match(saddr, &r->src))
             continue;
-        return r->action == MFW_ACTION_ALLOW ? 1 : 0; /* explicit permit/deny */
+        return r->action == MFW_ACTION_PERMIT ? 1 : 0; /* explicit permit/deny */
     }
     return -1; /* miss — blacklist: not deny; dual-ACL may still SHOT via ext */
 }
@@ -812,7 +812,7 @@ static __always_inline int match_ext(__u8 dir_bit, __u8 proto,
             if (!port_in_range(dport, &r->dport))
                 continue;
         }
-        return r->action == MFW_ACTION_ALLOW ? 1 : 0;
+        return r->action == MFW_ACTION_PERMIT ? 1 : 0;
     }
     return -1; /* miss — should be rare if userspace appended synthetic deny */
 }

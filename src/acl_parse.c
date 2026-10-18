@@ -208,7 +208,7 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
 
     out->acl_id = (__u16)acl;
     out->seq = (__u16)seq;
-    out->action = !strcmp(argv[i++], "permit") ? MFW_ACTION_ALLOW : MFW_ACTION_DENY;
+    out->action = !strcmp(argv[i++], "permit") ? MFW_ACTION_PERMIT : MFW_ACTION_DENY;
     out->enabled = 1;
 
     if (mfw_is_std(acl)) {
@@ -296,7 +296,7 @@ static size_t fmt_port(const struct mfw_port_range *r, char *buf, size_t len)
 void mfw_format_ace(const struct mfw_rule *r, char *buf, size_t len)
 {
     char src[48], dst[48], sp[24], dp[24], proto[8];
-    const char *act = r->action == MFW_ACTION_ALLOW ? "permit" : "deny";
+    const char *act = r->action == MFW_ACTION_PERMIT ? "permit" : "deny";
 
     fmt_addr(&r->src, src, sizeof(src));
     if (r->kind == MFW_ACL_STANDARD) {

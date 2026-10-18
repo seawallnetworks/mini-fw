@@ -231,7 +231,7 @@ static __always_inline int match_std(const struct mfw_ruleset *rs, __be32 saddr)
             break;
         if (!cidr_match(saddr, &r->src))
             continue;
-        return r->action == MFW_ACTION_ALLOW ? MATCH_PERMIT : MATCH_DENY;
+        return r->action == MFW_ACTION_PERMIT ? MATCH_PERMIT : MATCH_DENY;
     }
     return MATCH_MISS;
 }
@@ -273,7 +273,7 @@ static __always_inline int match_ext(const struct mfw_ruleset *rs,
         if (i >= rs->n_ext)
             break;
         if (mfw_ext_ace_match(r, p))
-            return r->action == MFW_ACTION_ALLOW ? MATCH_PERMIT : MATCH_DENY;
+            return r->action == MFW_ACTION_PERMIT ? MATCH_PERMIT : MATCH_DENY;
     }
     return MATCH_MISS;
 }
