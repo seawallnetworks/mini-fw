@@ -882,7 +882,7 @@ No `origin_dir` field required — **flags + reverse lookup** carry direction (C
 ```c
 /* bpf/lib/ct.h — Cilium-derived, mini-fw trimmed */
 
-int mfw_ct_extract_tuple4(struct pkt_info *p, struct mfw_ct_tuple *t);
+int mfw_ct_extract_tuple4(struct pkt_meta *p, struct mfw_ct_tuple *t);
 void mfw_ct_tuple_reverse(struct mfw_ct_tuple *t);
 
 /* Returns CT_NEW | CT_ESTABLISHED | CT_REPLY (| CT_RELATED later) */
@@ -1680,7 +1680,7 @@ Pinning: `bpf_object__set_pin_root_path(obj, "/sys/fs/bpf/mfw/maps")`.
 SEC("xdp")
 int mfw_xdp(struct xdp_md *ctx)
 {
-    struct pkt_info info;
+    struct pkt_meta info;
     int pr = parse_ipv4(/* source enough for standard blacklist */);
 
     if (info.non_ipv4) return XDP_PASS;  /* ARP/IPv6/… — leave to kernel */

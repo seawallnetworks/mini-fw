@@ -9,9 +9,11 @@
  *   2. extended ACL (100–199): permit → PASS; deny or no match → DROP
  *      (implicit deny when bound).
  *
- * Egress is not filtered. Unbound lists, and interfaces without a ruleset,
- * are fail-open. Non-IPv4 always passes. No conntrack yet, so return traffic must be permitted explicitly
- * (or via "established").
+ * Egress is not filtered. With no extended list bound there is no implicit
+ * deny: whatever the standard list does not deny passes, and an interface
+ * without a ruleset gets only the header checks. This is the default, not
+ * a failure mode. Non-IPv4 always passes. No conntrack yet, so return
+ * traffic must be permitted explicitly (or via "established").
  *
  * TC, not XDP: XDP is left to a DDoS gate such as voidGate, which drops
  * floods before the stack builds an skb; mini-fw sees what it passed.
@@ -81,7 +83,7 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } stats SEC(".maps");
 
-struct pkt_info {
+struct pkt_meta {
     __be32 saddr;
     __be32 daddr;
     __u16  sport;     /* host order; 0 unless TCP/UDP */
@@ -92,12 +94,13 @@ struct pkt_info {
     __u8   pad;
 };
 
+/* parse_pkt() results; negative ones are dropped. */
 enum {
-    PARSE_IPV4       = 0,
-    PARSE_NON_IPV4   = 1,
-    PARSE_LATER_FRAG = 2,   /* non-first fragment: no L4 header */
-    PARSE_ERR        = -1,
-    PARSE_TCP_OFF1   = -2,  /* TCP fragment at offset 1 */
+    PARSE_OK               = 0,   /* IPv4; ports filled in for TCP/UDP */
+    PARSE_NOT_IPV4         = 1,   /* other ethertype, or runt frame */
+    PARSE_NONFIRST_FRAG    = 2,   /* offset != 0: no L4 header */
+    PARSE_MALFORMED        = -1,  /* truncated or invalid header */
+    PARSE_TCP_OVERLAP_FRAG = -2,  /* TCP fragment at offset 1 (RFC 1858) */
 };
 
 enum {
@@ -118,7 +121,7 @@ static __always_inline void stat_inc(__u32 id)
         v->count++;
 }
 
-static __always_inline int drop_frags(void)
+static __always_inline int cfg_drop_ipv4_fragments(void)
 {
     __u32 k = 0;
     struct mfw_config *cfg = bpf_map_lookup_elem(&config, &k);
@@ -128,7 +131,7 @@ static __always_inline int drop_frags(void)
 
 /* Ethernet → (≤2 VLAN tags) → IPv4 → TCP/UDP ports. */
 static __always_inline int parse_pkt(void *data, void *data_end,
-                                     struct pkt_info *p)
+                                     struct pkt_meta *p)
 {
     struct ethhdr *eth = data;
     __u32 off = sizeof(*eth);
@@ -136,7 +139,7 @@ static __always_inline int parse_pkt(void *data, void *data_end,
     int i;
 
     if ((void *)(eth + 1) > data_end)
-        return PARSE_NON_IPV4;  /* runt frame: not ours to judge */
+        return PARSE_NOT_IPV4;  /* runt frame: not ours to judge */
     proto = eth->h_proto;
 
 #pragma unroll
@@ -147,27 +150,27 @@ static __always_inline int parse_pkt(void *data, void *data_end,
             break;
         vh = data + off;
         if ((void *)(vh + 1) > data_end)
-            return PARSE_ERR;
+            return PARSE_MALFORMED;
         proto = vh->h_vlan_encapsulated_proto;
         off += sizeof(*vh);
     }
     if (proto != bpf_htons(ETH_P_IP))
-        return PARSE_NON_IPV4;
+        return PARSE_NOT_IPV4;
 
     struct iphdr *ip = data + off;
 
     if ((void *)(ip + 1) > data_end)
-        return PARSE_ERR;
+        return PARSE_MALFORMED;
     /* The kernel's own IPv4 sanity check (ip_rcv_core()), made early:
      * frames the stack would drop as header errors, not a protocol
      * filter. Other ethertypes passed above, and IP protocols other
      * than TCP/UDP are left to the lists. */
     if (ip->version != 4 || ip->ihl < 5)
-        return PARSE_ERR;
+        return PARSE_MALFORMED;
     __u32 ihl = ip->ihl * 4;
 
     if (data + off + ihl > data_end)
-        return PARSE_ERR;
+        return PARSE_MALFORMED;
 
     __u16 frag = bpf_ntohs(ip->frag_off);
 
@@ -182,9 +185,9 @@ static __always_inline int parse_pkt(void *data, void *data_end,
      * the flags and window of the first fragment's header after it was
      * checked (RFC 1858 §3.2); no real stack sends one. */
     if ((frag & IP_OFFSET) == 1 && p->proto == IPPROTO_TCP)
-        return PARSE_TCP_OFF1;
+        return PARSE_TCP_OVERLAP_FRAG;
     if (frag & IP_OFFSET)
-        return PARSE_LATER_FRAG;
+        return PARSE_NONFIRST_FRAG;
 
     void *l4 = data + off + ihl;
 
@@ -194,7 +197,7 @@ static __always_inline int parse_pkt(void *data, void *data_end,
         /* A first fragment too short for its ports would slip past
          * port ACEs (tiny-fragment attack, RFC 1858). */
         if ((void *)(th + 1) > data_end)
-            return PARSE_ERR;
+            return PARSE_MALFORMED;
         p->sport = bpf_ntohs(th->source);
         p->dport = bpf_ntohs(th->dest);
         p->tcp_flags = ((__u8 *)th)[13];
@@ -202,11 +205,11 @@ static __always_inline int parse_pkt(void *data, void *data_end,
         struct udphdr *uh = l4;
 
         if ((void *)(uh + 1) > data_end)
-            return PARSE_ERR;
+            return PARSE_MALFORMED;
         p->sport = bpf_ntohs(uh->source);
         p->dport = bpf_ntohs(uh->dest);
     }
-    return PARSE_IPV4;
+    return PARSE_OK;
 }
 
 static __always_inline int cidr_match(__be32 addr, const struct mfw_cidr *c)
@@ -248,7 +251,7 @@ static __always_inline int match_std(const struct mfw_ruleset *rs, __be32 saddr)
 /* L3/L4 fields of one extended ACE vs the packet. A global (non-static)
  * function is verified once on its own, which keeps the 128-ACE loop below
  * from multiplying verifier states by every branch in here. */
-__noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_info *p)
+__noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_meta *p)
 {
     if (!r || !p)
         return 0;
@@ -270,7 +273,7 @@ __noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_info
  * the implicit deny, counted separately from explicit deny ACEs. A bound
  * list with no ACEs denies everything. */
 static __always_inline int match_ext(const struct mfw_ruleset *rs,
-                                     const struct pkt_info *p)
+                                     const struct pkt_meta *p)
 {
     int i;
 
@@ -303,7 +306,7 @@ int mfw_tc(struct __sk_buff *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
-    struct pkt_info p = {};
+    struct pkt_meta p = {};
     const struct mfw_ruleset *rs;
     int pr, std;
 
@@ -317,19 +320,19 @@ int mfw_tc(struct __sk_buff *ctx)
     }
     pr = parse_pkt(data, data_end, &p);
 
-    if (pr == PARSE_NON_IPV4) {
+    if (pr == PARSE_NOT_IPV4) {
         stat_inc(MFW_STAT_NON_IPV4);
         goto pass;
     }
-    if (pr == PARSE_ERR) {
+    if (pr == PARSE_MALFORMED) {
         stat_inc(MFW_STAT_PARSE_ERR);
         goto drop;
     }
-    if (pr == PARSE_TCP_OFF1) {
+    if (pr == PARSE_TCP_OVERLAP_FRAG) {
         stat_inc(MFW_STAT_TCP_FRAG_OFF1);
         goto drop;
     }
-    if (p.is_frag && drop_frags()) {
+    if (p.is_frag && cfg_drop_ipv4_fragments()) {
         stat_inc(MFW_STAT_FRAG_DROP);
         goto drop;
     }
@@ -346,7 +349,7 @@ int mfw_tc(struct __sk_buff *ctx)
      * carries the ports and is filtered, and without it the kernel cannot
      * reassemble the datagram, so the rest expires in its reassembly
      * queue. */
-    if (pr == PARSE_LATER_FRAG)
+    if (pr == PARSE_NONFIRST_FRAG)
         goto pass;
 
     /* 2. Extended list decides everything else. */
