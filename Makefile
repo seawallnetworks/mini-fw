@@ -1,6 +1,7 @@
 # mini-fw: mfwd (the daemon), mfw (its client) and libmfw.a (for front
 # ends such as sw_configd: policy checks and the mfwd client, no libbpf)
 CLANG     ?= clang
+BPFTOOL   ?= bpftool
 CC        ?= cc
 ARCH      ?= $(shell uname -m | sed -e 's/x86_64/x86/' -e 's/aarch64/arm64/')
 MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
@@ -27,7 +28,7 @@ build/mfw.bpf.o: bpf/mfw.bpf.c bpf/mfw.h | build
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 build/mfw.skel.h: build/mfw.bpf.o
-	bpftool gen skeleton $< name mfw_bpf > $@
+	$(BPFTOOL) gen skeleton $< name mfw_bpf > $@
 
 build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
