@@ -18,7 +18,8 @@ LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
 MFWD_OBJS  := build/mfwd.o build/dataplane.o
 HEADERS    := bpf/mfw.h include/mfw_policy.h include/mfw_client.h
 
-.PHONY: all clean test test-bpf test-mfwd smoke install uninstall
+.PHONY: all clean test test-bpf test-mfwd smoke install install-runtime \
+	install-static-lib uninstall
 all: mfwd mfw libmfw.a
 
 build:
@@ -71,12 +72,18 @@ test-mfwd: mfwd mfw
 smoke: mfwd mfw
 	sudo ./scripts/smoke-test.sh
 
-install: all
+install: install-runtime install-static-lib
+
+# what runs on the machine
+install-runtime: mfwd mfw
 	install -D -m 0755 mfwd $(DESTDIR)$(PREFIX)/sbin/mfwd
 	install -D -m 0755 mfw $(DESTDIR)$(PREFIX)/bin/mfw
+	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
+
+# the client library and its headers, for linking (sw_configd)
+install-static-lib: libmfw.a
 	install -D -m 0644 libmfw.a $(DESTDIR)$(PREFIX)/lib/libmfw.a
 	install -D -m 0644 -t $(DESTDIR)$(PREFIX)/include $(HEADERS)
-	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
 
 # removes the files only: "mfwd -P" removes mini-fw from the interfaces
 uninstall:

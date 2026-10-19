@@ -67,6 +67,10 @@ make smoke            # real traffic through mfwd in two network namespaces (sud
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
 
+`make install` is `install-runtime` (`mfwd`, `mfw`, `mfwd.service`) and
+`install-static-lib` (`libmfw.a` and its headers, for linking a front
+end such as sw_configd), which can also be run on their own.
+
 `/usr/local/seawall` is the prefix shared by the Seawall stack
 (libcli-plus, sw_authd, sw_configd). Its `bin` and `sbin` are not on
 `PATH`; the examples below assume they are (see the
