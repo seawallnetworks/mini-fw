@@ -1,12 +1,12 @@
-# mini-fw: Implementation (stateless XDP ACL, mfwd)
+# mini-fw: Implementation (stateless TC ingress ACL, mfwd)
 
 | Field | Value |
 |-------|-------|
 | **Document** | Implementation description — what is actually built |
-| **Scope** | Step 1: stateless, ingress-only, XDP-only ACL for a local VM, per-interface lists, driven by the mfwd daemon |
-| **Version** | mfwd / mfw 0.3.0, ABI 2 |
+| **Scope** | Step 1: stateless, ingress-only ACL at TC ingress (tcx) for a local VM, per-interface lists, driven by the mfwd daemon |
+| **Version** | mfwd / mfw 0.4.0, ABI 2 |
 | **Date** | 2026-10-12 |
-| **Target** | Linux ≥ 5.12 with BTF, libbpf ≥ 0.7, clang |
+| **Target** | Linux ≥ 6.6 with BTF (tcx), libbpf ≥ 1.3, clang |
 | **Related** | [`design.md`](design.md) (full v1 design, Rev 18), [`../README.md`](../README.md) (operator quick start) |
 
 `design.md` describes the full v1 system: XDP and TC hooks, egress filtering,
@@ -22,8 +22,9 @@ does today.** Where the two disagree, §10 explains why.
 
 - An **IPv4 host firewall for a single local VM**: it protects the machine it runs on.
 - **Inbound only.** Packets the host sends are never inspected.
-- **One XDP program**, attached to every protected interface, with **one
-  ruleset per interface**. Nothing is attached to TC.
+- **One TC ingress program** (tcx), attached to every protected interface,
+  with **one ruleset per interface**. XDP is left free for a DDoS gate such
+  as voidGate, which runs before mini-fw (§10).
 - **Stateless.** Every packet is judged on its own headers. There is no connection table.
 - **A daemon, mfwd, owns the kernel side.** Clients send it the whole policy
   over a Unix socket: the `mfw` tool, or a front end such as sw_configd
@@ -62,14 +63,14 @@ does today.** Where the two disagree, §10 explains why.
               ▼
  /sys/fs/bpf/mfw/  (bpffs, mode 0700)
    maps/rulesets     HASH_OF_MAPS  ifindex → that  ─┐
-                     interface's compiled lists     │ read by XDP
+                     interface's compiled lists     │ read by mfw_tc
    maps/config       ARRAY  flags, generation      ─┤
-   maps/stats        PERCPU counters               ─┘ written by XDP
-   link/xdp_<if>     pinned bpf_link (keeps the program attached)
+   maps/stats        PERCPU counters               ─┘ written by mfw_tc
+   link/tcx_<if>     pinned bpf_link (keeps the program attached)
 
- NIC ──► XDP mfw_xdp ──► XDP_PASS ──► kernel stack ──► sockets
-              │
-              └──► XDP_DROP
+ NIC ──► XDP (voidGate) ──► GRO ──► tcx ingress mfw_tc ──► TCX_NEXT ──► IP stack ──► sockets
+                                              │
+                                              └──► TCX_DROP
 ```
 
 Key properties:
@@ -91,7 +92,7 @@ Key properties:
 
 ```text
 bpf/mfw.h              shared UAPI: mfw_rule, mfw_ruleset, mfw_config, stat ids
-bpf/mfw.bpf.c          XDP program: parser, standard + extended matching
+bpf/mfw.bpf.c          TC ingress program: parser, standard + extended matching
 include/mfw_policy.h   libmfw: ACE and policy parsing, checks, compile, canonical form
 include/mfw_client.h   libmfw: the mfwd client
 src/acl_parse.c        libmfw: Cisco ACE parser and formatter
@@ -114,7 +115,7 @@ privileges; `make install` puts it and the three public headers under
 
 ---
 
-## 3. Packet processing (`mfw_xdp`)
+## 3. Packet processing (`mfw_tc`)
 
 ### 3.1 Decision flow
 
@@ -183,8 +184,14 @@ stack sends one: its only use is to overwrite the flags and window of the
 TCP header after the first fragment was checked (RFC 1858 §3.2). The
 offset-0 rule above handles the other RFC 1858 attack.
 
-All parsing uses XDP direct packet access with explicit bounds checks. The
-VLAN loop is unrolled (two iterations), so the verifier sees fixed code.
+All parsing uses direct packet access with explicit bounds checks. After
+GRO the headers may not all be in the skb's linear part, the only part a TC
+program reads directly, so a packet shorter there than the most the parser
+reads (Ethernet, two tags, IPv4 with options, TCP: 102 bytes) is pulled in
+first with `bpf_skb_pull_data`. A pull that fails leaves a short view, which
+the parser drops as malformed. The VLAN loop is unrolled (two iterations),
+so the verifier sees fixed code. An outer tag the kernel has already taken
+off into the skb's metadata is simply not there to peel.
 
 ### 3.3 Matching semantics
 
@@ -292,10 +299,10 @@ Everything one interface enforces, compiled from its bindings:
 
 | Pin | Type | Key → value | Max | Writer | Reader |
 |-----|------|-------------|-----|--------|--------|
-| `maps/rulesets` | HASH_OF_MAPS | ifindex → inner map | 64 (`MFW_MAX_IFACES`) | mfwd | XDP |
-| (inner, not pinned) | ARRAY | `0` → `mfw_ruleset` | 1 | mfwd, once | XDP |
-| `maps/config` | ARRAY | `0` → `mfw_config` | 1 | mfwd | XDP |
-| `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | XDP | mfwd |
+| `maps/rulesets` | HASH_OF_MAPS | ifindex → inner map | 64 (`MFW_MAX_IFACES`) | mfwd | mfw_tc |
+| (inner, not pinned) | ARRAY | `0` → `mfw_ruleset` | 1 | mfwd, once | mfw_tc |
+| `maps/config` | ARRAY | `0` → `mfw_config` | 1 | mfwd | mfw_tc |
+| `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | mfw_tc | mfwd |
 
 The maps are created by libbpf when mfwd first starts
 (`LIBBPF_PIN_BY_NAME` with pin root `<pinroot>/maps`) and reused by every
@@ -315,8 +322,8 @@ Each packet increments **exactly one outcome** and **at most one reason**.
 
 | Id | Name | Kind | Meaning |
 |----|------|------|---------|
-| 0 | `xdp_pass` | outcome | returned `XDP_PASS` |
-| 1 | `xdp_drop` | outcome | returned `XDP_DROP` |
+| 0 | `xdp_pass` | outcome | returned `TCX_NEXT` (passed on) |
+| 1 | `xdp_drop` | outcome | returned `TCX_DROP` |
 | 2 | `std_deny` | reason | standard explicit deny |
 | 3 | `std_permit` | reason | standard explicit permit, extended unbound |
 | 4 | `ext_permit` | reason | extended explicit permit |
@@ -341,7 +348,7 @@ counters restart on such an upgrade while the rulesets and links stay.
 ```text
 <pinroot>/                0700, root only (default /sys/fs/bpf/mfw, mfwd -p)
   maps/{rulesets,config,stats}
-  link/xdp_<ifname>
+  link/tcx_<ifname>
 <statedir>/policy         default /run/mfwd (mfwd -d): "# generation N", then
                           the applied policy in canonical form
 ```
@@ -371,8 +378,8 @@ pinned links and maps stay**, so the interfaces keep their rulesets.
 
 mfwd attaches and detaches as `APPLY` requires (§6):
 
-- **Attach:** `bpf_link_create(BPF_XDP)`, driver mode first, then generic
-  for `-x auto`, and pin the link as `link/xdp_<if>`.
+- **Attach:** `bpf_link_create(BPF_TCX_INGRESS)`, appended after any tcx
+  program already there, and pin the link as `link/tcx_<if>`.
 - **A link is live** when its pin exists and `bpf_link_get_info_by_fd()`
   reports the interface's current ifindex. A pin whose interface was
   deleted (or deleted and re-created) is removed and, if still bound,
@@ -382,7 +389,7 @@ mfwd attaches and detaches as `APPLY` requires (§6):
 
 ### 5.4 Purge and emergency removal
 
-`mfwd -P` unlinks every link pin (detaching XDP), then removes the maps,
+`mfwd -P` unlinks every link pin (detaching the program), then removes the maps,
 the pin root and the saved policy. Without mfwd:
 
 ```bash
@@ -557,11 +564,12 @@ reassembled here; that needs fragment port recovery (§11).
 
 Each interface has its own standard and extended slot, at most 64
 interfaces (`MFW_MAX_IFACES`). Policy follows the interface the packet
-arrived on, so VLAN subinterfaces share their parent's lists: XDP runs on
-the parent, and the tags are peeled before matching.
+arrived on. Traffic for a VLAN subinterface arrives on its parent first,
+so the parent's lists apply to it, and in-band tags are peeled before
+matching.
 
 If an interface is deleted and re-created, it gets a new ifindex and loses
-its XDP program. Its binding stays, but is not installed until the
+its TC program. Its binding stays, but is not installed until the
 interface is attached again.
 
 ### 8.4 Updates
@@ -571,13 +579,13 @@ that touches several interfaces switches them one after another.
 
 ### 8.5 Performance
 
-- XDP runs **before GRO**, so the extended list is scanned once per wire
-  packet. In TC it would run once per GRO-merged packet. This trade-off buys
-  the earliest possible drop.
+- TC runs **after GRO**, so the extended list is scanned once per
+  GRO-merged packet, not once per wire packet. The earliest drop, at XDP, is
+  left to the DDoS gate, which is where floods are cut.
 - Matching is linear: worst case 64 + 128 ACE checks per packet. Put the
   most frequently hit ACEs first.
-- Native XDP needs driver support. `auto` falls back to generic XDP (slower,
-  but works everywhere, including veth without native support).
+- tcx needs no driver support: it works on every interface, veth and
+  dummy included.
 
 ### 8.6 SYN floods
 
@@ -634,8 +642,8 @@ Notes:
 
 | Area | `design.md` (Rev 18) | Step 1 | Why |
 |------|----------------------|--------|-----|
-| Hooks | XDP + TC ingress + TC egress | XDP only | Local VM only; with no egress and no conntrack, TC had no remaining job |
-| Extended list | TC ingress and egress | XDP, after the standard list | Earliest drop; a stateless match needs only headers |
+| Hooks | XDP + TC ingress + TC egress | TC ingress only (tcx) | Local VM only, no egress. XDP is the DDoS gate's (voidGate): an interface has one native XDP program |
+| Extended list | TC ingress and egress | TC ingress, after the standard list | A stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
 | Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
 | Fragment tracking | Cilium-style port recovery, TC | none; non-first fragments skip the extended list (§8.2), TCP offset 1 dropped | Enough for local traffic; recovery deferred |
@@ -645,10 +653,10 @@ Notes:
 | Bound detection | sketch checked "index 0 enabled", per direction | `std_acl` / `ext_acl` in the ruleset | Explicit; no sentinel entries |
 | Implicit deny | trailing synthetic `deny ip any any` | running off the end of a bound extended list | Counted separately from explicit denies; takes no ACE slot |
 | `established` | not in design | added (Cisco-compatible) | Makes stateless reply handling practical |
-| Stats ids | TC/CT/frag ids | XDP-only set (§4.5) | Nothing shipped; clean layout, append-only from now on |
-| Kernel | 5.10+ | 5.12+ | Global BPF function with pointer arguments (§3.4) |
+| Stats ids | TC/CT/frag ids | one set (§4.5), outcomes still named `xdp_*` | Nothing shipped; clean layout, append-only from now on |
+| Kernel | 5.10+ | 6.6+ | tcx links; global BPF function with pointer arguments (5.12+, §3.4) |
 | `rule_id` delete | `no ip access-list N <rule_id\|seq>` | none: a policy is replaced as a whole | `rule_id` is still `(acl << 16) \| seq` |
-| clsact management | meta markers, TC attach | none | No TC |
+| clsact management | meta markers, TC attach | none | tcx links need no clsact qdisc |
 
 ---
 
@@ -658,8 +666,8 @@ Roughly in order of value for the local-VM use case:
 
 1. **Conntrack**, to replace `established` and source-port reply rules.
    Outbound flows must be observed, so this brings back a TC egress hook
-   (observe-only, no filtering). The lookup can stay in XDP or move with the
-   extended list; see design.md §Conntrack for the Cilium-based model.
+   (observe-only, no filtering). The lookup goes with the extended list at
+   TC ingress; see design.md §Conntrack for the Cilium-based model.
 2. **Fragment port recovery**, so port ACEs decide non-first fragments
    exactly; needed once forwarded traffic is filtered (§8.2).
 3. **Per-ACE hit counters**, reported by `STATS` / `SHOW` (IOS-style

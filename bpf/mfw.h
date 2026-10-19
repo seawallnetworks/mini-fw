@@ -2,7 +2,7 @@
 /* mfw.h — shared between BPF and userspace (fixed width, no padding holes).
  *
  * Step 1 (stateless, ingress only): standard and extended ACLs both run in
- * one XDP program. Egress is not filtered (local-VM protection only).
+ * one TC ingress program. Egress is not filtered (local-VM protection only).
  * Each interface has its own ruleset (struct mfw_ruleset), found by the
  * ifindex the packet arrived on.
  */
@@ -102,7 +102,7 @@ struct mfw_ruleset {
 
 struct mfw_config {
     __u8  default_action;      /* ABI: always MFW_ACTION_DENY in v1; BPF ignores */
-    __u8  drop_ipv4_fragments; /* 1 = XDP_DROP all IPv4 fragments */
+    __u8  drop_ipv4_fragments; /* 1 = drop all IPv4 fragments */
     __u8  abi_version;         /* MFW_ABI_VERSION */
     __u8  pad0;
     __u32 generation;          /* bumped on rule updates */
@@ -111,9 +111,10 @@ struct mfw_config {
 /* Stats: every packet increments exactly one OUTCOME and at most one REASON.
  * Append new ids at the end so the pinned stats layout stays stable. */
 enum mfw_stat_id {
-    /* Outcomes */
-    MFW_STAT_XDP_PASS = 0,
-    MFW_STAT_XDP_DROP,
+    /* Outcomes; named xdp_pass and xdp_drop in STATS, from when mini-fw
+     * ran at XDP */
+    MFW_STAT_PASS = 0,
+    MFW_STAT_DROP,
     /* Reasons */
     MFW_STAT_STD_DENY,          /* standard list: explicit deny */
     MFW_STAT_STD_PERMIT,        /* standard list: explicit permit, no extended list */

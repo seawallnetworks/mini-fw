@@ -18,6 +18,7 @@ PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
+command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
 
 cleanup() {
     [[ -n $PID ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null
@@ -39,7 +40,11 @@ same() {  # same "description" actual expected
 }
 
 mfw()  { "$MFW" -s "$SOCK" "$@"; }
-xdp_on() { ip -n "$NS" link show "$1" | grep -q ' xdp'; }
+# ip link doesn't show tcx programs; bpftool does
+tc_on() {
+    nsenter --net=/var/run/netns/$NS bpftool net show dev "$1" |
+        grep -q 'tcx/ingress mfw_tc '
+}
 field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
 
 start() {
@@ -93,9 +98,9 @@ echo "== apply"
 expect ok "apply" mfw apply <(echo "$POLICY")
 same "generation 1" "$(field generation)" 1
 same "attached d0,d1" "$(field attached)" d0,d1
-expect ok "XDP on d0" xdp_on d0
-expect ok "XDP on d1" xdp_on d1
-expect fail "no XDP on d2" xdp_on d2
+expect ok "TC on d0" tc_on d0
+expect ok "TC on d1" tc_on d1
+expect fail "no TC on d2" tc_on d2
 same "show is canonical" "$(mfw show)" "acl 10 10 deny host 192.0.2.1
 acl 100 10 permit tcp any any eq 22
 acl 110 10 permit icmp any any
@@ -124,10 +129,10 @@ same "status: attached unchanged" "$(field attached)" d0,d1
 echo "== unbinding detaches"
 expect ok "apply d0 only" mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\n')
 same "attached d0" "$(field attached)" d0
-expect fail "no XDP on d1" xdp_on d1
+expect fail "no TC on d1" tc_on d1
 expect ok "empty policy" mfw apply /dev/null
 same "nothing attached" "$(field attached)" -
-expect fail "no XDP on d0" xdp_on d0
+expect fail "no TC on d0" tc_on d0
 
 echo "== protocol errors"
 same "unknown request" "$(raw 'FROB\n')" "ERR badreq unknown request 'FROB'"
@@ -145,31 +150,27 @@ same "mfwd still serves" "$(raw 'PING\n')" "OK"
 echo "== restart keeps the policy and the filtering"
 expect ok "apply" mfw apply <(echo "$POLICY")
 stop
-expect ok "XDP stays on d0 while mfwd is down" xdp_on d0
+expect ok "TC stays on d0 while mfwd is down" tc_on d0
 start
 same "generation kept" "$(field generation)" 6
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
 grep -q "policy generation 6 is in place" "$LOG" && ok "log: in place" || bad "log: in place"
 
 echo "== stats map from an older build is replaced"
-if command -v bpftool >/dev/null; then
-    stop
-    rm "$PINS/maps/stats"
-    bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
-    start
-    same "generation kept" "$(field generation)" 6
-    expect ok "XDP stays on d0" xdp_on d0
-    expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
-else
-    echo "  skip (no bpftool)"
-fi
+stop
+rm "$PINS/maps/stats"
+bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
+start
+same "generation kept" "$(field generation)" 6
+expect ok "TC stays on d0" tc_on d0
+expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
 
 echo "== lost pins: the saved policy is applied again"
 stop
 rm -rf "$PINS"
 start
 same "attached again" "$(field attached)" d0,d1
-expect ok "XDP on d0" xdp_on d0
+expect ok "TC on d0" tc_on d0
 grep -q "applying it again" "$LOG" && ok "log: applied again" || bad "log: applied again"
 
 echo "== re-created interface"
@@ -184,7 +185,7 @@ stop
 expect ok "mfwd -P" "$MFWD" -P -p "$PINS" -d "$STATE"
 expect ok "pins removed" test ! -e "$PINS"
 expect ok "saved policy removed" test ! -e "$STATE/policy"
-expect fail "no XDP on d0" xdp_on d0
+expect fail "no TC on d0" tc_on d0
 
 echo "== without mfwd"
 out=$(mfw ping 2>&1)

@@ -5,11 +5,12 @@ See [`docs/user-manual.md`](docs/user-manual.md) for the operator manual,
 [`docs/implementation.md`](docs/implementation.md) for a detailed description of
 what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 
-**Current state: stateless ACLs in a single XDP program, inbound only,
-driven by a daemon.** The target is protecting a local VM, so there is no
-router or forwarding mode, **egress is never filtered**, and nothing is
-attached to TC. There is no conntrack or fragment tracking yet (design
-PR5a–c).
+**Current state: stateless ACLs in a single TC ingress program (tcx),
+inbound only, driven by a daemon.** The target is protecting a local VM, so
+there is no router or forwarding mode, **egress is never filtered**, and
+XDP is left free for a DDoS gate such as
+[voidGate](https://github.com/seawallnetworks/voidGate), which runs before
+mini-fw. There is no conntrack or fragment tracking yet (design PR5a–c).
 
 | List | Numbers | Matches | End of list |
 |------|---------|---------|-------------|
@@ -54,7 +55,8 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 0.7 (`libbpf-dev`), bpftool, Linux ≥ 5.12 with BTF.
+Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`), bpftool, Linux ≥ 6.6 with BTF
+(tcx). Ubuntu 24.04 qualifies.
 
 ```bash
 make                  # mfwd, mfw, libmfw.a (objects in build/)
@@ -127,14 +129,18 @@ The socket is root-only by default (`-m`, `-g` to change that).
   mfwd knows it, and applies it again if the pins are gone. On start it also
   moves attached interfaces to the program it loaded, so upgrading mfwd
   upgrades the BPF code without a gap.
-- **XDP only, ingress only.** Both lists run in XDP. The design's TC ingress
-  and egress programs, `access-group … out`, and the egress list order are
-  dropped. `mfw_rule.direction` stays in the ABI but is always `in`. If
-  conntrack is added later, it will need a TC egress hook again to see
-  outbound flows.
-- **Per-packet cost.** XDP runs before GRO, so the extended list is scanned
-  for every wire packet, not once per merged GRO packet as in TC. That is the
-  trade-off for dropping disallowed traffic as early as possible.
+- **TC ingress only.** Both lists run in one TC ingress program, as in the
+  design; its TC egress program, `access-group … out`, and the egress list
+  order are dropped. `mfw_rule.direction` stays in the ABI but is always
+  `in`. If conntrack is added later, it will need a TC egress hook again to
+  see outbound flows. XDP is left to a DDoS gate (voidGate in the Seawall
+  stack): an interface has one native XDP program, and floods are best
+  dropped before the stack makes an skb.
+  A pass is `TCX_NEXT`, so a tc program attached after mini-fw still runs.
+- **Per-packet cost.** TC runs after GRO, so the extended list is scanned
+  once per merged GRO packet, not per wire packet. A packet whose headers
+  are not all in the skb's linear part is pulled in first
+  (`bpf_skb_pull_data`).
 - **Per-interface rulesets.** `maps/rulesets` is a map-in-map keyed by ifindex.
   Each attached interface gets an inner map holding one `struct mfw_ruleset`:
   its standard and extended ACEs, compiled. The design's shared
@@ -146,12 +152,13 @@ The socket is root-only by default (`-m`, `-g` to change that).
   takes no ACE slot, so an extended list holds 128 ACEs.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
-- **Attach.** XDP uses a pinned `bpf_link` (native mode, falling back to
-  generic). A link whose interface was deleted is noticed and replaced.
+- **Attach.** A pinned tcx `bpf_link` per interface (`link/tcx_<if>`). A
+  link whose interface was deleted is noticed and replaced.
 - **Verifier.** The per-ACE extended match is a global BPF function, so it is
   verified once. Both loops (64 standard + 128 extended ACEs) then verify in
   about 16K of the 1M instruction budget. Global functions with pointer args
-  need **kernel 5.12+**, not the design's 5.10.
-- **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`) and one reason
+  need kernel 5.12+, and tcx 6.6+.
+- **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`: the names
+  are from when mini-fw ran at XDP, kept for the protocol) and one reason
   per packet (`std_deny`, `ext_permit`, `ext_implicit_deny`, …). New ids are
   appended at the end.

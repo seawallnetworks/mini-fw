@@ -1,8 +1,9 @@
 # mini-fw User Manual
 
 mini-fw is a small inbound firewall for a Linux VM. It filters IPv4 traffic
-in XDP, the earliest point where the kernel sees a packet, using
-Cisco IOS-style numbered access lists.
+at TC ingress, before the kernel's IP stack and netfilter, using
+Cisco IOS-style numbered access lists. XDP, which comes earlier, is left
+to a DDoS gate such as voidGate.
 
 It has two programs:
 
@@ -50,7 +51,7 @@ see [`implementation.md`](implementation.md).
 
 | Requirement | How to check |
 |-------------|--------------|
-| Linux kernel 5.12 or newer, with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
+| Linux kernel 6.6 or newer (tcx), with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
 | bpffs mounted at `/sys/fs/bpf` | `mount \| grep /sys/fs/bpf` |
 | mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) | `mfwd.service` does this |
 | `mfw` needs access to mfwd's socket | root by default; see `mfwd -m` / `-g` |
@@ -78,7 +79,7 @@ sudo mfw ping
 ```
 
 ```text
-mfw 0.3.0, ABI 2
+mfw 0.4.0, ABI 2
 mfwd is running
 ```
 
@@ -345,7 +346,8 @@ bind eth1 in 110      # eth1 gets its own
   traffic is never filtered.
 - An interface that doesn't exist is accepted and reported as missing
   (§8.2). It is attached the next time a policy is applied while it exists.
-- VLAN subinterfaces share their parent's lists: XDP runs on the parent.
+- Traffic for a VLAN subinterface arrives on its parent first, so the
+  parent's lists apply to it.
 
 ### 5.8 Limits
 
@@ -607,7 +609,6 @@ mfwd -P [-p pinroot] [-d statedir]
 | `-g group` | | socket group; with `-m 0660`, that group may use `mfw` without root |
 | `-p pinroot` | `/sys/fs/bpf/mfw` | bpffs directory for maps and links |
 | `-d statedir` | `/run/mfwd` | where the running policy is saved |
-| `-x mode` | `auto` | XDP mode: `native`, `generic`, or `auto` (native, else generic) |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |
 
@@ -666,8 +667,8 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 | `mfw: cannot reach mfwd: No such file or directory` | mfwd not running | `sudo systemctl start mfwd`; `journalctl -u mfwd` |
 | `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or start mfwd with `-g <group> -m 0660` |
 | `… is not on bpffs` (mfwd log) | bpffs missing | `sudo mount -t bpf bpf /sys/fs/bpf` |
-| `load BPF object: …` (mfwd log) | kernel too old (< 5.12), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
-| `eth0: attach XDP (auto): …` | another XDP program is already attached, or the driver rejects XDP | check `ip link show eth0` for an existing `xdp` program and remove it; try `mfwd -x generic` |
+| `load BPF object: …` (mfwd log) | kernel too old (< 6.6), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
+| `eth0: attach TC ingress: …` | kernel without tcx (< 6.6), or missing capabilities | check §1.2 |
 | `pinned maps under … have ABI N, expected 2` | state left by a different mini-fw version | `sudo mfwd -P`, then start mfwd again |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
@@ -684,8 +685,8 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 Useful low-level checks:
 
 ```bash
-ip link show eth0                                   # shows "xdp" or "xdpgeneric" when attached
-sudo bpftool prog show name mfw_xdp
+sudo bpftool net show dev eth0                      # "tcx/ingress mfw_tc" when attached
+sudo bpftool prog show name mfw_tc
 sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/rulesets   # ifindex → inner map id
 sudo bpftool map dump id <inner map id>                       # that interface's ruleset
 ```
@@ -695,8 +696,9 @@ sudo bpftool map dump id <inner map id>                       # that interface's
 ## 13. FAQ
 
 **Does mini-fw replace iptables or nftables?**
-No. They can run side by side. mini-fw decides first (in XDP); packets it
-accepts then go through netfilter as usual.
+No. They can run side by side. mini-fw decides first (at TC ingress);
+packets it accepts then go through netfilter as usual. An XDP program,
+such as voidGate's, runs before mini-fw.
 
 **Can I filter outgoing traffic?**
 No. mini-fw only filters inbound traffic.

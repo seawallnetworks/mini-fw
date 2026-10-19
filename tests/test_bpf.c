@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
-/* Dataplane tests via BPF_PROG_TEST_RUN: feed crafted frames to the XDP
- * program and check verdicts. Needs root. Runs in a private network
+/* Dataplane tests via BPF_PROG_TEST_RUN: feed crafted frames to the TC
+ * ingress program and check verdicts (TCX_NEXT: passed on, TCX_DROP). Needs root. Runs in a private network
  * namespace with two dummy interfaces, so the per-interface rulesets have
  * real ifindexes; touches no host interface or pins. */
 #define _GNU_SOURCE
@@ -66,7 +66,8 @@ static int build(const struct pkt_spec *s, __u8 *buf)
     v = htons(s->ethertype ? s->ethertype : ETH_P_IP);
     memcpy(proto, &v, 2);
     if (s->ethertype && s->ethertype != ETH_P_IP)
-        return p - buf + 28;     /* e.g. ARP: payload is irrelevant */
+        return p - buf + 40;     /* e.g. ARP: payload is irrelevant, but
+                                  * an skb test run of IPv6 needs 40 */
 
     struct iphdr *ip = (void *)p;
 
@@ -106,26 +107,29 @@ static int build(const struct pkt_spec *s, __u8 *buf)
     return p - buf;
 }
 
-/* The packet as if it arrived on ifindex. */
+/* The packet as if it arrived on ifindex; RUN_ERR if it couldn't run
+ * (-1 is TCX_NEXT). */
+#define RUN_ERR  (-100)
+
 static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s)
 {
     __u8 buf[256];
     int len = build(s, buf);
-    struct xdp_md ctx = { .data_end = len, .ingress_ifindex = ifindex };
+    struct __sk_buff ctx = { .ingress_ifindex = ifindex };
     LIBBPF_OPTS(bpf_test_run_opts, opts, .data_in = buf, .data_size_in = len,
                 .ctx_in = &ctx, .ctx_size_in = sizeof(ctx), .repeat = 1);
 
     if (bpf_prog_test_run_opts(bpf_program__fd(prog), &opts)) {
         perror("bpf_prog_test_run_opts");
         failures++;
-        return -1;
+        return RUN_ERR;
     }
-    return opts.retval;
+    return (int)opts.retval;
 }
 
 /* on if0 unless said otherwise */
-#define XDP(...)        run(skel->progs.mfw_xdp, if0, &(struct pkt_spec){ __VA_ARGS__ })
-#define XDP_ON(i, ...)  run(skel->progs.mfw_xdp, (i), &(struct pkt_spec){ __VA_ARGS__ })
+#define TC(...)         run(skel->progs.mfw_tc, if0, &(struct pkt_spec){ __VA_ARGS__ })
+#define TC_ON(i, ...)   run(skel->progs.mfw_tc, (i), &(struct pkt_spec){ __VA_ARGS__ })
 
 /* ---- rule loading (mirrors mfw_policy_compile() and dataplane.c) ---- */
 
@@ -207,32 +211,32 @@ static __u64 stat(__u32 id)
 static void test_unbound(void)
 {
     reset();
-    CHECK(XDP(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
           "no ruleset: open");
     commit();
-    CHECK(XDP(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
           "ruleset with nothing bound: open");
 }
 
-static void test_standard_xdp(void)
+static void test_standard(void)
 {
     reset();
     add("10 deny host 10.0.0.1");
     add("10 permit 10.0.0.0 0.0.0.255");
     add("10 deny 10.0.0.0/8");
     commit();
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP) == XDP_DROP, "explicit deny");
-    CHECK(XDP(.src = "10.0.0.2", .dst = "1.1.1.1", UDP) == XDP_PASS, "earlier permit wins");
-    CHECK(XDP(.src = "10.9.0.2", .dst = "1.1.1.1", UDP) == XDP_DROP, "later deny");
-    CHECK(XDP(.src = "192.168.1.1", .dst = "1.1.1.1", UDP) == XDP_PASS, "miss → pass (blacklist)");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", .proto = 47) == XDP_DROP, "std matches any proto");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 1) == XDP_DROP, "802.1Q peel");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 2) == XDP_DROP, "QinQ peel");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 3) == XDP_PASS, ">2 tags → non-IPv4 pass");
-    CHECK(XDP(.ethertype = ETH_P_ARP) == XDP_PASS, "ARP pass");
-    CHECK(XDP(.ethertype = ETH_P_ARP, .vlans = 1) == XDP_PASS, "tagged ARP pass");
-    CHECK(XDP(.ethertype = ETH_P_IPV6) == XDP_PASS, "IPv6 pass");
-    CHECK(XDP(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == XDP_DROP,
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP) == TCX_DROP, "explicit deny");
+    CHECK(TC(.src = "10.0.0.2", .dst = "1.1.1.1", UDP) == TCX_NEXT, "earlier permit wins");
+    CHECK(TC(.src = "10.9.0.2", .dst = "1.1.1.1", UDP) == TCX_DROP, "later deny");
+    CHECK(TC(.src = "192.168.1.1", .dst = "1.1.1.1", UDP) == TCX_NEXT, "miss → pass (blacklist)");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", .proto = 47) == TCX_DROP, "std matches any proto");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 1) == TCX_DROP, "802.1Q peel");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 2) == TCX_DROP, "QinQ peel");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 3) == TCX_NEXT, ">2 tags → non-IPv4 pass");
+    CHECK(TC(.ethertype = ETH_P_ARP) == TCX_NEXT, "ARP pass");
+    CHECK(TC(.ethertype = ETH_P_ARP, .vlans = 1) == TCX_NEXT, "tagged ARP pass");
+    CHECK(TC(.ethertype = ETH_P_IPV6) == TCX_NEXT, "IPv6 pass");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == TCX_DROP,
           "non-first frag still matches saddr");
 }
 
@@ -244,25 +248,25 @@ static void test_extended(void)
     add("100 permit udp any eq 53 any");
     add("100 permit icmp any any");
     commit();
-    CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == XDP_PASS, "ssh ok");
-    CHECK(XDP(.src = "10.0.0.66", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == XDP_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TCX_NEXT, "ssh ok");
+    CHECK(TC(.src = "10.0.0.66", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TCX_DROP,
           "deny before permit");
-    CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 23) == XDP_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 23) == TCX_DROP,
           "implicit deny");
-    CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.6", TCP, .sport = 40000, .dport = 22) == XDP_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.6", TCP, .sport = 40000, .dport = 22) == TCX_DROP,
           "wrong dst");
-    CHECK(XDP(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 5555) == XDP_PASS,
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 5555) == TCX_NEXT,
           "dns reply by sport");
-    CHECK(XDP(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == XDP_PASS, "icmp");
-    CHECK(XDP(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = 47) == XDP_DROP, "gre implicit deny");
-    CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .dport = 22, .vlans = 2) == XDP_PASS,
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TCX_NEXT, "icmp");
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = 47) == TCX_DROP, "gre implicit deny");
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .dport = 22, .vlans = 2) == TCX_NEXT,
           "QinQ + extended");
 
     /* empty bound list = implicit deny only */
     reset();
     rs.ext_acl = 101;
     commit();
-    CHECK(XDP(.src = "1.2.3.4", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == XDP_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TCX_DROP,
           "empty bound ext list denies");
 }
 
@@ -274,13 +278,13 @@ static void test_combined(void)
     add("10 permit 203.0.113.0 0.0.0.255");
     add("100 permit tcp any any eq 22");
     commit();
-    CHECK(XDP(.src = "203.0.113.66", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_DROP,
+    CHECK(TC(.src = "203.0.113.66", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_DROP,
           "std deny beats ext permit");
-    CHECK(XDP(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 80) == XDP_DROP,
+    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 80) == TCX_DROP,
           "std permit does not bypass ext implicit deny");
-    CHECK(XDP(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
           "std permit then ext permit");
-    CHECK(XDP(.src = "198.51.100.1", .dst = "10.0.0.5", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC(.src = "198.51.100.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
           "std miss then ext permit");
 }
 
@@ -289,10 +293,10 @@ static void test_established(void)
     reset();
     add("100 permit tcp any any established");
     commit();
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x02) == XDP_DROP, "SYN blocked");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == XDP_PASS, "SYN-ACK ok");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x10) == XDP_PASS, "ACK ok");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == XDP_PASS, "RST ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x02) == TCX_DROP, "SYN blocked");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == TCX_NEXT, "SYN-ACK ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x10) == TCX_NEXT, "ACK ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == TCX_NEXT, "RST ok");
 }
 
 static void test_fragments(void)
@@ -302,40 +306,40 @@ static void test_fragments(void)
     add("100 deny udp any any eq 53");
     add("100 permit udp any any eq 4789");
     commit();
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_PASS,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TCX_NEXT,
           "first frag has ports");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 53, .frag_off = 0x2000) == XDP_DROP,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 53, .frag_off = 0x2000) == TCX_DROP,
           "first frag hits a port deny");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 80, .frag_off = 0x2000) == XDP_DROP,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 80, .frag_off = 0x2000) == TCX_DROP,
           "first frag hits the implicit deny");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_PASS,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_NEXT,
           "non-first frag skips the extended list");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == XDP_PASS,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == TCX_NEXT,
           "non-first frag of any protocol skips it");
-    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP,
+    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_DROP,
           "non-first frag still hits a standard deny");
-    CHECK(XDP(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == XDP_DROP,
+    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TCX_DROP,
           "first frag hits a standard deny");
 
     __u64 off1 = stat(MFW_STAT_TCP_FRAG_OFF1);
 
-    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 1) == XDP_DROP,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 1) == TCX_DROP,
           "TCP frag at offset 1 dropped");
-    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 0x2001) == XDP_DROP,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 0x2001) == TCX_DROP,
           "TCP frag at offset 1 with MF dropped");
     CHECK(stat(MFW_STAT_TCP_FRAG_OFF1) == off1 + 2, "tcp_frag_off1 counted");
-    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 2) == XDP_PASS,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 2) == TCX_NEXT,
           "TCP frag at offset 2 passes");
-    CHECK(XDP(.src = "4.4.4.4", .dst = "2.2.2.2", UDP, .frag_off = 1) == XDP_PASS,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", UDP, .frag_off = 1) == TCX_NEXT,
           "UDP frag at offset 1 passes");
 
     struct mfw_config cfg = { .abi_version = MFW_ABI_VERSION, .drop_ipv4_fragments = 1 };
     __u32 k = 0;
 
     bpf_map_update_elem(bpf_map__fd(skel->maps.config), &k, &cfg, BPF_ANY);
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 0x2000) == XDP_DROP, "strict: xdp");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == XDP_DROP, "strict: non-first frag");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789) == XDP_PASS, "strict: unfragmented ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 0x2000) == TCX_DROP, "strict: first frag");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_DROP, "strict: non-first frag");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789) == TCX_NEXT, "strict: unfragmented ok");
 }
 
 static void test_full_tables(void)
@@ -354,9 +358,9 @@ static void test_full_tables(void)
     }
     add("100 permit tcp any any eq 9");
     commit();
-    CHECK(XDP(.src = "192.0.2.1", .dst = "1.1.1.1", UDP) == XDP_DROP, "64th std ACE");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == XDP_PASS, "128th ext ACE");
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == XDP_DROP,
+    CHECK(TC(.src = "192.0.2.1", .dst = "1.1.1.1", UDP) == TCX_DROP, "64th std ACE");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == TCX_NEXT, "128th ext ACE");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == TCX_DROP,
           "past the 128th: implicit deny");
 }
 
@@ -371,38 +375,38 @@ static void test_per_interface(void)
     add("10 deny host 192.0.2.9");
     commit_on(if1);
 
-    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_DROP,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_DROP,
           "if0: extended implicit deny");
-    CHECK(XDP_ON(if1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+    CHECK(TC_ON(if1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
           "if1: no extended list, not on the blacklist");
-    CHECK(XDP_ON(if0, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC_ON(if0, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_NEXT,
           "if0: if1's blacklist does not apply");
-    CHECK(XDP_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
           "if1: its blacklist");
-    CHECK(XDP_ON(1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+    CHECK(TC_ON(1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
           "lo: no ruleset, open");
 
     /* replace if0's ruleset: the new one applies, if1 keeps its own */
     memset(&rs, 0, sizeof(rs));
     add("100 permit tcp any any eq 80");
     commit_on(if0);
-    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == XDP_PASS,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
           "if0: swapped ruleset applies");
-    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
           "if0: old ruleset gone");
-    CHECK(XDP_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_DROP,
+    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
           "if1: unchanged by if0's swap");
 
     /* removing if0's entry makes it fail-open again */
     bpf_map_delete_elem(bpf_map__fd(skel->maps.rulesets), &if0);
-    CHECK(XDP_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == XDP_PASS,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_NEXT,
           "if0: entry removed, open");
 }
 
 static void test_corrupt(void)
 {
     reset();
-    CHECK(XDP(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == XDP_DROP, "ihl<5 xdp");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == TCX_DROP, "ihl<5 dropped");
 }
 
 /* A private network namespace with two dummy interfaces. */
@@ -441,7 +445,7 @@ int main(void)
     }
 
     test_unbound();
-    test_standard_xdp();
+    test_standard();
     test_extended();
     test_combined();
     test_established();
@@ -450,8 +454,8 @@ int main(void)
     test_per_interface();
     test_corrupt();
 
-    /* every XDP run counted exactly one outcome */
-    CHECK(stat(MFW_STAT_XDP_PASS) + stat(MFW_STAT_XDP_DROP) > 0, "xdp outcome stats");
+    /* every run counted exactly one outcome */
+    CHECK(stat(MFW_STAT_PASS) + stat(MFW_STAT_DROP) > 0, "outcome stats");
     CHECK(stat(MFW_STAT_STD_DENY) > 0 && stat(MFW_STAT_EXT_IMPLICIT_DENY) > 0 &&
           stat(MFW_STAT_EXT_PERMIT) > 0, "reason stats");
 

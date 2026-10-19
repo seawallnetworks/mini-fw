@@ -23,9 +23,13 @@ PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
+command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
 
 in_cli() { ip netns exec "$CLI" "$@"; }
 in_fw()  { ip netns exec "$FW" "$@"; }
+# ip link doesn't show tcx programs; bpftool does
+tcx_on() { in_fw bpftool net show dev "$1" | grep -q "tcx/${2:-ingress} mfw_tc "; }
+xdp_on() { in_fw ip link show "$1" | grep -q ' xdp'; }
 mfw()    { "$MFW" -s "$SOCK" "$@"; }
 
 start_mfwd() {
@@ -77,9 +81,6 @@ in_cli ip addr add $CLI_IP/24 dev veth-cli; in_cli ip addr add $CLI_IP2/24 dev v
 in_fw  ip addr add $FW_IP/24 dev veth-fw;   in_fw  ip addr add $FW_IP2/24 dev veth-fw2
 for i in veth-cli veth-cli2 lo; do in_cli ip link set $i up; done
 for i in veth-fw veth-fw2 lo; do in_fw ip link set $i up; done
-# GRO on the peer lets native veth XDP see normal frames; harmless otherwise.
-in_cli ethtool -K veth-cli gro on >/dev/null 2>&1 || true
-in_cli ethtool -K veth-cli2 gro on >/dev/null 2>&1 || true
 
 # listeners: TCP 8080/8081 on fw, TCP 9090 on cli, UDP echo 5353 on fw
 for port in 8080 8081; do
@@ -100,11 +101,12 @@ expect ok "ping" ping_fw
 echo "== mfwd running, empty policy"
 start_mfwd
 expect ok "ping" ping_fw
-expect ok "nothing attached" bash -c "! ip -n $FW link show veth-fw | grep -q ' xdp'"
+expect fail "nothing attached" tcx_on veth-fw
 
 echo "== standard list (blacklist)"
 policy "acl 10 10 deny host $CLI_IP" "acl 10 20 permit any" "bind veth-fw in 10"
-expect ok   "XDP attached by the policy" bash -c "ip -n $FW link show veth-fw | grep -q ' xdp'"
+expect ok   "TC ingress attached by the policy" tcx_on veth-fw
+expect fail "XDP left free (for voidGate)" xdp_on veth-fw
 expect fail "ping from denied host" ping_fw
 expect ok   "std_deny counted" test "$(stat_of std_deny)" -gt 0
 policy "acl 10 20 permit any" "bind veth-fw in 10"
@@ -115,7 +117,7 @@ policy "acl 10 10 deny host 192.0.2.1" "bind veth-fw in 10"
 expect ok   "ping not on the blacklist (no implicit deny)" ping_fw
 policy
 expect ok   "empty policy: ping" ping_fw
-expect ok   "empty policy: detached" bash -c "! ip -n $FW link show veth-fw | grep -q ' xdp'"
+expect fail "empty policy: detached" tcx_on veth-fw
 
 echo "== extended list (implicit deny)"
 EXT=("acl 100 10 permit tcp any host $FW_IP eq 8080"
@@ -154,11 +156,9 @@ expect fail "veth-fw2 still blocked after restart" ping_fw2
 expect ok   "policy kept" bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
 policy
 
-echo "== XDP only; egress is never filtered"
+echo "== ingress only; egress is never filtered"
 policy "acl 100 10 permit ip any any" "bind veth-fw in 100"
-expect ok   "no TC filters attached" \
-    bash -c "! ip netns exec $FW tc filter show dev veth-fw ingress | grep -q . &&
-             ! ip netns exec $FW tc filter show dev veth-fw egress | grep -q ."
+expect fail "nothing at TC egress" tcx_on veth-fw egress
 expect fail "bind ... out refused" policy "bind veth-fw out 100"
 expect fail "ports on a standard list refused" policy "acl 10 10 deny host 1.1.1.1 eq 22"
 expect fail "non-contiguous wildcard refused" policy "acl 10 10 deny 10.0.0.0 0.0.2.255"

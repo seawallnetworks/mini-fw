@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
-/* The BPF side of mfwd: pinned maps, XDP links, rulesets, counters. */
+/* The BPF side of mfwd: pinned maps, TC links, rulesets, counters. */
 #ifndef MFW_DATAPLANE_H
 #define MFW_DATAPLANE_H
 
@@ -14,7 +14,6 @@ struct mfw_bpf;
 
 struct mfw_dp {
     char            root[PATH_MAX - 64];  /* pin root, e.g. /sys/fs/bpf/mfw */
-    const char     *xdp_mode;             /* "auto", "native" or "generic" */
     struct mfw_bpf *skel;                 /* loaded program, maps from pins */
     int             prog_fd;
     int             rulesets_fd;
@@ -27,8 +26,7 @@ struct mfw_dp {
  * use), check their ABI, and move already attached interfaces to this
  * program. Returns 0, or -1 with a message in err.
  */
-int mfw_dp_open(struct mfw_dp *dp, const char *root, const char *xdp_mode,
-                char *err, size_t errlen);
+int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);
 
 /* Is ifname attached, by a link that is still alive on that interface? */

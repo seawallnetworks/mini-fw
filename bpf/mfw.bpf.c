@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* mini-fw dataplane — step 1: stateless, ingress-only ACLs for a local host.
- * One XDP program, attached to every protected interface, looks up the
- * ruleset of the interface the packet arrived on and evaluates, in order:
+ * One TC ingress program (tcx), attached to every protected interface,
+ * looks up the ruleset of the interface the packet arrived on and
+ * evaluates, in order:
  *
  *   1. standard ACL (1–99): source-only blacklist; explicit deny → DROP,
  *      permit or miss → continue.
@@ -11,6 +12,10 @@
  * Egress is not filtered. Unbound lists, and interfaces without a ruleset,
  * are fail-open. Non-IPv4 always passes. No conntrack yet, so return traffic must be permitted explicitly
  * (or via "established").
+ *
+ * TC, not XDP: XDP is left to a DDoS gate such as voidGate, which drops
+ * floods before the stack builds an skb; mini-fw sees what it passed.
+ * "Pass" is TCX_NEXT, so a tc program after mini-fw still runs.
  */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -22,6 +27,10 @@
 #include <bpf/bpf_endian.h>
 
 #include "mfw.h"
+
+/* The most parse_pkt() reads: Ethernet, 2 VLAN tags, IPv4 with options,
+ * TCP. */
+#define MFW_HDR_MAX  (14 + 2 * 4 + 60 + 20)
 
 #ifndef ETH_P_8021Q
 #define ETH_P_8021Q  0x8100
@@ -289,15 +298,24 @@ static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex)
     return bpf_map_lookup_elem(inner, &zero);
 }
 
-SEC("xdp")
-int mfw_xdp(struct xdp_md *ctx)
+SEC("tcx/ingress")
+int mfw_tc(struct __sk_buff *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct pkt_info p = {};
     const struct mfw_ruleset *rs;
-    int pr = parse_pkt(data, data_end, &p);
-    int std;
+    int pr, std;
+
+    /* After GRO the headers may not all be in the skb's linear part,
+     * the only part a TC program reads directly. A pull that fails
+     * leaves a short view, which parse_pkt() drops as malformed. */
+    if (data + MFW_HDR_MAX > data_end) {
+        bpf_skb_pull_data(ctx, ctx->len < MFW_HDR_MAX ? ctx->len : MFW_HDR_MAX);
+        data = (void *)(long)ctx->data;
+        data_end = (void *)(long)ctx->data_end;
+    }
+    pr = parse_pkt(data, data_end, &p);
 
     if (pr == PARSE_NON_IPV4) {
         stat_inc(MFW_STAT_NON_IPV4);
@@ -348,11 +366,11 @@ int mfw_xdp(struct xdp_md *ctx)
         goto pass;
     }
 pass:
-    stat_inc(MFW_STAT_XDP_PASS);
-    return XDP_PASS;
+    stat_inc(MFW_STAT_PASS);
+    return TCX_NEXT;
 drop:
-    stat_inc(MFW_STAT_XDP_DROP);
-    return XDP_DROP;
+    stat_inc(MFW_STAT_DROP);
+    return TCX_DROP;
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";

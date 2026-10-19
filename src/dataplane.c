@@ -4,7 +4,8 @@
  *   <root>/maps/rulesets   HASH_OF_MAPS ifindex → inner map (one mfw_ruleset)
  *   <root>/maps/config     ARRAY  flags, generation
  *   <root>/maps/stats      PERCPU counters
- *   <root>/link/xdp_<if>   pinned bpf_link: keeps XDP attached without mfwd
+ *   <root>/link/tcx_<if>   pinned bpf_link: keeps the TC ingress program
+ *                          attached without mfwd
  *
  * Everything is pinned, so filtering goes on while mfwd is stopped or
  * restarting. An installed inner map is never written again: a new
@@ -19,7 +20,6 @@
 #include <sys/stat.h>
 #include <sys/vfs.h>
 #include <unistd.h>
-#include <linux/if_link.h>
 #include <linux/magic.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -55,18 +55,18 @@ static int ensure_dir(const char *path)
 
 static void link_path(const char *root, const char *ifname, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/link/xdp_%s", root, ifname);
+    snprintf(buf, len, "%s/link/tcx_%s", root, ifname);
 }
 
-/* The ifindex an XDP link is attached to; 0 if its device is gone. */
+/* The ifindex a TC ingress link is attached to; 0 if its device is gone. */
 static __u32 link_ifindex(int fd)
 {
     struct bpf_link_info info = {};
     __u32 len = sizeof(info);
 
-    if (bpf_link_get_info_by_fd(fd, &info, &len) || info.type != BPF_LINK_TYPE_XDP)
+    if (bpf_link_get_info_by_fd(fd, &info, &len) || info.type != BPF_LINK_TYPE_TCX)
         return 0;
-    return info.xdp.ifindex;
+    return info.tcx.ifindex;
 }
 
 /* An fd for ifname's link pin if it is alive on that interface, else -1.
@@ -118,7 +118,7 @@ int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
     while ((de = readdir(d)) && n < max) {
         const char *ifname = de->d_name + 4;
 
-        if (strncmp(de->d_name, "xdp_", 4) || strlen(ifname) >= IF_NAMESIZE)
+        if (strncmp(de->d_name, "tcx_", 4) || strlen(ifname) >= IF_NAMESIZE)
             continue;
         if (mfw_dp_attached(dp, ifname))
             snprintf(names[n++], IF_NAMESIZE, "%s", ifname);
@@ -178,7 +178,7 @@ static void upgrade_links(struct mfw_dp *dp)
         if (fd < 0)
             continue;
         if (bpf_link_update(fd, dp->prog_fd, NULL))
-            fprintf(stderr, "mfwd: %s: update XDP program: %s\n", names[i],
+            fprintf(stderr, "mfwd: %s: update TC program: %s\n", names[i],
                     strerror(errno));
         close(fd);
     }
@@ -211,14 +211,12 @@ static void drop_old_stats(const char *root)
     close(fd);
 }
 
-int mfw_dp_open(struct mfw_dp *dp, const char *root, const char *xdp_mode,
-                char *err, size_t errlen)
+int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
 {
     char maps[PATH_MAX], links[PATH_MAX];
 
     memset(dp, 0, sizeof(*dp));
     dp->prog_fd = dp->rulesets_fd = dp->config_fd = dp->stats_fd = -1;
-    dp->xdp_mode = xdp_mode;
     if (strlen(root) >= sizeof(dp->root))
         return fail(err, errlen, "pin root too long");
     snprintf(dp->root, sizeof(dp->root), "%s", root);
@@ -238,11 +236,11 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, const char *xdp_mode,
         return fail(err, errlen, "open BPF object: %s", strerror(errno));
     if (mfw_bpf__load(dp->skel)) {  /* reuses pinned maps, pins new ones */
         mfw_dp_close(dp);
-        return fail(err, errlen, "load BPF object: %s (kernel 5.12+ with BTF, "
+        return fail(err, errlen, "load BPF object: %s (kernel 6.6+ with BTF, "
                     "CAP_BPF and CAP_NET_ADMIN needed; MFW_DEBUG=1 for the "
                     "verifier log)", strerror(errno));
     }
-    dp->prog_fd = bpf_program__fd(dp->skel->progs.mfw_xdp);
+    dp->prog_fd = bpf_program__fd(dp->skel->progs.mfw_tc);
     dp->rulesets_fd = bpf_map__fd(dp->skel->maps.rulesets);
     dp->config_fd = bpf_map__fd(dp->skel->maps.config);
     dp->stats_fd = bpf_map__fd(dp->skel->maps.stats);
@@ -263,28 +261,17 @@ void mfw_dp_close(struct mfw_dp *dp)
 int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errlen)
 {
     char path[PATH_MAX];
-    __u32 modes[2];
-    int ifindex = if_nametoindex(ifname), n = 0, fd = -1, e = 0;
+    int ifindex = if_nametoindex(ifname), fd, e;
 
     if (!ifindex)
         return fail(err, errlen, "%s: no such interface", ifname);
     if (mfw_dp_attached(dp, ifname))
         return 0;
-    if (!strcmp(dp->xdp_mode, "native") || !strcmp(dp->xdp_mode, "auto"))
-        modes[n++] = XDP_FLAGS_DRV_MODE;
-    if (!strcmp(dp->xdp_mode, "generic") || !strcmp(dp->xdp_mode, "auto"))
-        modes[n++] = XDP_FLAGS_SKB_MODE;
-
-    for (int i = 0; i < n && fd < 0; i++) {
-        LIBBPF_OPTS(bpf_link_create_opts, opts, .flags = modes[i]);
-
-        fd = bpf_link_create(dp->prog_fd, ifindex, BPF_XDP, &opts);
-        if (fd < 0)
-            e = errno;
-    }
+    /* appended: a tc program attached before mini-fw runs first */
+    fd = bpf_link_create(dp->prog_fd, ifindex, BPF_TCX_INGRESS, NULL);
     if (fd < 0)
-        return fail(err, errlen, "%s: attach XDP (%s): %s", ifname, dp->xdp_mode,
-                    strerror(e));
+        return fail(err, errlen, "%s: attach TC ingress: %s", ifname,
+                    strerror(errno));
     link_path(dp->root, ifname, path, sizeof(path));
     if (bpf_obj_pin(fd, path)) {
         e = errno;
@@ -303,7 +290,7 @@ void mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
     if (ifindex)
         bpf_map_delete_elem(dp->rulesets_fd, &ifindex);
     link_path(dp->root, ifname, path, sizeof(path));
-    unlink(path);  /* last reference: the kernel detaches XDP */
+    unlink(path);  /* last reference: the kernel detaches the program */
 }
 
 int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
@@ -393,7 +380,7 @@ static void rm_dir(const char *dir)
         if (de->d_name[0] == '.')
             continue;
         snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        unlink(path);  /* a link pin: the kernel detaches XDP */
+        unlink(path);  /* a link pin: the kernel detaches the program */
     }
     closedir(d);
     rmdir(dir);

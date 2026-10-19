@@ -41,7 +41,7 @@
 #include "mfw_client.h"
 #include "mfw_policy.h"
 
-#define MFWD_VERSION      "0.3.0"
+#define MFWD_VERSION      "0.4.0"
 #define MFWD_STATE_DIR    "/run/mfwd"
 #define MFWD_READ_SECS    3      /* a client must send its request in time */
 
@@ -502,7 +502,6 @@ static void usage(FILE *f)
 {
     fprintf(f,
         "usage: mfwd [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir]\n"
-        "            [-x auto|native|generic]\n"
         "       mfwd -P [-p pinroot] [-d statedir]\n"
         "\n"
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
@@ -510,7 +509,6 @@ static void usage(FILE *f)
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
         "  -p pinroot  bpffs directory for maps and links (default " MFW_PIN_ROOT ")\n"
         "  -d dir      where the applied policy is saved (default " MFWD_STATE_DIR ")\n"
-        "  -x mode     XDP attach mode (default auto: native, else generic)\n"
         "  -P          detach every interface, remove all pins and the saved\n"
         "              policy, then exit\n"
         "  -V          print the version\n");
@@ -518,7 +516,7 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
-    const char *sock = MFW_SOCKET, *root = MFW_PIN_ROOT, *xdp_mode = "auto";
+    const char *sock = MFW_SOCKET, *root = MFW_PIN_ROOT;
     struct mfwd d = {};
     struct sigaction sa = { .sa_handler = on_signal };
     char err[MFW_ERR_LEN], path[PATH_MAX];
@@ -528,7 +526,7 @@ int main(int argc, char **argv)
     char *end;
 
     snprintf(d.state_dir, sizeof(d.state_dir), "%s", MFWD_STATE_DIR);
-    while ((c = getopt(argc, argv, "s:m:g:p:d:x:PVh")) != -1) {
+    while ((c = getopt(argc, argv, "s:m:g:p:d:PVh")) != -1) {
         switch (c) {
         case 's': sock = optarg; break;
         case 'p': root = optarg; break;
@@ -551,14 +549,6 @@ int main(int argc, char **argv)
             gid = g->gr_gid;
             break;
         }
-        case 'x':
-            if (strcmp(optarg, "auto") && strcmp(optarg, "native") &&
-                strcmp(optarg, "generic")) {
-                fprintf(stderr, "mfwd: -x takes auto, native or generic\n");
-                return 2;
-            }
-            xdp_mode = optarg;
-            break;
         case 'V':
             printf("mfwd %s, ABI %d\n", MFWD_VERSION, MFW_ABI_VERSION);
             return 0;
@@ -584,7 +574,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (mfw_dp_open(&d.dp, root, xdp_mode, err, sizeof(err))) {
+    if (mfw_dp_open(&d.dp, root, err, sizeof(err))) {
         logmsg("%s", err);
         return 1;
     }

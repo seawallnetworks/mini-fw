@@ -18,8 +18,8 @@
 #define REPLY_MAX  (MFW_REQUEST_MAX + 4096)
 
 static const char *const stat_names[MFW_STAT_MAX] = {
-    [MFW_STAT_XDP_PASS]          = "xdp_pass",
-    [MFW_STAT_XDP_DROP]          = "xdp_drop",
+    [MFW_STAT_PASS]              = "xdp_pass",
+    [MFW_STAT_DROP]              = "xdp_drop",
     [MFW_STAT_STD_DENY]          = "std_deny",
     [MFW_STAT_STD_PERMIT]        = "std_permit",
     [MFW_STAT_EXT_PERMIT]        = "ext_permit",

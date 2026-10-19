@@ -10,7 +10,7 @@
 #include "mfw_client.h"
 #include "mfw_policy.h"
 
-#define MFW_VERSION "0.3.0"
+#define MFW_VERSION "0.4.0"
 
 /* exit status, as sw_authctl */
 #define EXIT_OK       0
