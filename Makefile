@@ -9,14 +9,15 @@ MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
 PREFIX    ?= /usr/local/seawall
 
 CFLAGS     ?= -O2 -g -Wall -Wextra
-CFLAGS     += -Iinclude -Ibpf -Isrc -Ibuild -MMD -MP
-BPF_CFLAGS := -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Ibpf \
+CFLAGS     += -Iinclude -Isrc -MMD -MP
+BPF_CFLAGS := -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Iinclude \
               $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH))
+BPFDIR     := src/bpf
 LIBBPF     := $(shell pkg-config --libs libbpf 2>/dev/null || echo -lbpf -lelf -lz)
 
 LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
 MFWD_OBJS  := build/mfwd.o build/dataplane.o
-HEADERS    := bpf/mfw.h include/mfw_policy.h include/mfw_client.h
+HEADERS    := include/mfw.h include/mfw_policy.h include/mfw_client.h
 
 .PHONY: all clean test test-bpf test-mfwd smoke install install-runtime \
 	install-static-lib uninstall
@@ -25,17 +26,17 @@ all: mfwd mfw libmfw.a
 build:
 	mkdir -p $@
 
-build/mfw.bpf.o: bpf/mfw.bpf.c bpf/mfw.h | build
+build/mfw.bpf.o: $(BPFDIR)/mfw.bpf.c include/mfw.h | build
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
-build/mfw.skel.h: build/mfw.bpf.o
+src/mfw.skel.h: build/mfw.bpf.o
 	$(BPFTOOL) gen skeleton $< name mfw_bpf > $@
 
 build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # the skeleton embeds the BPF object
-build/dataplane.o: build/mfw.skel.h
+build/dataplane.o: src/mfw.skel.h
 
 libmfw.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
@@ -52,7 +53,7 @@ tests/test_acl: tests/test_acl.c libmfw.a
 tests/test_policy: tests/test_policy.c libmfw.a
 	$(CC) $(CFLAGS) -o $@ $< libmfw.a
 
-tests/test_bpf: tests/test_bpf.c build/mfw.skel.h libmfw.a
+tests/test_bpf: tests/test_bpf.c src/mfw.skel.h libmfw.a
 	$(CC) $(CFLAGS) -o $@ $< libmfw.a $(LIBBPF)
 
 # no privileges needed
@@ -93,6 +94,6 @@ uninstall:
 	    $(DESTDIR)/etc/systemd/system/mfwd.service
 
 clean:
-	rm -rf build mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d
+	rm -rf build src/mfw.skel.h mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d
 
 -include build/*.d

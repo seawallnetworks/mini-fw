@@ -81,8 +81,8 @@ Key properties:
   state. mfwd checks all of it before changing anything (§6).
 - **Pinned, so mfwd can stop.** The links and maps are pinned; filtering
   goes on while mfwd is stopped, restarting or upgraded.
-- **One BPF object.** `bpf/mfw.bpf.c` is embedded in `mfwd` as a libbpf
-  skeleton (`build/mfw.skel.h`), so there is no `.o` to install.
+- **One BPF object.** `src/bpf/mfw.bpf.c` is embedded in `mfwd` as a libbpf
+  skeleton (`src/mfw.skel.h`, generated), so there is no `.o` to install.
 - **Rulesets are per interface.** Every attached interface runs the same
   program, which looks up the ruleset of the interface the packet arrived
   on (`ingress_ifindex`). An interface with no ruleset is fail-open. This
@@ -91,10 +91,10 @@ Key properties:
 ### 2.1 Source layout
 
 ```text
-bpf/mfw.h              shared UAPI: mfw_rule, mfw_ruleset, mfw_config, stat ids
-bpf/mfw.bpf.c          TC ingress program: parser, standard + extended matching
+include/mfw.h          shared UAPI: mfw_rule, mfw_ruleset, mfw_config, stat ids
 include/mfw_policy.h   libmfw: ACE and policy parsing, checks, compile, canonical form
 include/mfw_client.h   libmfw: the mfwd client
+src/bpf/mfw.bpf.c      TC ingress program: parser, standard + extended matching
 src/acl_parse.c        libmfw: Cisco ACE parser and formatter
 src/policy.c           libmfw: whole policies
 src/client.c           libmfw: socket client
@@ -251,7 +251,7 @@ minimum is above the design's 5.10.
 
 ## 4. Data structures and maps
 
-All shared types are in `bpf/mfw.h`, fixed-width with explicit padding.
+All shared types are in `include/mfw.h`, fixed-width with explicit padding.
 
 ### 4.1 `struct mfw_rule` (44 bytes)
 
