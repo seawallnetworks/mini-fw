@@ -51,7 +51,7 @@ see [`implementation.md`](implementation.md).
 
 | Requirement | How to check |
 |-------------|--------------|
-| Linux kernel 6.6 or newer (tcx), with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
+| Linux kernel 6.1 or newer, with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
 | bpffs mounted at `/sys/fs/bpf` | `mount \| grep /sys/fs/bpf` |
 | mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) | `mfwd.service` does this |
 | `mfw` needs access to mfwd's socket | root by default; see `mfwd -m` / `-g` |
@@ -104,6 +104,18 @@ On Debian/Ubuntu the build dependencies are:
 ```bash
 sudo apt install clang llvm make libbpf-dev linux-tools-common linux-tools-$(uname -r)
 ```
+
+On Amazon Linux 2023 (or RHEL 9 and its rebuilds):
+
+```bash
+sudo dnf install clang llvm make gcc libbpf-devel bpftool
+```
+
+mfwd attaches with tcx on Linux 6.6 and later, and with classic TC (a
+cls_bpf filter on the interface's clsact qdisc) on 6.1 to 6.5, such as
+Amazon Linux 2023's default kernel; its log says which when it starts.
+Both filter the same way. With classic TC, `mfwd -P` removes the filters
+from the interfaces of the network namespace it runs in.
 
 Self-tests (all but the first need root, and none touch a running mini-fw):
 
@@ -667,8 +679,8 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 | `mfw: cannot reach mfwd: No such file or directory` | mfwd not running | `sudo systemctl start mfwd`; `journalctl -u mfwd` |
 | `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or start mfwd with `-g <group> -m 0660` |
 | `… is not on bpffs` (mfwd log) | bpffs missing | `sudo mount -t bpf bpf /sys/fs/bpf` |
-| `load BPF object: …` (mfwd log) | kernel too old (< 6.6), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
-| `eth0: attach TC ingress: …` | kernel without tcx (< 6.6), or missing capabilities | check §1.2 |
+| `load BPF object: …` (mfwd log) | kernel too old (< 6.1), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
+| `eth0: attach TC ingress: …` | missing capabilities | check §1.2 |
 | `pinned maps under … have ABI N, expected 2` | state left by a different mini-fw version | `sudo mfwd -P`, then start mfwd again |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
@@ -685,7 +697,7 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 Useful low-level checks:
 
 ```bash
-sudo bpftool net show dev eth0                      # "tcx/ingress mfw_tc" when attached
+sudo bpftool net show dev eth0                      # "tcx/ingress mfw_tc" when attached ("clsact/ingress" before 6.6)
 sudo bpftool prog show name mfw_tc
 sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/rulesets   # ifindex → inner map id
 sudo bpftool map dump id <inner map id>                       # that interface's ruleset

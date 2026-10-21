@@ -40,10 +40,11 @@ same() {  # same "description" actual expected
 }
 
 mfw()  { "$MFW" -s "$SOCK" "$@"; }
-# ip link doesn't show tcx programs; bpftool does
+# ip link doesn't show tcx programs; bpftool does, and classic TC's
+# (MFW_NO_TCX=1, or a kernel before 6.6) as clsact/ingress
 tc_on() {
     nsenter --net=/var/run/netns/$NS bpftool net show dev "$1" |
-        grep -q 'tcx/ingress mfw_tc '
+        grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'
 }
 field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
 
@@ -182,7 +183,8 @@ same "d0 attached again" "$(field attached)" d0,d1
 
 echo "== purge"
 stop
-expect ok "mfwd -P" "$MFWD" -P -p "$PINS" -d "$STATE"
+# in the interfaces' namespace: a classic TC filter is removed there
+expect ok "mfwd -P" nsenter --net=/var/run/netns/$NS "$MFWD" -P -p "$PINS" -d "$STATE"
 expect ok "pins removed" test ! -e "$PINS"
 expect ok "saved policy removed" test ! -e "$STATE/policy"
 expect fail "no TC on d0" tc_on d0

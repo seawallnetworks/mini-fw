@@ -3,10 +3,10 @@
 | Field | Value |
 |-------|-------|
 | **Document** | Implementation description — what is actually built |
-| **Scope** | Step 1: stateless, ingress-only ACL at TC ingress (tcx) for a local VM, per-interface lists, driven by the mfwd daemon |
+| **Scope** | Step 1: stateless, ingress-only ACL at TC ingress (tcx, or classic TC before 6.6) for a local VM, per-interface lists, driven by the mfwd daemon |
 | **Version** | mfwd / mfw 0.4.0, ABI 2 |
 | **Date** | 2026-10-12 |
-| **Target** | Linux ≥ 6.6 with BTF (tcx), libbpf ≥ 1.3, clang |
+| **Target** | Linux ≥ 6.1 with BTF (tcx from 6.6), libbpf ≥ 1.3, clang |
 | **Related** | [`design.md`](design.md) (full v1 design, Rev 18), [`../README.md`](../README.md) (operator quick start) |
 
 `design.md` describes the full v1 system: XDP and TC hooks, egress filtering,
@@ -67,6 +67,7 @@ does today.** Where the two disagree, §10 explains why.
    maps/config       ARRAY  flags, generation      ─┤
    maps/stats        PERCPU counters               ─┘ written by mfw_tc
    link/tcx_<if>     pinned bpf_link (keeps the program attached)
+   link/tc_<if>      or, before 6.6, the program: attached by classic TC
 
  NIC ──► XDP (voidGate) ──► GRO ──► tcx ingress mfw_tc ──► TCX_NEXT ──► IP stack ──► sockets
                                               │
@@ -348,7 +349,7 @@ counters restart on such an upgrade while the rulesets and links stay.
 ```text
 <pinroot>/                0700, root only (default /sys/fs/bpf/mfw, mfwd -p)
   maps/{rulesets,config,stats}
-  link/tcx_<ifname>
+  link/tcx_<ifname>         or link/tc_<ifname> (classic TC, §5.3)
 <statedir>/policy         default /run/mfwd (mfwd -d): "# generation N", then
                           the applied policy in canonical form
 ```
@@ -362,7 +363,8 @@ counters restart on such an upgrade while the rulesets and links stay.
 4. Initialize `config` if `abi_version` is 0. If it holds a different ABI
    version, refuse to start (`mfwd -P` removes the old pins).
 5. **Upgrade attached interfaces:** every live link in `link/` gets the
-   program just loaded, with `bpf_link_update` (atomic). Upgrading mfwd
+   program just loaded, with `bpf_link_update` (atomic), and every
+   classic TC filter too, replaced in one netlink request. Upgrading mfwd
    therefore upgrades the BPF code without a gap.
 6. **Restore** the saved policy, if there is one. If the kernel still runs
    its generation (`config.generation`), it is simply taken over. If not
@@ -387,13 +389,33 @@ mfwd attaches and detaches as `APPLY` requires (§6):
 - **Detach:** remove the interface's ruleset, then unlink the pin. With the
   last reference gone, the kernel detaches the program.
 
+A kernel without tcx (before 6.6, such as Amazon Linux 2023's 6.1) refuses
+a `BPF_PROG_QUERY` for `BPF_TCX_INGRESS`; mfwd then attaches with classic
+TC, and its start-up log says so (`MFW_NO_TCX=1` does the same on a newer
+kernel, for the tests):
+
+- **Attach:** a clsact qdisc if the interface has none, and on its ingress
+  a direct-action cls_bpf filter, handle `0x4d46` at priority `0xc000`,
+  late so that a tc program attached before mini-fw runs first. The
+  program is pinned as `link/tc_<if>`: only a mark that mini-fw attached
+  it, since the filter keeps the program loaded by itself.
+- **A filter is live** when its pin exists and the interface, looked up by
+  name, has the filter (`bpf_tc_query`). A re-created device has none.
+- **Detach:** unlink the pin and delete the filter; the qdisc is left for
+  whatever else uses it. The return codes are the same: `TCX_PASS`,
+  `TCX_DROP` and `TCX_NEXT` are `TC_ACT_OK`, `TC_ACT_SHOT` and
+  `TC_ACT_UNSPEC`.
+
 ### 5.4 Purge and emergency removal
 
-`mfwd -P` unlinks every link pin (detaching the program), then removes the maps,
+`mfwd -P` unlinks every link pin (detaching the program), and deletes each
+classic TC filter of its network namespace, then removes the maps,
 the pin root and the saved policy. Without mfwd:
 
 ```bash
 rm -r /sys/fs/bpf/mfw                  # detaches everything, removes all state
+# classic TC (before 6.6): its filters stay until deleted, per interface
+tc filter del dev eth0 ingress pref 49152 handle 0x4d46 bpf
 ```
 
 ---
@@ -584,8 +606,8 @@ that touches several interfaces switches them one after another.
   left to the DDoS gate, which is where floods are cut.
 - Matching is linear: worst case 64 + 128 ACE checks per packet. Put the
   most frequently hit ACEs first.
-- tcx needs no driver support: it works on every interface, veth and
-  dummy included.
+- tcx and classic TC need no driver support: they work on every
+  interface, veth and dummy included.
 
 ### 8.6 SYN floods
 
@@ -654,9 +676,9 @@ Notes:
 | Implicit deny | trailing synthetic `deny ip any any` | running off the end of a bound extended list | Counted separately from explicit denies; takes no ACE slot |
 | `established` | not in design | added (Cisco-compatible) | Makes stateless reply handling practical |
 | Stats ids | TC/CT/frag ids | one set (§4.5), outcomes still named `xdp_*` | Nothing shipped; clean layout, append-only from now on |
-| Kernel | 5.10+ | 6.6+ | tcx links; global BPF function with pointer arguments (5.12+, §3.4) |
+| Kernel | 5.10+ | 6.1+ | tcx links from 6.6, classic TC before (§5.3); global BPF function with pointer arguments (5.12+, §3.4) |
 | `rule_id` delete | `no ip access-list N <rule_id\|seq>` | none: a policy is replaced as a whole | `rule_id` is still `(acl << 16) \| seq` |
-| clsact management | meta markers, TC attach | none | tcx links need no clsact qdisc |
+| clsact management | meta markers, TC attach | before 6.6 only | tcx links need no clsact qdisc; classic TC adds one if missing and leaves it |
 
 ---
 

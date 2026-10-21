@@ -6,6 +6,10 @@
  *   <root>/maps/stats      PERCPU counters
  *   <root>/link/tcx_<if>   pinned bpf_link: keeps the TC ingress program
  *                          attached without mfwd
+ *   <root>/link/tc_<if>    or, on a kernel without tcx (before 6.6), the
+ *                          program, pinned to say mini-fw attached it with
+ *                          classic TC: a cls_bpf filter on the interface's
+ *                          clsact qdisc, which stays without mfwd
  *
  * Everything is pinned, so filtering goes on while mfwd is stopped or
  * restarting. An installed inner map is never written again: a new
@@ -53,9 +57,87 @@ static int ensure_dir(const char *path)
     return mkdir(tmp, 0700) && errno != EEXIST ? -1 : 0;
 }
 
+/* mini-fw's classic TC filter: its handle, and a priority after most
+ * others, so a tc program attached before mini-fw runs first, as with tcx */
+#define MFW_TC_HANDLE    0x4d46  /* "MF" */
+#define MFW_TC_PRIORITY  0xc000
+
 static void link_path(const char *root, const char *ifname, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/link/tcx_%s", root, ifname);
+    snprintf(buf, len, "%s/link/tcx_%.*s", root, IF_NAMESIZE, ifname);
+}
+
+static void tc_path(const char *root, const char *ifname, char *buf, size_t len)
+{
+    snprintf(buf, len, "%s/link/tc_%.*s", root, IF_NAMESIZE, ifname);
+}
+
+/* tcx (6.6+): a kernel without it refuses to query it. MFW_NO_TCX=1 takes
+ * classic TC anyway, to test it on a newer kernel. */
+static int have_tcx(void)
+{
+    LIBBPF_OPTS(bpf_prog_query_opts, q);
+
+    if (getenv("MFW_NO_TCX"))
+        return 0;
+    return bpf_prog_query_opts(1 /* lo */, BPF_TCX_INGRESS, &q) == 0;
+}
+
+/* Put prog_fd in mini-fw's filter on ifindex's ingress, adding a clsact
+ * qdisc if there is none: one netlink request, so a filter already there
+ * is replaced atomically. Returns 0 or -errno. */
+static int tc_attach(int ifindex, int prog_fd)
+{
+    LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+                .attach_point = BPF_TC_INGRESS);
+    LIBBPF_OPTS(bpf_tc_opts, opts, .handle = MFW_TC_HANDLE,
+                .priority = MFW_TC_PRIORITY, .prog_fd = prog_fd,
+                .flags = BPF_TC_F_REPLACE);
+    int e = bpf_tc_hook_create(&hook);
+
+    if (e && e != -EEXIST)
+        return e;
+    return bpf_tc_attach(&hook, &opts);
+}
+
+/* The clsact qdisc is left: something else may use it. */
+static void tc_detach(int ifindex)
+{
+    LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+                .attach_point = BPF_TC_INGRESS);
+    LIBBPF_OPTS(bpf_tc_opts, opts, .handle = MFW_TC_HANDLE,
+                .priority = MFW_TC_PRIORITY);
+
+    bpf_tc_detach(&hook, &opts);
+}
+
+/* Is ifname attached with classic TC? A pin whose filter is gone (the
+ * device was deleted or re-created, or the filter removed) is removed. */
+static int tc_attached(const char *root, const char *ifname)
+{
+    LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS);
+    LIBBPF_OPTS(bpf_tc_opts, opts, .handle = MFW_TC_HANDLE,
+                .priority = MFW_TC_PRIORITY);
+    char path[PATH_MAX];
+
+    tc_path(root, ifname, path, sizeof(path));
+    if (access(path, F_OK))
+        return 0;
+    hook.ifindex = if_nametoindex(ifname);
+    if (hook.ifindex && bpf_tc_query(&hook, &opts) == 0)
+        return 1;
+    unlink(path);
+    return 0;
+}
+
+/* Pin prog_fd as ifname's tc_ pin, in place of the one there. */
+static int tc_pin(const char *root, const char *ifname, int prog_fd)
+{
+    char path[PATH_MAX];
+
+    tc_path(root, ifname, path, sizeof(path));
+    unlink(path);
+    return bpf_obj_pin(prog_fd, path);
 }
 
 /* The ifindex a TC ingress link is attached to; 0 if its device is gone. */
@@ -94,7 +176,7 @@ int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
     int fd = open_link(dp->root, ifname);
 
     if (fd < 0)
-        return 0;
+        return tc_attached(dp->root, ifname);
     close(fd);
     return 1;
 }
@@ -116,9 +198,10 @@ int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
     if (!d)
         return 0;
     while ((de = readdir(d)) && n < max) {
-        const char *ifname = de->d_name + 4;
+        const char *ifname = strchr(de->d_name, '_');
 
-        if (strncmp(de->d_name, "tcx_", 4) || strlen(ifname) >= IF_NAMESIZE)
+        if (!ifname || strlen(++ifname) >= IF_NAMESIZE ||
+            (strncmp(de->d_name, "tcx_", 4) && strncmp(de->d_name, "tc_", 3)))
             continue;
         if (mfw_dp_attached(dp, ifname))
             snprintf(names[n++], IF_NAMESIZE, "%s", ifname);
@@ -173,14 +256,20 @@ static void upgrade_links(struct mfw_dp *dp)
     int n = mfw_dp_list(dp, names, MFW_MAX_IFACES);
 
     for (int i = 0; i < n; i++) {
-        int fd = open_link(dp->root, names[i]);
+        int fd = open_link(dp->root, names[i]), e = 0;
 
-        if (fd < 0)
-            continue;
-        if (bpf_link_update(fd, dp->prog_fd, NULL))
+        if (fd >= 0) {
+            if (bpf_link_update(fd, dp->prog_fd, NULL))
+                e = errno;
+            close(fd);
+        } else if (tc_attached(dp->root, names[i])) {
+            e = -tc_attach(if_nametoindex(names[i]), dp->prog_fd);
+            if (!e && tc_pin(dp->root, names[i], dp->prog_fd))
+                e = errno;
+        }
+        if (e)
             fprintf(stderr, "mfwd: %s: update TC program: %s\n", names[i],
-                    strerror(errno));
-        close(fd);
+                    strerror(e));
     }
 }
 
@@ -236,7 +325,7 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
         return fail(err, errlen, "open BPF object: %s", strerror(errno));
     if (mfw_bpf__load(dp->skel)) {  /* reuses pinned maps, pins new ones */
         mfw_dp_close(dp);
-        return fail(err, errlen, "load BPF object: %s (kernel 6.6+ with BTF, "
+        return fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
                     "CAP_BPF and CAP_NET_ADMIN needed; MFW_DEBUG=1 for the "
                     "verifier log)", strerror(errno));
     }
@@ -244,6 +333,7 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->rulesets_fd = bpf_map__fd(dp->skel->maps.rulesets);
     dp->config_fd = bpf_map__fd(dp->skel->maps.config);
     dp->stats_fd = bpf_map__fd(dp->skel->maps.stats);
+    dp->tcx = have_tcx();
     if (init_config(dp, err, errlen)) {
         mfw_dp_close(dp);
         return -1;
@@ -267,6 +357,18 @@ int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errle
         return fail(err, errlen, "%s: no such interface", ifname);
     if (mfw_dp_attached(dp, ifname))
         return 0;
+    if (!dp->tcx) {
+        e = -tc_attach(ifindex, dp->prog_fd);
+        if (e)
+            return fail(err, errlen, "%s: attach TC ingress: %s", ifname,
+                        strerror(e));
+        if (tc_pin(dp->root, ifname, dp->prog_fd)) {
+            e = errno;
+            tc_detach(ifindex);
+            return fail(err, errlen, "%s: pin: %s", ifname, strerror(e));
+        }
+        return 0;
+    }
     /* appended: a tc program attached before mini-fw runs first */
     fd = bpf_link_create(dp->prog_fd, ifindex, BPF_TCX_INGRESS, NULL);
     if (fd < 0)
@@ -291,6 +393,9 @@ void mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
         bpf_map_delete_elem(dp->rulesets_fd, &ifindex);
     link_path(dp->root, ifname, path, sizeof(path));
     unlink(path);  /* last reference: the kernel detaches the program */
+    tc_path(dp->root, ifname, path, sizeof(path));
+    if (unlink(path) == 0 && ifindex)
+        tc_detach(ifindex);
 }
 
 int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
@@ -380,7 +485,11 @@ static void rm_dir(const char *dir)
         if (de->d_name[0] == '.')
             continue;
         snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        unlink(path);  /* a link pin: the kernel detaches the program */
+        /* a link pin: the kernel detaches the program; a classic TC
+         * filter stays until it is removed */
+        if (!strncmp(de->d_name, "tc_", 3) && if_nametoindex(de->d_name + 3))
+            tc_detach(if_nametoindex(de->d_name + 3));
+        unlink(path);
     }
     closedir(d);
     rmdir(dir);

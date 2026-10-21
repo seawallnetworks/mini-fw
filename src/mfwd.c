@@ -591,8 +591,9 @@ int main(int argc, char **argv)
     /* accept() wakes up every second, so a signal is never missed */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &(struct timeval){ 1, 0 },
                sizeof(struct timeval));
-    logmsg("%s, ABI %d: listening on %s, pins under %s", MFWD_VERSION,
-           MFW_ABI_VERSION, sock, root);
+    logmsg("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
+           MFWD_VERSION, MFW_ABI_VERSION, sock, root,
+           d.dp.tcx ? "tcx" : "classic TC (no tcx before kernel 6.6)");
 
     while (!stop) {
         int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);

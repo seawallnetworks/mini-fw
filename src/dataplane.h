@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
-/* The BPF side of mfwd: pinned maps, TC links, rulesets, counters. */
+/* The BPF side of mfwd: pinned maps, TC attachments, rulesets, counters. */
 #ifndef MFW_DATAPLANE_H
 #define MFW_DATAPLANE_H
 
@@ -19,6 +19,7 @@ struct mfw_dp {
     int             rulesets_fd;
     int             config_fd;
     int             stats_fd;
+    int             tcx;      /* attach with tcx links (6.6+), not classic TC */
 };
 
 /*
@@ -29,7 +30,7 @@ struct mfw_dp {
 int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);
 
-/* Is ifname attached, by a link that is still alive on that interface? */
+/* Is ifname attached, by a link or filter still alive on that interface? */
 int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname);
 /* Names of the attached interfaces, sorted; returns how many (≤ max). */
 int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max);

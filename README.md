@@ -5,8 +5,8 @@ See [`docs/user-manual.md`](docs/user-manual.md) for the operator manual,
 [`docs/implementation.md`](docs/implementation.md) for a detailed description of
 what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 
-**Current state: stateless ACLs in a single TC ingress program (tcx),
-inbound only, driven by a daemon.** The target is protecting a local VM, so
+**Current state: stateless ACLs in a single TC ingress program (tcx, or
+classic TC before Linux 6.6), inbound only, driven by a daemon.** The target is protecting a local VM, so
 there is no router or forwarding mode, **egress is never filtered**, and
 XDP is left free for a DDoS gate such as
 [voidGate](https://github.com/seawallnetworks/voidGate), which runs before
@@ -55,8 +55,10 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`), bpftool, Linux ≥ 6.6 with BTF
-(tcx). Ubuntu 24.04 qualifies.
+Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`), bpftool, Linux ≥ 6.1 with
+BTF. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd attaches
+with tcx on 6.6 and later, and with classic TC (a cls_bpf filter on clsact)
+before.
 
 ```bash
 make                  # mfwd, mfw, libmfw.a (objects in build/)
@@ -157,11 +159,15 @@ The socket is root-only by default (`-m`, `-g` to change that).
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
 - **Attach.** A pinned tcx `bpf_link` per interface (`link/tcx_<if>`). A
-  link whose interface was deleted is noticed and replaced.
+  link whose interface was deleted is noticed and replaced. A kernel
+  without tcx (before 6.6) gets a classic TC filter instead, handle
+  `0x4d46` at priority `0xc000` on the interface's clsact ingress, and
+  the program pinned as `link/tc_<if>` to say so; `MFW_NO_TCX=1` takes
+  that path on a newer kernel, for the tests.
 - **Verifier.** The per-ACE extended match is a global BPF function, so it is
   verified once. Both loops (64 standard + 128 extended ACEs) then verify in
   about 16K of the 1M instruction budget. Global functions with pointer args
-  need kernel 5.12+, and tcx 6.6+.
+  need kernel 5.12+, and tcx 6.6+ (classic TC before).
 - **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`: the names
   are from when mini-fw ran at XDP, kept for the protocol) and one reason
   per packet (`std_deny`, `ext_permit`, `ext_implicit_deny`, …). New ids are
