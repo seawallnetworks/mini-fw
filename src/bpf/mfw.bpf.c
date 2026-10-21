@@ -313,14 +313,26 @@ int mfw_tc(struct __sk_buff *ctx)
     int pr, std;
 
     /* After GRO the headers may not all be in the skb's linear part,
-     * the only part a TC program reads directly. A pull that fails
-     * leaves a short view, which parse_pkt() drops as malformed. */
-    if (data + MFW_HDR_MAX > data_end) {
-        bpf_skb_pull_data(ctx, ctx->len < MFW_HDR_MAX ? ctx->len : MFW_HDR_MAX);
-        data = (void *)(long)ctx->data;
-        data_end = (void *)(long)ctx->data_end;
-    }
+     * the only part a TC program reads directly. Parse what is there
+     * first, and pull only if that fails and the linear part ends
+     * before the bytes parse_pkt() could use; if it already holds
+     * them, the packet is malformed for real. Pulling up front would
+     * hit every packet whose linear part is under MFW_HDR_MAX, even
+     * one that holds all its headers, and the pull makes the skb
+     * writable, copying the head of a cloned skb. A pull that fails
+     * leaves a short view, which the second parse drops as malformed. */
     pr = parse_pkt(data, data_end, &p);
+    if (pr == PARSE_MALFORMED) {
+        __u32 want = ctx->len < MFW_HDR_MAX ? ctx->len : MFW_HDR_MAX;
+
+        if (data + want > data_end) {
+            bpf_skb_pull_data(ctx, want);
+            data = (void *)(long)ctx->data;
+            data_end = (void *)(long)ctx->data_end;
+            __builtin_memset(&p, 0, sizeof(p));
+            pr = parse_pkt(data, data_end, &p);
+        }
+    }
 
     if (pr == PARSE_NOT_IPV4) {
         stat_inc(MFW_STAT_NON_IPV4);
