@@ -28,6 +28,17 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+/* tcx is Linux 6.6's UAPI: with older headers, such as Amazon Linux 2023's
+ * 6.1, mfwd still attaches with tcx on a kernel that has it */
+#ifndef BPF_F_BEFORE
+#define BPF_TCX_INGRESS   46
+#define BPF_LINK_TYPE_TCX 11
+/* tcx.ifindex starts bpf_link_info's union, where xdp.ifindex is */
+#define TCX_IFINDEX(info) ((info).xdp.ifindex)
+#else
+#define TCX_IFINDEX(info) ((info).tcx.ifindex)
+#endif
+
 #include "dataplane.h"
 #include "mfw.skel.h"
 
@@ -148,7 +159,7 @@ static __u32 link_ifindex(int fd)
 
     if (bpf_link_get_info_by_fd(fd, &info, &len) || info.type != BPF_LINK_TYPE_TCX)
         return 0;
-    return info.tcx.ifindex;
+    return TCX_IFINDEX(info);
 }
 
 /* An fd for ifname's link pin if it is alive on that interface, else -1.

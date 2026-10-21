@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* Dataplane tests via BPF_PROG_TEST_RUN: feed crafted frames to the TC
- * ingress program and check verdicts (TCX_NEXT: passed on, TCX_DROP). Needs root. Runs in a private network
+ * ingress program and check verdicts (TC_ACT_UNSPEC: passed on, TC_ACT_SHOT). Needs root. Runs in a private network
  * namespace with two dummy interfaces, so the per-interface rulesets have
  * real ifindexes; touches no host interface or pins. */
 #define _GNU_SOURCE
@@ -17,6 +17,7 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/pkt_cls.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
@@ -108,7 +109,7 @@ static int build(const struct pkt_spec *s, __u8 *buf)
 }
 
 /* The packet as if it arrived on ifindex; RUN_ERR if it couldn't run
- * (-1 is TCX_NEXT). */
+ * (-1 is TC_ACT_UNSPEC). */
 #define RUN_ERR  (-100)
 
 static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s)
@@ -211,10 +212,10 @@ static __u64 stat(__u32 id)
 static void test_unbound(void)
 {
     reset();
-    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "no ruleset: open");
     commit();
-    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC(.src = "10.0.0.1", .dst = "10.0.0.5", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "ruleset with nothing bound: open");
 }
 
@@ -225,18 +226,18 @@ static void test_standard(void)
     add("10 permit 10.0.0.0 0.0.0.255");
     add("10 deny 10.0.0.0/8");
     commit();
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP) == TCX_DROP, "explicit deny");
-    CHECK(TC(.src = "10.0.0.2", .dst = "1.1.1.1", UDP) == TCX_NEXT, "earlier permit wins");
-    CHECK(TC(.src = "10.9.0.2", .dst = "1.1.1.1", UDP) == TCX_DROP, "later deny");
-    CHECK(TC(.src = "192.168.1.1", .dst = "1.1.1.1", UDP) == TCX_NEXT, "miss → pass (blacklist)");
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", .proto = 47) == TCX_DROP, "std matches any proto");
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 1) == TCX_DROP, "802.1Q peel");
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 2) == TCX_DROP, "QinQ peel");
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 3) == TCX_NEXT, ">2 tags → non-IPv4 pass");
-    CHECK(TC(.ethertype = ETH_P_ARP) == TCX_NEXT, "ARP pass");
-    CHECK(TC(.ethertype = ETH_P_ARP, .vlans = 1) == TCX_NEXT, "tagged ARP pass");
-    CHECK(TC(.ethertype = ETH_P_IPV6) == TCX_NEXT, "IPv6 pass");
-    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == TCX_DROP,
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP) == TC_ACT_SHOT, "explicit deny");
+    CHECK(TC(.src = "10.0.0.2", .dst = "1.1.1.1", UDP) == TC_ACT_UNSPEC, "earlier permit wins");
+    CHECK(TC(.src = "10.9.0.2", .dst = "1.1.1.1", UDP) == TC_ACT_SHOT, "later deny");
+    CHECK(TC(.src = "192.168.1.1", .dst = "1.1.1.1", UDP) == TC_ACT_UNSPEC, "miss → pass (blacklist)");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", .proto = 47) == TC_ACT_SHOT, "std matches any proto");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 1) == TC_ACT_SHOT, "802.1Q peel");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 2) == TC_ACT_SHOT, "QinQ peel");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .vlans = 3) == TC_ACT_UNSPEC, ">2 tags → non-IPv4 pass");
+    CHECK(TC(.ethertype = ETH_P_ARP) == TC_ACT_UNSPEC, "ARP pass");
+    CHECK(TC(.ethertype = ETH_P_ARP, .vlans = 1) == TC_ACT_UNSPEC, "tagged ARP pass");
+    CHECK(TC(.ethertype = ETH_P_IPV6) == TC_ACT_UNSPEC, "IPv6 pass");
+    CHECK(TC(.src = "10.0.0.1", .dst = "1.1.1.1", UDP, .frag_off = 100) == TC_ACT_SHOT,
           "non-first frag still matches saddr");
 }
 
@@ -248,25 +249,25 @@ static void test_extended(void)
     add("100 permit udp any eq 53 any");
     add("100 permit icmp any any");
     commit();
-    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TCX_NEXT, "ssh ok");
-    CHECK(TC(.src = "10.0.0.66", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TCX_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TC_ACT_UNSPEC, "ssh ok");
+    CHECK(TC(.src = "10.0.0.66", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 22) == TC_ACT_SHOT,
           "deny before permit");
-    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 23) == TCX_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .sport = 40000, .dport = 23) == TC_ACT_SHOT,
           "implicit deny");
-    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.6", TCP, .sport = 40000, .dport = 22) == TCX_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.6", TCP, .sport = 40000, .dport = 22) == TC_ACT_SHOT,
           "wrong dst");
-    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 5555) == TCX_NEXT,
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 5555) == TC_ACT_UNSPEC,
           "dns reply by sport");
-    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TCX_NEXT, "icmp");
-    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = 47) == TCX_DROP, "gre implicit deny");
-    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .dport = 22, .vlans = 2) == TCX_NEXT,
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TC_ACT_UNSPEC, "icmp");
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", .proto = 47) == TC_ACT_SHOT, "gre implicit deny");
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", TCP, .dport = 22, .vlans = 2) == TC_ACT_UNSPEC,
           "QinQ + extended");
 
     /* empty bound list = implicit deny only */
     reset();
     rs.ext_acl = 101;
     commit();
-    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TCX_DROP,
+    CHECK(TC(.src = "1.2.3.4", .dst = "10.0.0.5", .proto = IPPROTO_ICMP) == TC_ACT_SHOT,
           "empty bound ext list denies");
 }
 
@@ -278,13 +279,13 @@ static void test_combined(void)
     add("10 permit 203.0.113.0 0.0.0.255");
     add("100 permit tcp any any eq 22");
     commit();
-    CHECK(TC(.src = "203.0.113.66", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_DROP,
+    CHECK(TC(.src = "203.0.113.66", .dst = "10.0.0.5", TCP, .dport = 22) == TC_ACT_SHOT,
           "std deny beats ext permit");
-    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 80) == TCX_DROP,
+    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 80) == TC_ACT_SHOT,
           "std permit does not bypass ext implicit deny");
-    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC(.src = "203.0.113.7", .dst = "10.0.0.5", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "std permit then ext permit");
-    CHECK(TC(.src = "198.51.100.1", .dst = "10.0.0.5", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC(.src = "198.51.100.1", .dst = "10.0.0.5", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "std miss then ext permit");
 }
 
@@ -293,10 +294,10 @@ static void test_established(void)
     reset();
     add("100 permit tcp any any established");
     commit();
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x02) == TCX_DROP, "SYN blocked");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == TCX_NEXT, "SYN-ACK ok");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x10) == TCX_NEXT, "ACK ok");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == TCX_NEXT, "RST ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x02) == TC_ACT_SHOT, "SYN blocked");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == TC_ACT_UNSPEC, "SYN-ACK ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x10) == TC_ACT_UNSPEC, "ACK ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == TC_ACT_UNSPEC, "RST ok");
 }
 
 static void test_fragments(void)
@@ -306,40 +307,40 @@ static void test_fragments(void)
     add("100 deny udp any any eq 53");
     add("100 permit udp any any eq 4789");
     commit();
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TCX_NEXT,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TC_ACT_UNSPEC,
           "first frag has ports");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 53, .frag_off = 0x2000) == TCX_DROP,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 53, .frag_off = 0x2000) == TC_ACT_SHOT,
           "first frag hits a port deny");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 80, .frag_off = 0x2000) == TCX_DROP,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 80, .frag_off = 0x2000) == TC_ACT_SHOT,
           "first frag hits the implicit deny");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_NEXT,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TC_ACT_UNSPEC,
           "non-first frag skips the extended list");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == TCX_NEXT,
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", .proto = 47, .frag_off = 185) == TC_ACT_UNSPEC,
           "non-first frag of any protocol skips it");
-    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_DROP,
+    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .frag_off = 185) == TC_ACT_SHOT,
           "non-first frag still hits a standard deny");
-    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TCX_DROP,
+    CHECK(TC(.src = "6.6.6.6", .dst = "2.2.2.2", UDP, .dport = 4789, .frag_off = 0x2000) == TC_ACT_SHOT,
           "first frag hits a standard deny");
 
     __u64 off1 = stat(MFW_STAT_TCP_FRAG_OFF1);
 
-    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 1) == TCX_DROP,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 1) == TC_ACT_SHOT,
           "TCP frag at offset 1 dropped");
-    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 0x2001) == TCX_DROP,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 0x2001) == TC_ACT_SHOT,
           "TCP frag at offset 1 with MF dropped");
     CHECK(stat(MFW_STAT_TCP_FRAG_OFF1) == off1 + 2, "tcp_frag_off1 counted");
-    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 2) == TCX_NEXT,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", TCP, .frag_off = 2) == TC_ACT_UNSPEC,
           "TCP frag at offset 2 passes");
-    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", UDP, .frag_off = 1) == TCX_NEXT,
+    CHECK(TC(.src = "4.4.4.4", .dst = "2.2.2.2", UDP, .frag_off = 1) == TC_ACT_UNSPEC,
           "UDP frag at offset 1 passes");
 
     struct mfw_config cfg = { .abi_version = MFW_ABI_VERSION, .drop_ipv4_fragments = 1 };
     __u32 k = 0;
 
     bpf_map_update_elem(bpf_map__fd(skel->maps.config), &k, &cfg, BPF_ANY);
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 0x2000) == TCX_DROP, "strict: first frag");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TCX_DROP, "strict: non-first frag");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789) == TCX_NEXT, "strict: unfragmented ok");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 0x2000) == TC_ACT_SHOT, "strict: first frag");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .frag_off = 185) == TC_ACT_SHOT, "strict: non-first frag");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .dport = 4789) == TC_ACT_UNSPEC, "strict: unfragmented ok");
 }
 
 static void test_full_tables(void)
@@ -358,9 +359,9 @@ static void test_full_tables(void)
     }
     add("100 permit tcp any any eq 9");
     commit();
-    CHECK(TC(.src = "192.0.2.1", .dst = "1.1.1.1", UDP) == TCX_DROP, "64th std ACE");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == TCX_NEXT, "128th ext ACE");
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == TCX_DROP,
+    CHECK(TC(.src = "192.0.2.1", .dst = "1.1.1.1", UDP) == TC_ACT_SHOT, "64th std ACE");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 9) == TC_ACT_UNSPEC, "128th ext ACE");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 10) == TC_ACT_SHOT,
           "past the 128th: implicit deny");
 }
 
@@ -375,38 +376,38 @@ static void test_per_interface(void)
     add("10 deny host 192.0.2.9");
     commit_on(if1);
 
-    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_DROP,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TC_ACT_SHOT,
           "if0: extended implicit deny");
-    CHECK(TC_ON(if1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
+    CHECK(TC_ON(if1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TC_ACT_UNSPEC,
           "if1: no extended list, not on the blacklist");
-    CHECK(TC_ON(if0, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC_ON(if0, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "if0: if1's blacklist does not apply");
-    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
+    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TC_ACT_SHOT,
           "if1: its blacklist");
-    CHECK(TC_ON(1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
+    CHECK(TC_ON(1, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TC_ACT_UNSPEC,
           "lo: no ruleset, open");
 
     /* replace if0's ruleset: the new one applies, if1 keeps its own */
     memset(&rs, 0, sizeof(rs));
     add("100 permit tcp any any eq 80");
     commit_on(if0);
-    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TCX_NEXT,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 80) == TC_ACT_UNSPEC,
           "if0: swapped ruleset applies");
-    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TC_ACT_SHOT,
           "if0: old ruleset gone");
-    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_DROP,
+    CHECK(TC_ON(if1, .src = "192.0.2.9", .dst = "2.2.2.2", TCP, .dport = 22) == TC_ACT_SHOT,
           "if1: unchanged by if0's swap");
 
     /* removing if0's entry makes it fail-open again */
     bpf_map_delete_elem(bpf_map__fd(skel->maps.rulesets), &if0);
-    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TCX_NEXT,
+    CHECK(TC_ON(if0, .src = "1.1.1.1", .dst = "2.2.2.2", TCP, .dport = 22) == TC_ACT_UNSPEC,
           "if0: entry removed, open");
 }
 
 static void test_corrupt(void)
 {
     reset();
-    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == TCX_DROP, "ihl<5 dropped");
+    CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", UDP, .ihl = 4) == TC_ACT_SHOT, "ihl<5 dropped");
 }
 
 /* A private network namespace with two dummy interfaces. */

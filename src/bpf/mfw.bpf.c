@@ -17,7 +17,8 @@
  *
  * TC, not XDP: XDP is left to a DDoS gate such as voidGate, which drops
  * floods before the stack builds an skb; mini-fw sees what it passed.
- * "Pass" is TCX_NEXT, so a tc program after mini-fw still runs.
+ * "Pass" is TC_ACT_UNSPEC (tcx's TCX_NEXT, which Linux 6.1's headers lack),
+ * so a tc program after mini-fw still runs; "drop" is TC_ACT_SHOT (TCX_DROP).
  */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -25,6 +26,7 @@
 #include <linux/in.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/pkt_cls.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -370,10 +372,10 @@ int mfw_tc(struct __sk_buff *ctx)
     }
 pass:
     stat_inc(MFW_STAT_PASS);
-    return TCX_NEXT;
+    return TC_ACT_UNSPEC;
 drop:
     stat_inc(MFW_STAT_DROP);
-    return TCX_DROP;
+    return TC_ACT_SHOT;
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
