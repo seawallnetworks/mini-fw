@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* Dataplane tests via BPF_PROG_TEST_RUN: feed crafted frames to the TC
- * ingress program and check verdicts (TC_ACT_UNSPEC: passed on, TC_ACT_SHOT). Needs root. Runs in a private network
+ * ingress program and check verdicts (TC_ACT_UNSPEC: passed on, TC_ACT_SHOT).
+ * Each frame goes through the XDP entry too, whose verdict must be the
+ * same (XDP_PASS, XDP_DROP). Needs root. Runs in a private network
  * namespace with two dummy interfaces, so the per-interface rulesets have
  * real ifindexes; touches no host interface or pins. */
 #define _GNU_SOURCE
@@ -112,13 +114,11 @@ static int build(const struct pkt_spec *s, __u8 *buf)
  * (-1 is TC_ACT_UNSPEC). */
 #define RUN_ERR  (-100)
 
-static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s)
+static int run_prog(struct bpf_program *prog, void *ctx, __u32 ctx_size,
+                    __u8 *buf, int len)
 {
-    __u8 buf[256];
-    int len = build(s, buf);
-    struct __sk_buff ctx = { .ingress_ifindex = ifindex };
     LIBBPF_OPTS(bpf_test_run_opts, opts, .data_in = buf, .data_size_in = len,
-                .ctx_in = &ctx, .ctx_size_in = sizeof(ctx), .repeat = 1);
+                .ctx_in = ctx, .ctx_size_in = ctx_size, .repeat = 1);
 
     if (bpf_prog_test_run_opts(bpf_program__fd(prog), &opts)) {
         perror("bpf_prog_test_run_opts");
@@ -128,9 +128,42 @@ static int run(struct bpf_program *prog, __u32 ifindex, const struct pkt_spec *s
     return (int)opts.retval;
 }
 
+/* The counters, all CPUs': put back after the XDP run, so they count
+ * the TC run alone. */
+static void stats_copy(struct mfw_stat_value *save, int restore)
+{
+    int ncpu = libbpf_num_possible_cpus(), fd = bpf_map__fd(skel->maps.stats);
+
+    for (__u32 id = 0; id < MFW_STAT_MAX; id++) {
+        if (restore)
+            bpf_map_update_elem(fd, &id, save + id * ncpu, BPF_ANY);
+        else
+            bpf_map_lookup_elem(fd, &id, save + id * ncpu);
+    }
+}
+
+/* TC's verdict on the frame, which XDP's must match. */
+static int run(__u32 ifindex, const struct pkt_spec *s)
+{
+    struct mfw_stat_value save[MFW_STAT_MAX * libbpf_num_possible_cpus()];
+    struct __sk_buff ctx = { .ingress_ifindex = ifindex };
+    __u8 buf[256];
+    int len = build(s, buf), xdp, tc;
+    /* the frame's bounds, as the kernel checks them */
+    struct xdp_md xctx = { .data_end = len, .ingress_ifindex = ifindex };
+
+    stats_copy(save, 0);
+    xdp = run_prog(skel->progs.mfw_xdp, &xctx, sizeof(xctx), buf, len);
+    stats_copy(save, 1);
+    tc = run_prog(skel->progs.mfw_tc, &ctx, sizeof(ctx), buf, len);
+    CHECK(xdp == (tc == TC_ACT_SHOT ? XDP_DROP : XDP_PASS),
+          "XDP verdict %d, TC verdict %d", xdp, tc);
+    return tc;
+}
+
 /* on if0 unless said otherwise */
-#define TC(...)         run(skel->progs.mfw_tc, if0, &(struct pkt_spec){ __VA_ARGS__ })
-#define TC_ON(i, ...)   run(skel->progs.mfw_tc, (i), &(struct pkt_spec){ __VA_ARGS__ })
+#define TC(...)         run(if0, &(struct pkt_spec){ __VA_ARGS__ })
+#define TC_ON(i, ...)   run((i), &(struct pkt_spec){ __VA_ARGS__ })
 
 /* ---- rule loading (mirrors mfw_policy_compile() and dataplane.c) ---- */
 

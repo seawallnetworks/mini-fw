@@ -5,12 +5,12 @@ See [`docs/user-manual.md`](docs/user-manual.md) for the operator manual,
 [`docs/implementation.md`](docs/implementation.md) for a detailed description of
 what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 
-**Current state: stateless ACLs in a single TC ingress program (tcx, or
-classic TC before Linux 6.6), inbound only, driven by a daemon.** The target is protecting a local VM, so
-there is no router or forwarding mode, **egress is never filtered**, and
-XDP is left free for a DDoS gate such as
-[voidGate](https://github.com/seawallnetworks/voidGate), which runs before
-mini-fw. There is no conntrack or fragment tracking yet (design PR5a–c).
+**Current state: stateless ACLs at XDP, in libxdp's dispatcher, or at TC
+ingress when another program holds the XDP hook; inbound only, driven by
+a daemon.** The target is protecting a local VM, so there is no router or
+forwarding mode, and **egress is never filtered**. In the dispatcher a DDoS
+gate such as [voidGate](https://github.com/seawallnetworks/voidGate) runs
+first. There is no conntrack or fragment tracking yet (design PR5a–c).
 
 | List | Numbers | Matches | End of list |
 |------|---------|---------|-------------|
@@ -55,16 +55,20 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`; mfwd links it in
-statically), bpftool, Linux ≥ 6.1 with BTF. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd attaches
-with tcx on 6.6 and later, and with classic TC (a cls_bpf filter on clsact)
-before.
+Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`;
+mfwd links both in statically), bpftool, Linux ≥ 6.1 with BTF, bpffs at
+`/sys/fs/bpf`. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
+attaches at XDP, in libxdp's dispatcher; on an interface where a program
+that is not a dispatcher holds the XDP hook, at TC ingress: with tcx on 6.6
+and later, and with classic TC (a cls_bpf filter on clsact) before. The
+tests need xdp-tools (`xdp-loader`, `xdp-filter`), or run at TC only with
+`MFW_NO_XDP=1`.
 
 ```bash
 make                  # mfwd, mfw, libmfw.a (objects in build/)
 make test             # ACE and policy parser tests
 make test-bpf         # the BPF program on crafted packets (BPF_PROG_TEST_RUN, sudo)
-make test-mfwd        # mfwd on dummy interfaces: protocol, attach/detach, restarts (sudo)
+make test-mfwd        # mfwd on dummy interfaces: protocol, attach/detach, restarts, sharing XDP (sudo)
 make smoke            # real traffic through mfwd in two network namespaces (sudo)
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
@@ -106,7 +110,7 @@ One request per connection on the Unix socket; mfwd replies and closes.
 | Request | Reply |
 |---------|-------|
 | `PING` | `OK` |
-| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c` |
+| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d` (`degraded`: at TC, another program holds XDP) |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …` (every counter) |
 | `SHOW` | `OK <n>`, then the running policy in n lines |
 | `APPLY`, policy lines, `END` | `OK <generation>[ missing=a,b]` |
@@ -135,16 +139,19 @@ The socket is root-only by default (`-m`, `-g` to change that).
   mfwd knows it, and applies it again if the pins are gone. On start it also
   moves attached interfaces to the program it loaded, so upgrading mfwd
   upgrades the BPF code without a gap.
-- **TC ingress only.** Both lists run in one TC ingress program, as in the
-  design; its TC egress program, `access-group … out`, and the egress list
-  order are dropped. `mfw_rule.direction` stays in the ABI but is always
-  `in`. If conntrack is added later, it will need a TC egress hook again to
-  see outbound flows. XDP is left to a DDoS gate (voidGate in the Seawall
-  stack): an interface has one native XDP program, and floods are best
-  dropped before the stack makes an skb.
-  A pass is `TCX_NEXT`, so a tc program attached after mini-fw still runs.
-- **Per-packet cost.** TC runs after GRO, so the extended list is scanned
-  once per merged GRO packet, not per wire packet. A packet whose headers
+- **Ingress only, at XDP or TC.** Both lists run in one program with two
+  entries over one `mfw_judge()`: `mfw_xdp`, in libxdp's dispatcher at
+  priority 20, after a DDoS gate's (voidGate's is 10), and `mfw_tc` at TC
+  ingress. An interface's XDP hook holds one program; libxdp's dispatcher
+  runs several in turn, and mini-fw never replaces a program that is not
+  one: on that interface it filters at TC instead (degraded: a TC drop costs
+  more). The design's TC egress program, `access-group … out`, and the
+  egress list order are dropped. `mfw_rule.direction` stays in the ABI but
+  is always `in`. If conntrack is added later, it will need a TC egress
+  hook again to see outbound flows. At TC a pass is `TCX_NEXT`, so a tc
+  program attached after mini-fw still runs.
+- **Per-packet cost.** At TC, after GRO, the extended list is scanned once
+  per merged GRO packet, not per wire packet, and a packet whose headers
   are not all in the skb's linear part is pulled in first
   (`bpf_skb_pull_data`).
 - **Per-interface rulesets.** `maps/rulesets` is a map-in-map keyed by ifindex.
@@ -158,17 +165,24 @@ The socket is root-only by default (`-m`, `-g` to change that).
   takes no ACE slot, so an extended list holds 128 ACEs.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
-- **Attach.** A pinned tcx `bpf_link` per interface (`link/tcx_<if>`). A
-  link whose interface was deleted is noticed and replaced. A kernel
-  without tcx (before 6.6) gets a classic TC filter instead, handle
-  `0x4d46` at priority `0xc000` on the interface's clsact ingress, and
-  the program pinned as `link/tc_<if>` to say so; `MFW_NO_TCX=1` takes
-  that path on a newer kernel, for the tests.
+- **Attach.** The XDP entry in the interface's libxdp dispatcher, made or
+  joined, in its mode (native, else skb, for a new one), loaded by libxdp
+  from an object of its own on the pinned maps; mini-fw pins it as
+  `link/xdp_<if>`, and the dispatcher's own pins keep it there. On an
+  interface whose XDP hook is held by another program, a pinned tcx
+  `bpf_link` (`link/tcx_<if>`). A kernel without tcx (before 6.6) gets a
+  classic TC filter instead, handle `0x4d46` at priority `0xc000` on the
+  interface's clsact ingress, and the program pinned as `link/tc_<if>` to
+  say so. A pin whose interface was deleted is noticed and replaced. On
+  start mfwd puts its new program in each dispatcher before it takes the
+  old one out, and moves an interface from TC to XDP once its hook is
+  free. `MFW_NO_XDP=1` attaches at TC only, and `MFW_NO_TCX=1` with
+  classic TC on a newer kernel, for the tests.
 - **Verifier.** The per-ACE extended match is a global BPF function, so it is
   verified once. Both loops (64 standard + 128 extended ACEs) then verify in
   about 16K of the 1M instruction budget. Global functions with pointer args
   need kernel 5.12+, and tcx 6.6+ (classic TC before).
-- **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`: the names
-  are from when mini-fw ran at XDP, kept for the protocol) and one reason
+- **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`, whichever
+  hook) and one reason
   per packet (`std_deny`, `ext_permit`, `ext_implicit_deny`, …). New ids are
   appended at the end.

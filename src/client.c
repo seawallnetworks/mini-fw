@@ -290,13 +290,15 @@ int mfw_status(const mfw_client_t *c, struct mfw_status *st)
     if (rc)
         return rc;
     memset(st, 0, sizeof(*st));
-    /* OK generation=N drop-ipv4-fragments=0|1 attached=a,b missing=c */
+    /* OK generation=N drop-ipv4-fragments=0|1 attached=a,b missing=c
+     * degraded=d; an older mfwd has no degraded */
     if (field(fields, "generation", gen, sizeof(gen)) ||
         field(fields, "drop-ipv4-fragments", frag, sizeof(frag)) ||
         field(fields, "attached", st->attached, sizeof(st->attached)) ||
         field(fields, "missing", st->missing, sizeof(st->missing))) {
         rc = mfw_err_reply;
     } else {
+        field(fields, "degraded", st->degraded, sizeof(st->degraded));
         st->generation = strtoul(gen, NULL, 10);
         st->drop_ipv4_fragments = frag[0] == '1';
     }

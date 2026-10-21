@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
-/* The BPF side of mfwd: pinned maps, TC attachments, rulesets, counters. */
+/* The BPF side of mfwd: pinned maps, XDP and TC attachments, rulesets,
+ * counters. */
 #ifndef MFW_DATAPLANE_H
 #define MFW_DATAPLANE_H
 
@@ -20,6 +21,7 @@ struct mfw_dp {
     int             config_fd;
     int             stats_fd;
     int             tcx;      /* attach with tcx links (6.6+), not classic TC */
+    int             no_xdp;   /* MFW_NO_XDP: TC only, for tests */
 };
 
 /*
@@ -30,10 +32,16 @@ struct mfw_dp {
 int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);
 
-/* Is ifname attached, by a link or filter still alive on that interface? */
+/* Is ifname attached, by a program, link or filter still alive on that
+ * interface? */
 int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname);
+/* Is ifname at TC because a program that is not libxdp's dispatcher holds
+ * its XDP hook? */
+int mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname);
 /* Names of the attached interfaces, sorted; returns how many (≤ max). */
 int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max);
+/* In libxdp's dispatcher; at TC ingress if a program that is not one holds
+ * the XDP hook. */
 int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errlen);
 /* Drop the interface's ruleset and detach it. */
 void mfw_dp_detach(struct mfw_dp *dp, const char *ifname);

@@ -39,6 +39,8 @@ struct mfw_status {
     int   drop_ipv4_fragments;
     char  attached[1024];       /* "eth0,eth1"; "" if none */
     char  missing[1024];        /* bound interfaces that do not exist */
+    char  degraded[1024];       /* attached at TC ingress, not XDP: another
+                                 * program holds the XDP hook */
 };
 
 const char *mfw_strerror(int rc);

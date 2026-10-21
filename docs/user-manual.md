@@ -102,20 +102,25 @@ sudo visudo -f /etc/sudoers.d/seawall   # append the two directories to
 On Debian/Ubuntu the build dependencies are:
 
 ```bash
-sudo apt install clang llvm make libbpf-dev linux-tools-common linux-tools-$(uname -r)
+sudo apt install clang llvm make libbpf-dev libxdp-dev linux-tools-common linux-tools-$(uname -r)
 ```
 
 On Amazon Linux 2023 (or RHEL 9 and its rebuilds):
 
 ```bash
-sudo dnf install clang llvm make gcc libbpf-devel libbpf-static bpftool
+sudo dnf install clang llvm make gcc libbpf-devel libbpf-static libxdp-devel libxdp-static bpftool
 ```
 
-mfwd attaches with tcx on Linux 6.6 and later, and with classic TC (a
-cls_bpf filter on the interface's clsact qdisc) on 6.1 to 6.5, such as
-Amazon Linux 2023's default kernel; its log says which when it starts.
-Both filter the same way. With classic TC, `mfwd -P` removes the filters
-from the interfaces of the network namespace it runs in.
+mfwd attaches at XDP, in libxdp's dispatcher, which the interface's other
+XDP programs share: voidGate's runs first, and mini-fw sees what it
+passes. It never replaces an XDP program that is not a dispatcher: on that
+interface it filters at TC ingress instead, and `mfw status` lists it as
+`degraded`, since a drop there costs more. At TC it attaches with tcx on
+Linux 6.6 and later, and with classic TC (a cls_bpf filter on the
+interface's clsact qdisc) on 6.1 to 6.5, such as Amazon Linux 2023's
+default kernel; its log says which when it starts. All filter the same
+way. With classic TC, `mfwd -P` removes the filters from the interfaces
+of the network namespace it runs in.
 
 Self-tests (all but the first need root, and none touch a running mini-fw):
 
@@ -697,7 +702,8 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 Useful low-level checks:
 
 ```bash
-sudo bpftool net show dev eth0                      # "tcx/ingress mfw_tc" when attached ("clsact/ingress" before 6.6)
+sudo xdp-loader status eth0                         # "mfw_xdp" in the dispatcher when attached at XDP
+sudo bpftool net show dev eth0                      # degraded: "tcx/ingress mfw_tc" ("clsact/ingress" before 6.6)
 sudo bpftool prog show name mfw_tc
 sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/rulesets   # ifindex → inner map id
 sudo bpftool map dump id <inner map id>                       # that interface's ruleset

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /* mini-fw dataplane — step 1: stateless, ingress-only ACLs for a local host.
- * One TC ingress program (tcx), attached to every protected interface,
- * looks up the ruleset of the interface the packet arrived on and
- * evaluates, in order:
+ * One program, attached to every protected interface, looks up the
+ * ruleset of the interface the packet arrived on and evaluates, in order:
  *
  *   1. standard ACL (1–99): source-only blacklist; explicit deny → DROP,
  *      permit or miss → continue.
@@ -15,10 +14,11 @@
  * a failure mode. Non-IPv4 always passes. No conntrack yet, so return
  * traffic must be permitted explicitly (or via "established").
  *
- * TC, not XDP: XDP is left to a DDoS gate such as voidGate, which drops
- * floods before the stack builds an skb; mini-fw sees what it passed.
- * "Pass" is TC_ACT_UNSPEC (tcx's TCX_NEXT, which Linux 6.1's headers lack),
- * so a tc program after mini-fw still runs; "drop" is TC_ACT_SHOT (TCX_DROP).
+ * Two entries share mfw_judge(): mfw_xdp, run by libxdp's dispatcher after
+ * a DDoS gate such as voidGate, and mfw_tc, at TC ingress when another
+ * program holds the XDP hook. At TC "pass" is TC_ACT_UNSPEC (tcx's
+ * TCX_NEXT, which Linux 6.1's headers lack), so a tc program after
+ * mini-fw still runs; "drop" is TC_ACT_SHOT (TCX_DROP).
  */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -28,6 +28,7 @@
 #include <linux/udp.h>
 #include <linux/pkt_cls.h>
 #include <bpf/bpf_helpers.h>
+#include <xdp/xdp_helpers.h>
 #include <bpf/bpf_endian.h>
 
 #include "mfw.h"
@@ -103,6 +104,12 @@ enum {
     PARSE_NONFIRST_FRAG    = 2,   /* offset != 0: no L4 header */
     PARSE_MALFORMED        = -1,  /* truncated or invalid header */
     PARSE_TCP_OVERLAP_FRAG = -2,  /* TCP fragment at offset 1 (RFC 1858) */
+};
+
+/* mfw_judge()'s verdict; each entry turns it into its hook's. */
+enum {
+    MFW_PASS = 0,
+    MFW_DROP = 1,
 };
 
 enum {
@@ -303,14 +310,94 @@ static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex)
     return bpf_map_lookup_elem(inner, &zero);
 }
 
+/* The verdict on a packet that arrived on ifindex, from what parse_pkt()
+ * returned for it: pr, and p. The entries parse, each from its own
+ * context; nothing here reads the packet. */
+static __always_inline int mfw_judge(int pr, const struct pkt_meta *p, __u32 ifindex)
+{
+    const struct mfw_ruleset *rs;
+    int std;
+
+    if (pr == PARSE_NOT_IPV4) {
+        stat_inc(MFW_STAT_NON_IPV4);
+        goto pass;
+    }
+    if (pr == PARSE_MALFORMED) {
+        stat_inc(MFW_STAT_PARSE_ERR);
+        goto drop;
+    }
+    if (pr == PARSE_TCP_OVERLAP_FRAG) {
+        stat_inc(MFW_STAT_TCP_FRAG_OFF1);
+        goto drop;
+    }
+    if (p->is_frag && cfg_drop_ipv4_fragments()) {
+        stat_inc(MFW_STAT_FRAG_DROP);
+        goto drop;
+    }
+    rs = ruleset_of(ifindex);
+
+    /* 1. Standard blacklist: only an explicit deny is final. */
+    std = match_std(rs, p->saddr);
+    if (std == MATCH_DENY) {
+        stat_inc(MFW_STAT_STD_DENY);
+        goto drop;
+    }
+
+    /* Non-first fragments skip the extended list: the first fragment
+     * carries the ports and is filtered, and without it the kernel cannot
+     * reassemble the datagram, so the rest expires in its reassembly
+     * queue. */
+    if (pr == PARSE_NONFIRST_FRAG)
+        goto pass;
+
+    /* 2. Extended list decides everything else. */
+    switch (match_ext(rs, p)) {
+    case MATCH_PERMIT:
+        stat_inc(MFW_STAT_EXT_PERMIT);
+        goto pass;
+    case MATCH_DENY:
+        stat_inc(MFW_STAT_EXT_DENY);
+        goto drop;
+    case MATCH_MISS:
+        stat_inc(MFW_STAT_EXT_IMPLICIT_DENY);
+        goto drop;
+    default:  /* extended unbound: fail-open */
+        if (std == MATCH_PERMIT)
+            stat_inc(MFW_STAT_STD_PERMIT);
+        goto pass;
+    }
+pass:
+    stat_inc(MFW_STAT_PASS);
+    return MFW_PASS;
+drop:
+    stat_inc(MFW_STAT_DROP);
+    return MFW_DROP;
+}
+
+/* libxdp's dispatcher runs mini-fw after voidGate (priority 10), and only
+ * a pass goes on to the next program. Frags: the headers are in the first
+ * buffer, so a jumbo-MTU interface keeps the dispatcher. */
+struct {
+    __uint(priority, 20);
+    __uint(XDP_PASS, 1);
+} XDP_RUN_CONFIG(mfw_xdp);
+
+SEC("xdp.frags")
+int mfw_xdp(struct xdp_md *ctx)
+{
+    struct pkt_meta p = {};
+    int pr = parse_pkt((void *)(long)ctx->data, (void *)(long)ctx->data_end, &p);
+
+    return mfw_judge(pr, &p, ctx->ingress_ifindex) == MFW_DROP ? XDP_DROP : XDP_PASS;
+}
+
 SEC("tcx/ingress")
 int mfw_tc(struct __sk_buff *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct pkt_meta p = {};
-    const struct mfw_ruleset *rs;
-    int pr, std;
+    int pr;
 
     /* After GRO the headers may not all be in the skb's linear part,
      * the only part a TC program reads directly. Parse what is there
@@ -334,60 +421,10 @@ int mfw_tc(struct __sk_buff *ctx)
         }
     }
 
-    if (pr == PARSE_NOT_IPV4) {
-        stat_inc(MFW_STAT_NON_IPV4);
-        goto pass;
-    }
-    if (pr == PARSE_MALFORMED) {
-        stat_inc(MFW_STAT_PARSE_ERR);
-        goto drop;
-    }
-    if (pr == PARSE_TCP_OVERLAP_FRAG) {
-        stat_inc(MFW_STAT_TCP_FRAG_OFF1);
-        goto drop;
-    }
-    if (p.is_frag && cfg_drop_ipv4_fragments()) {
-        stat_inc(MFW_STAT_FRAG_DROP);
-        goto drop;
-    }
-    rs = ruleset_of(ctx->ingress_ifindex);
 
-    /* 1. Standard blacklist: only an explicit deny is final. */
-    std = match_std(rs, p.saddr);
-    if (std == MATCH_DENY) {
-        stat_inc(MFW_STAT_STD_DENY);
-        goto drop;
-    }
-
-    /* Non-first fragments skip the extended list: the first fragment
-     * carries the ports and is filtered, and without it the kernel cannot
-     * reassemble the datagram, so the rest expires in its reassembly
-     * queue. */
-    if (pr == PARSE_NONFIRST_FRAG)
-        goto pass;
-
-    /* 2. Extended list decides everything else. */
-    switch (match_ext(rs, &p)) {
-    case MATCH_PERMIT:
-        stat_inc(MFW_STAT_EXT_PERMIT);
-        goto pass;
-    case MATCH_DENY:
-        stat_inc(MFW_STAT_EXT_DENY);
-        goto drop;
-    case MATCH_MISS:
-        stat_inc(MFW_STAT_EXT_IMPLICIT_DENY);
-        goto drop;
-    default:  /* extended unbound: fail-open */
-        if (std == MATCH_PERMIT)
-            stat_inc(MFW_STAT_STD_PERMIT);
-        goto pass;
-    }
-pass:
-    stat_inc(MFW_STAT_PASS);
+    if (mfw_judge(pr, &p, ctx->ingress_ifindex) == MFW_DROP)
+        return TC_ACT_SHOT;
     return TC_ACT_UNSPEC;
-drop:
-    stat_inc(MFW_STAT_DROP);
-    return TC_ACT_SHOT;
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";

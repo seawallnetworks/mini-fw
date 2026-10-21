@@ -1,12 +1,12 @@
-# mini-fw: Implementation (stateless TC ingress ACL, mfwd)
+# mini-fw: Implementation (stateless ingress ACL at XDP or TC, mfwd)
 
 | Field | Value |
 |-------|-------|
 | **Document** | Implementation description — what is actually built |
-| **Scope** | Step 1: stateless, ingress-only ACL at TC ingress (tcx, or classic TC before 6.6) for a local VM, per-interface lists, driven by the mfwd daemon |
+| **Scope** | Step 1: stateless, ingress-only ACL at XDP in libxdp's dispatcher, or at TC ingress (tcx, or classic TC before 6.6) where another program holds the XDP hook, for a local VM, per-interface lists, driven by the mfwd daemon |
 | **Version** | mfwd / mfw 0.4.0, ABI 2 |
 | **Date** | 2026-10-12 |
-| **Target** | Linux ≥ 6.1 with BTF (tcx from 6.6), libbpf ≥ 1.3, clang |
+| **Target** | Linux ≥ 6.1 with BTF (tcx from 6.6), libbpf ≥ 1.3, libxdp, clang |
 | **Related** | [`design.md`](design.md) (full v1 design, Rev 18), [`../README.md`](../README.md) (operator quick start) |
 
 `design.md` describes the full v1 system: XDP and TC hooks, egress filtering,
@@ -22,9 +22,10 @@ does today.** Where the two disagree, §10 explains why.
 
 - An **IPv4 host firewall for a single local VM**: it protects the machine it runs on.
 - **Inbound only.** Packets the host sends are never inspected.
-- **One TC ingress program** (tcx), attached to every protected interface,
-  with **one ruleset per interface**. XDP is left free for a DDoS gate such
-  as voidGate, which runs before mini-fw (§10).
+- **One program**, attached to every protected interface, with **one
+  ruleset per interface**: at XDP, in libxdp's dispatcher after a DDoS gate
+  such as voidGate; at TC ingress (tcx) on an interface whose XDP hook
+  another program holds (§5.3, §10).
 - **Stateless.** Every packet is judged on its own headers. There is no connection table.
 - **A daemon, mfwd, owns the kernel side.** Clients send it the whole policy
   over a Unix socket: the `mfw` tool, or a front end such as sw_configd
@@ -66,12 +67,18 @@ does today.** Where the two disagree, §10 explains why.
                      interface's compiled lists     │ read by mfw_tc
    maps/config       ARRAY  flags, generation      ─┤
    maps/stats        PERCPU counters               ─┘ written by mfw_tc
-   link/tcx_<if>     pinned bpf_link (keeps the program attached)
-   link/tc_<if>      or, before 6.6, the program: attached by classic TC
+   link/xdp_<if>     the program in the interface's libxdp dispatcher
+   link/tcx_<if>     or, degraded, a pinned bpf_link (keeps mfw_tc attached)
+   link/tc_<if>      or, degraded before 6.6, mfw_tc: attached by classic TC
 
- NIC ──► XDP (voidGate) ──► GRO ──► tcx ingress mfw_tc ──► TCX_NEXT ──► IP stack ──► sockets
-                                              │
-                                              └──► TCX_DROP
+ NIC ──► XDP dispatcher: voidGate (10) ──► mfw_xdp (20) ──► GRO ──► IP stack ──► sockets
+                                  │                │
+                                  └──► XDP_DROP ◄──┘
+
+ degraded, another program on the XDP hook:
+ NIC ──► XDP (theirs) ──► GRO ──► tcx ingress voidGate ──► mfw_tc ──► TCX_NEXT ──► IP stack
+                                                                │
+                                                                └──► TCX_DROP
 ```
 
 Key properties:
@@ -378,10 +385,32 @@ pinned links and maps stay**, so the interfaces keep their rulesets.
 
 ### 5.3 Attach and detach
 
-mfwd attaches and detaches as `APPLY` requires (§6):
+mfwd attaches and detaches as `APPLY` requires (§6). At XDP:
+
+- **Attach:** libxdp loads `mfw_xdp` from a new object on the pinned maps,
+  as an extension of the interface's dispatcher, which it makes (native
+  XDP, else skb) or joins (in its mode) at the priority in the program's
+  `XDP_RUN_CONFIG`, 20; only `XDP_PASS` goes on to the next program. mfwd
+  pins the program as `link/xdp_<if>`. A `mfw_xdp` already in the
+  dispatcher without a pin (lost pins) is taken out first.
+- **Live** when its pin's program is in the interface's dispatcher.
+- **Detach:** take that program out of the dispatcher, then unlink the pin.
+- **Upgrade:** libxdp can't swap one program for another: on start mfwd
+  puts its new program in each dispatcher, then takes the old one out. For
+  a moment both run, on the same maps, and nothing goes unfiltered.
+- libxdp needs bpffs at `/sys/fs/bpf`: without it, it would attach the
+  program alone, which takes the hook from every program after it, so
+  mfwd refuses.
+
+A program that is not a dispatcher on the hook (attached with `ip link`,
+or a `bpf_link`, such as Cilium's) is never replaced: mfwd attaches that
+interface at TC ingress, logs it as degraded, and `STATUS` lists it in
+`degraded`. A later start moves it to XDP if the hook has come free.
+`MFW_NO_XDP=1` attaches every interface at TC, for the tests. At TC:
 
 - **Attach:** `bpf_link_create(BPF_TCX_INGRESS)`, appended after any tcx
-  program already there, and pin the link as `link/tcx_<if>`.
+  program already there, such as voidGate's, and pin the link as
+  `link/tcx_<if>`.
 - **A link is live** when its pin exists and `bpf_link_get_info_by_fd()`
   reports the interface's current ifindex. A pin whose interface was
   deleted (or deleted and re-created) is removed and, if still bound,
@@ -601,13 +630,14 @@ that touches several interfaces switches them one after another.
 
 ### 8.5 Performance
 
-- TC runs **after GRO**, so the extended list is scanned once per
-  GRO-merged packet, not once per wire packet. The earliest drop, at XDP, is
-  left to the DDoS gate, which is where floods are cut.
+- At XDP the lists judge each wire packet before the kernel builds an skb;
+  floods are cut before them, by the DDoS gate. Degraded, at TC, **after
+  GRO**, the extended list is scanned once per GRO-merged packet.
 - Matching is linear: worst case 64 + 128 ACE checks per packet. Put the
   most frequently hit ACEs first.
 - tcx and classic TC need no driver support: they work on every
-  interface, veth and dummy included.
+  interface, veth and dummy included. Nor does XDP, in skb mode, which a
+  new dispatcher falls back to where the driver has no native XDP.
 
 ### 8.6 SYN floods
 
@@ -664,7 +694,7 @@ Notes:
 
 | Area | `design.md` (Rev 18) | Step 1 | Why |
 |------|----------------------|--------|-----|
-| Hooks | XDP + TC ingress + TC egress | TC ingress only (tcx) | Local VM only, no egress. XDP is the DDoS gate's (voidGate): an interface has one native XDP program |
+| Hooks | XDP + TC ingress + TC egress | XDP in libxdp's dispatcher, or TC ingress (tcx) where another program holds XDP | Local VM only, no egress. The dispatcher shares the XDP hook with the DDoS gate (voidGate), first |
 | Extended list | TC ingress and egress | TC ingress, after the standard list | A stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
 | Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
@@ -675,7 +705,7 @@ Notes:
 | Bound detection | sketch checked "index 0 enabled", per direction | `std_acl` / `ext_acl` in the ruleset | Explicit; no sentinel entries |
 | Implicit deny | trailing synthetic `deny ip any any` | running off the end of a bound extended list | Counted separately from explicit denies; takes no ACE slot |
 | `established` | not in design | added (Cisco-compatible) | Makes stateless reply handling practical |
-| Stats ids | TC/CT/frag ids | one set (§4.5), outcomes still named `xdp_*` | Nothing shipped; clean layout, append-only from now on |
+| Stats ids | TC/CT/frag ids | one set (§4.5), outcomes named `xdp_*` whichever hook | Nothing shipped; clean layout, append-only from now on |
 | Kernel | 5.10+ | 6.1+ | tcx links from 6.6, classic TC before (§5.3); global BPF function with pointer arguments (5.12+, §3.4) |
 | `rule_id` delete | `no ip access-list N <rule_id\|seq>` | none: a policy is replaced as a whole | `rule_id` is still `(acl << 16) \| seq` |
 | clsact management | meta markers, TC attach | before 6.6 only | tcx links need no clsact qdisc; classic TC adds one if missing and leaves it |

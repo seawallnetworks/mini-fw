@@ -4,8 +4,13 @@
  *   <root>/maps/rulesets   HASH_OF_MAPS ifindex → inner map (one mfw_ruleset)
  *   <root>/maps/config     ARRAY  flags, generation
  *   <root>/maps/stats      PERCPU counters
- *   <root>/link/tcx_<if>   pinned bpf_link: keeps the TC ingress program
- *                          attached without mfwd
+ *   <root>/link/xdp_<if>   the XDP program mini-fw put in the interface's
+ *                          libxdp dispatcher (priority 20, after voidGate's
+ *                          10), whose own pins keep it there without mfwd
+ *   <root>/link/tcx_<if>   or, when a program that is not a dispatcher
+ *                          holds the XDP hook (degraded: mini-fw never
+ *                          replaces it), a pinned bpf_link that keeps the
+ *                          TC ingress program attached without mfwd
  *   <root>/link/tc_<if>    or, on a kernel without tcx (before 6.6), the
  *                          program, pinned to say mini-fw attached it with
  *                          classic TC: a cls_bpf filter on the interface's
@@ -27,6 +32,7 @@
 #include <linux/magic.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <xdp/libxdp.h>
 
 /* tcx is Linux 6.6's UAPI: with older headers, such as Amazon Linux 2023's
  * 6.1, mfwd still attaches with tcx on a kernel that has it */
@@ -81,6 +87,207 @@ static void link_path(const char *root, const char *ifname, char *buf, size_t le
 static void tc_path(const char *root, const char *ifname, char *buf, size_t len)
 {
     snprintf(buf, len, "%s/link/tc_%.*s", root, IF_NAMESIZE, ifname);
+}
+
+static void xdp_path(const char *root, const char *ifname, char *buf, size_t len)
+{
+    snprintf(buf, len, "%s/link/xdp_%.*s", root, IF_NAMESIZE, ifname);
+}
+
+#define MFW_XDP_PROG  "mfw_xdp"
+
+/* What holds an interface's XDP hook. */
+enum {
+    XDP_FREE,      /* nothing */
+    XDP_SHARED,    /* libxdp's dispatcher */
+    XDP_HELD,      /* a program that is not a dispatcher */
+};
+
+/* libxdp keeps its dispatchers' state on bpffs: without it, it attaches a
+ * program alone, which takes the hook from every program after it. */
+static int libxdp_bpffs(void)
+{
+    const char *dir = getenv("LIBXDP_BPFFS");
+    struct statfs st;
+
+    return statfs(dir ? dir : "/sys/fs/bpf", &st) == 0 && st.f_type == BPF_FS_MAGIC;
+}
+
+/* The state of ifindex's XDP hook; for XDP_SHARED its mode, for XDP_HELD
+ * the holder's name. -errno if it can't be read. */
+static int xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder, size_t len)
+{
+    struct xdp_multiprog *mp = xdp_multiprog__get_from_ifindex(ifindex);
+    long e = libxdp_get_error(mp);
+    struct xdp_program *main;
+    int state;
+
+    if (e == -ENOENT)
+        return XDP_FREE;
+    if (e)
+        return e;
+    main = xdp_multiprog__main_prog(mp);
+    if (!xdp_multiprog__is_legacy(mp)) {
+        *mode = xdp_multiprog__attach_mode(mp);
+        state = XDP_SHARED;
+    } else if (main) {
+        snprintf(holder, len, "%s", xdp_program__name(main));
+        state = XDP_HELD;
+    } else {
+        state = XDP_FREE;  /* only a hardware-offloaded program */
+    }
+    xdp_multiprog__close(mp);
+    return state;
+}
+
+/* Take mini-fw's program with id (any, if id is 0) out of ifindex's
+ * dispatcher. Returns 1 if one was, 0 if none, -errno. */
+static int xdp_remove(int ifindex, __u32 id)
+{
+    struct xdp_multiprog *mp = xdp_multiprog__get_from_ifindex(ifindex);
+    struct xdp_program *p = NULL;
+    int e;
+
+    if (libxdp_get_error(mp))
+        return 0;
+    if (!xdp_multiprog__is_legacy(mp))
+        while ((p = xdp_multiprog__next_prog(p, mp)))
+            if (id ? xdp_program__id(p) == id
+                   : !strcmp(xdp_program__name(p), MFW_XDP_PROG))
+                break;
+    e = p ? xdp_program__detach(p, ifindex, xdp_multiprog__attach_mode(mp), 0) : 0;
+    xdp_multiprog__close(mp);
+    return e ? e : p != NULL;
+}
+
+/* The id of the program pinned at path; 0 if none. */
+static __u32 pinned_id(const char *path)
+{
+    struct bpf_prog_info info = {};
+    __u32 len = sizeof(info);
+    int fd = bpf_obj_get(path);
+
+    if (fd < 0)
+        return 0;
+    if (bpf_prog_get_info_by_fd(fd, &info, &len))
+        info.id = 0;
+    close(fd);
+    return info.id;
+}
+
+/* Is mini-fw's pinned program in ifname's dispatcher? A pin whose program
+ * is not (the device was deleted or re-created, or the program removed)
+ * is removed. */
+static int xdp_attached(const char *root, const char *ifname)
+{
+    struct xdp_multiprog *mp;
+    struct xdp_program *p = NULL;
+    char path[PATH_MAX];
+    int ifindex = if_nametoindex(ifname);
+    __u32 id;
+
+    xdp_path(root, ifname, path, sizeof(path));
+    id = pinned_id(path);
+    if (!id)
+        return 0;
+    mp = ifindex ? xdp_multiprog__get_from_ifindex(ifindex) : NULL;
+    if (mp && !libxdp_get_error(mp)) {
+        while ((p = xdp_multiprog__next_prog(p, mp)))
+            if (xdp_program__id(p) == id)
+                break;
+        xdp_multiprog__close(mp);
+    }
+    if (p)
+        return 1;
+    unlink(path);
+    return 0;
+}
+
+/* Load the XDP entry into ifindex's dispatcher, made or joined, and pin it
+ * as ifname's xdp_ pin. The object is a new one on the pinned maps: libxdp
+ * loads it, as an extension of that dispatcher. Returns 0 or -errno. */
+static int xdp_load(const char *root, const char *ifname, int ifindex,
+                    enum xdp_attach_mode mode)
+{
+    char maps[PATH_MAX], path[PATH_MAX];
+    LIBBPF_OPTS(bpf_object_open_opts, oopts, .pin_root_path = maps);
+    DECLARE_LIBXDP_OPTS(xdp_program_opts, xopts, .prog_name = MFW_XDP_PROG);
+    struct xdp_program *xp;
+    struct mfw_bpf *skel;
+    int e;
+
+    snprintf(maps, sizeof(maps), "%s/maps", root);
+    skel = mfw_bpf__open_opts(&oopts);
+    if (!skel)
+        return -errno;
+    bpf_program__set_autoload(skel->progs.mfw_tc, false);
+    xopts.obj = skel->obj;
+    xp = xdp_program__create(&xopts);
+    e = libxdp_get_error(xp);
+    if (e) {
+        mfw_bpf__destroy(skel);
+        return e;
+    }
+    /* xdp.frags is not enough for libxdp, which then makes a dispatcher
+     * without frags: one a jumbo-MTU interface refuses */
+    xdp_program__set_xdp_frags_support(xp, true);
+    e = xdp_program__attach(xp, ifindex, mode, 0);
+    if (!e) {
+        xdp_path(root, ifname, path, sizeof(path));
+        unlink(path);
+        if (bpf_obj_pin(xdp_program__fd(xp), path)) {
+            e = -errno;
+            xdp_program__detach(xp, ifindex, mode, 0);
+        }
+    }
+    xdp_program__close(xp);
+    mfw_bpf__destroy(skel);  /* the dispatcher's pins keep the program */
+    return e;
+}
+
+/* Put mini-fw in ifname's dispatcher, unless a program that is not one
+ * holds the hook: then 1, with its name in holder. A dispatcher has one
+ * mode, which joining keeps; making one takes native XDP, else skb (a
+ * driver may have native XDP and still refuse it: ENA, say, at an MTU
+ * over 3498). Returns 0, 1 or -errno. */
+static int xdp_attach(const char *root, const char *ifname, int ifindex,
+                      char *holder, size_t len)
+{
+    enum xdp_attach_mode mode = XDP_MODE_NATIVE;
+    int state, e;
+
+    if (!libxdp_bpffs())
+        return -ENOTSUP;
+    state = xdp_state(ifindex, &mode, holder, len);
+    if (state < 0)
+        return state;
+    if (state == XDP_HELD)
+        return 1;
+    /* one a crash or a lost pin left would run twice */
+    for (int i = 0; i < 10 && xdp_remove(ifindex, 0) > 0; i++)
+        ;
+    e = xdp_load(root, ifname, ifindex, mode);
+    if (e && state == XDP_FREE && e != -EBUSY && e != -EEXIST)
+        e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB);
+    if (e == -EBUSY || e == -EEXIST) {  /* attached after xdp_state() */
+        snprintf(holder, len, "another program");
+        return 1;
+    }
+    return e;
+}
+
+/* Leave ifname's dispatcher, if mini-fw is in it. */
+static void xdp_detach(const char *root, const char *ifname)
+{
+    char path[PATH_MAX];
+    int ifindex = if_nametoindex(ifname);
+    __u32 id;
+
+    xdp_path(root, ifname, path, sizeof(path));
+    id = pinned_id(path);
+    if (id && ifindex)
+        xdp_remove(ifindex, id);
+    unlink(path);
 }
 
 /* tcx (6.6+): a kernel without it refuses to query it. MFW_NO_TCX=1 takes
@@ -184,12 +391,26 @@ static int open_link(const char *root, const char *ifname)
 
 int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
 {
-    int fd = open_link(dp->root, ifname);
+    int fd;
 
+    if (xdp_attached(dp->root, ifname))
+        return 1;
+    fd = open_link(dp->root, ifname);
     if (fd < 0)
         return tc_attached(dp->root, ifname);
     close(fd);
     return 1;
+}
+
+int mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname)
+{
+    enum xdp_attach_mode mode;
+    char holder[BPF_OBJ_NAME_LEN];
+    int ifindex = if_nametoindex(ifname);
+
+    return ifindex && !xdp_attached(dp->root, ifname) &&
+           mfw_dp_attached(dp, ifname) &&
+           xdp_state(ifindex, &mode, holder, sizeof(holder)) == XDP_HELD;
 }
 
 static int name_cmp(const void *a, const void *b)
@@ -212,7 +433,8 @@ int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
         const char *ifname = strchr(de->d_name, '_');
 
         if (!ifname || strlen(++ifname) >= IF_NAMESIZE ||
-            (strncmp(de->d_name, "tcx_", 4) && strncmp(de->d_name, "tc_", 3)))
+            (strncmp(de->d_name, "tcx_", 4) && strncmp(de->d_name, "tc_", 3) &&
+             strncmp(de->d_name, "xdp_", 4)))
             continue;
         if (mfw_dp_attached(dp, ifname))
             snprintf(names[n++], IF_NAMESIZE, "%s", ifname);
@@ -260,26 +482,57 @@ static int init_config(struct mfw_dp *dp, char *err, size_t len)
     return 0;
 }
 
-/* Interfaces attached by an earlier mfwd run the program loaded now. */
+/* Take ifname off TC, where it was attached before. */
+static void tc_off(const char *root, const char *ifname)
+{
+    char path[PATH_MAX];
+
+    link_path(root, ifname, path, sizeof(path));
+    unlink(path);  /* last reference: the kernel detaches the program */
+    tc_path(root, ifname, path, sizeof(path));
+    if (unlink(path) == 0 && if_nametoindex(ifname))
+        tc_detach(if_nametoindex(ifname));
+}
+
+/* Interfaces attached by an earlier mfwd run the program loaded now. In a
+ * dispatcher the new program goes in before the old one comes out, which
+ * libxdp can't do in one step: for a moment both run, on the same maps,
+ * and nothing passes unfiltered. One at TC moves to XDP if the hook has
+ * come free, the same way: XDP first. */
 static void upgrade_links(struct mfw_dp *dp)
 {
-    char names[MFW_MAX_IFACES][IF_NAMESIZE];
+    char names[MFW_MAX_IFACES][IF_NAMESIZE], path[PATH_MAX];
     int n = mfw_dp_list(dp, names, MFW_MAX_IFACES);
 
     for (int i = 0; i < n; i++) {
-        int fd = open_link(dp->root, names[i]), e = 0;
+        int ifindex = if_nametoindex(names[i]), fd, e = 0;
+        enum xdp_attach_mode mode = XDP_MODE_NATIVE;
+        char holder[BPF_OBJ_NAME_LEN];
+        __u32 old;
 
-        if (fd >= 0) {
+        if (xdp_attached(dp->root, names[i])) {
+            xdp_path(dp->root, names[i], path, sizeof(path));
+            old = pinned_id(path);
+            if (xdp_state(ifindex, &mode, holder, sizeof(holder)) != XDP_SHARED)
+                e = ENOENT;
+            else if ((e = -xdp_load(dp->root, names[i], ifindex, mode)) == 0)
+                xdp_remove(ifindex, old);
+        } else if (!dp->no_xdp &&
+                   xdp_attach(dp->root, names[i], ifindex, holder, sizeof(holder)) == 0) {
+            tc_off(dp->root, names[i]);
+            fprintf(stderr, "mfwd: %s: the XDP hook is free: moved from TC to XDP\n",
+                    names[i]);
+        } else if ((fd = open_link(dp->root, names[i])) >= 0) {
             if (bpf_link_update(fd, dp->prog_fd, NULL))
                 e = errno;
             close(fd);
         } else if (tc_attached(dp->root, names[i])) {
-            e = -tc_attach(if_nametoindex(names[i]), dp->prog_fd);
+            e = -tc_attach(ifindex, dp->prog_fd);
             if (!e && tc_pin(dp->root, names[i], dp->prog_fd))
                 e = errno;
         }
         if (e)
-            fprintf(stderr, "mfwd: %s: update TC program: %s\n", names[i],
+            fprintf(stderr, "mfwd: %s: update program: %s\n", names[i],
                     strerror(e));
     }
 }
@@ -287,6 +540,16 @@ static void upgrade_links(struct mfw_dp *dp)
 static int libbpf_print(enum libbpf_print_level level, const char *fmt, va_list ap)
 {
     if (level == LIBBPF_DEBUG && !getenv("MFW_DEBUG"))
+        return 0;
+    /* sections of libxdp's, which libxdp reads itself */
+    if (strstr(fmt, "skipping unrecognized data section"))
+        return 0;
+    return vfprintf(stderr, fmt, ap);
+}
+
+static int libxdp_print(enum libxdp_print_level level, const char *fmt, va_list ap)
+{
+    if (level == LIBXDP_DEBUG && !getenv("MFW_DEBUG"))
         return 0;
     return vfprintf(stderr, fmt, ap);
 }
@@ -334,6 +597,9 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->skel = mfw_bpf__open_opts(&opts);
     if (!dp->skel)
         return fail(err, errlen, "open BPF object: %s", strerror(errno));
+    /* the TC entry, for the interfaces at TC; libxdp loads the XDP entry,
+     * from an object of its own, for each interface in a dispatcher */
+    bpf_program__set_autoload(dp->skel->progs.mfw_xdp, false);
     if (mfw_bpf__load(dp->skel)) {  /* reuses pinned maps, pins new ones */
         mfw_dp_close(dp);
         return fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
@@ -345,6 +611,8 @@ int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->config_fd = bpf_map__fd(dp->skel->maps.config);
     dp->stats_fd = bpf_map__fd(dp->skel->maps.stats);
     dp->tcx = have_tcx();
+    dp->no_xdp = getenv("MFW_NO_XDP") != NULL;
+    libxdp_set_print(libxdp_print);
     if (init_config(dp, err, errlen)) {
         mfw_dp_close(dp);
         return -1;
@@ -368,6 +636,18 @@ int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errle
         return fail(err, errlen, "%s: no such interface", ifname);
     if (mfw_dp_attached(dp, ifname))
         return 0;
+    if (!dp->no_xdp) {
+        char holder[BPF_OBJ_NAME_LEN];
+
+        e = xdp_attach(dp->root, ifname, ifindex, holder, sizeof(holder));
+        if (e == 0)
+            return 0;
+        if (e < 0)
+            return fail(err, errlen, "%s: attach XDP: %s%s", ifname, strerror(-e),
+                        e == -ENOTSUP ? " (libxdp needs bpffs at /sys/fs/bpf)" : "");
+        fprintf(stderr, "mfwd: %s: %s holds the XDP hook without libxdp's "
+                "dispatcher: filtering at TC ingress (degraded)\n", ifname, holder);
+    }
     if (!dp->tcx) {
         e = -tc_attach(ifindex, dp->prog_fd);
         if (e)
@@ -397,16 +677,12 @@ int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errle
 
 void mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
 {
-    char path[PATH_MAX];
     __u32 ifindex = if_nametoindex(ifname);
 
     if (ifindex)
         bpf_map_delete_elem(dp->rulesets_fd, &ifindex);
-    link_path(dp->root, ifname, path, sizeof(path));
-    unlink(path);  /* last reference: the kernel detaches the program */
-    tc_path(dp->root, ifname, path, sizeof(path));
-    if (unlink(path) == 0 && ifindex)
-        tc_detach(ifindex);
+    xdp_detach(dp->root, ifname);
+    tc_off(dp->root, ifname);
 }
 
 int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
@@ -497,9 +773,12 @@ static void rm_dir(const char *dir)
             continue;
         snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
         /* a link pin: the kernel detaches the program; a classic TC
-         * filter stays until it is removed */
+         * filter stays until it is removed, a program in a dispatcher
+         * until it is taken out */
         if (!strncmp(de->d_name, "tc_", 3) && if_nametoindex(de->d_name + 3))
             tc_detach(if_nametoindex(de->d_name + 3));
+        if (!strncmp(de->d_name, "xdp_", 4) && if_nametoindex(de->d_name + 4))
+            xdp_remove(if_nametoindex(de->d_name + 4), pinned_id(path));
         unlink(path);
     }
     closedir(d);

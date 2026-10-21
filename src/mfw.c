@@ -25,7 +25,8 @@ static void usage(FILE *f)
         "  apply [file]       replace the whole policy (stdin if no file or '-')\n"
         "  check [file]       check a policy here, without sending it\n"
         "  show               the policy mfwd enforces\n"
-        "  status             generation, attached and missing interfaces\n"
+        "  status             generation, attached, missing and degraded\n"
+        "                     (at TC: another program holds XDP) interfaces\n"
         "  stats [--json]     packet counters\n"
         "  ping\n"
         "  version\n"
@@ -173,6 +174,7 @@ static int cmd_status(const mfw_client_t *c)
         printf("generation           none (no policy applied since boot)\n");
     printf("attached             %s\n", *st.attached ? st.attached : "-");
     printf("missing              %s\n", *st.missing ? st.missing : "-");
+    printf("degraded             %s\n", *st.degraded ? st.degraded : "-");
     printf("drop-ipv4-fragments  %d\n", st.drop_ipv4_fragments);
     return EXIT_OK;
 }

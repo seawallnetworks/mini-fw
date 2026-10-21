@@ -8,7 +8,9 @@
 #
 # mfwd runs in mfw-fw with its own pin root, socket and state directory,
 # so this runs next to a live mini-fw without touching it. The second veth
-# pair checks that each interface enforces only its own lists. Needs root.
+# pair checks that each interface enforces only its own lists. Needs root
+# and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only, and needs no
+# xdp-tools.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,6 +26,9 @@ PASS=0 FAIL=0 PID=
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
 command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
+if [[ -z ${MFW_NO_XDP:-} ]] && ! command -v xdp-loader >/dev/null; then
+    echo "needs xdp-tools (or MFW_NO_XDP=1)"; exit 1
+fi
 
 in_cli() { ip netns exec "$CLI" "$@"; }
 in_fw()  { ip netns exec "$FW" "$@"; }
@@ -31,6 +36,12 @@ in_fw()  { ip netns exec "$FW" "$@"; }
 # (MFW_NO_TCX=1, or a kernel before 6.6) as clsact/<hook>
 tcx_on() { in_fw bpftool net show dev "$1" | grep -Eq "(tcx|clsact)/${2:-ingress} mfw_tc[ :]"; }
 xdp_on() { in_fw ip link show "$1" | grep -q ' xdp'; }
+# mini-fw in the interface's XDP dispatcher; xdp-loader reads it from the
+# host's bpffs, which ip netns exec hides
+xdp_in() { nsenter --net=/var/run/netns/$FW xdp-loader status "$1" 2>/dev/null |
+           grep -q ' mfw_xdp '; }
+# mini-fw filters the interface, at XDP or TC
+on()     { { [[ -z ${MFW_NO_XDP:-} ]] && xdp_in "$1"; } || tcx_on "$1"; }
 mfw()    { "$MFW" -s "$SOCK" "$@"; }
 
 start_mfwd() {
@@ -102,12 +113,16 @@ expect ok "ping" ping_fw
 echo "== mfwd running, empty policy"
 start_mfwd
 expect ok "ping" ping_fw
-expect fail "nothing attached" tcx_on veth-fw
+expect fail "nothing attached" on veth-fw
 
 echo "== standard list (blacklist)"
 policy "acl 10 10 deny host $CLI_IP" "acl 10 20 permit any" "bind veth-fw in 10"
-expect ok   "TC ingress attached by the policy" tcx_on veth-fw
-expect fail "XDP left free (for voidGate)" xdp_on veth-fw
+expect ok   "attached by the policy" on veth-fw
+if [[ -z ${MFW_NO_XDP:-} ]]; then
+    expect fail "at XDP, in a dispatcher: not at TC" tcx_on veth-fw
+else
+    expect fail "TC only: XDP left free" xdp_on veth-fw
+fi
 expect fail "ping from denied host" ping_fw
 expect ok   "std_deny counted" test "$(stat_of std_deny)" -gt 0
 policy "acl 10 20 permit any" "bind veth-fw in 10"
@@ -118,7 +133,7 @@ policy "acl 10 10 deny host 192.0.2.1" "bind veth-fw in 10"
 expect ok   "ping not on the blacklist (no implicit deny)" ping_fw
 policy
 expect ok   "empty policy: ping" ping_fw
-expect fail "empty policy: detached" tcx_on veth-fw
+expect fail "empty policy: detached" on veth-fw
 
 echo "== extended list (implicit deny)"
 EXT=("acl 100 10 permit tcp any host $FW_IP eq 8080"

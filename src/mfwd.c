@@ -8,6 +8,7 @@
  *
  *   PING                     OK
  *   STATUS                   OK generation=N drop-ipv4-fragments=0|1 attached=a,b missing=c
+ *                            degraded=d (at TC: another program holds XDP)
  *   STATS                    OK xdp_pass=N xdp_drop=N ...
  *   SHOW                     OK <n>, then the applied policy in n lines
  *   APPLY                    OK <generation>[ missing=a,b]
@@ -239,13 +240,17 @@ out:
 static void status(struct mfwd *d, char **reply)
 {
     char names[MFW_MAX_IFACES][IF_NAMESIZE], attached[1024] = "", missing[1024] = "";
+    char degraded[1024] = "";
     struct mfw_config cfg = {};
     struct mfw_policy p;
     char err[MFW_ERR_LEN];
     int n = mfw_dp_list(&d->dp, names, MFW_MAX_IFACES);
 
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
         append(attached, sizeof(attached), names[i]);
+        if (mfw_dp_degraded(&d->dp, names[i]))
+            append(degraded, sizeof(degraded), names[i]);
+    }
     if (d->policy && mfw_policy_parse(d->policy, &p, err, sizeof(err)) == 0) {
         for (int i = 0; i < p.n_binds; i++)
             if (!if_nametoindex(p.binds[i].ifname))
@@ -253,9 +258,9 @@ static void status(struct mfwd *d, char **reply)
         mfw_policy_free(&p);
     }
     mfw_dp_get_config(&d->dp, &cfg);
-    if (asprintf(reply, "OK generation=%u drop-ipv4-fragments=%u attached=%s missing=%s\n",
-                 d->policy ? d->generation : 0, cfg.drop_ipv4_fragments, attached,
-                 missing) < 0)
+    if (asprintf(reply, "OK generation=%u drop-ipv4-fragments=%u attached=%s missing=%s "
+                 "degraded=%s\n", d->policy ? d->generation : 0, cfg.drop_ipv4_fragments,
+                 attached, missing, degraded) < 0)
         *reply = NULL;
 }
 
@@ -593,7 +598,9 @@ int main(int argc, char **argv)
                sizeof(struct timeval));
     logmsg("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
            MFWD_VERSION, MFW_ABI_VERSION, sock, root,
-           d.dp.tcx ? "tcx" : "classic TC (no tcx before kernel 6.6)");
+           d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
+           : d.dp.tcx ? "libxdp's dispatcher, else tcx"
+           : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");
 
     while (!stop) {
         int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);

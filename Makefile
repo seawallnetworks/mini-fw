@@ -13,10 +13,12 @@ CFLAGS     += -Iinclude -Isrc -MMD -MP
 BPF_CFLAGS := -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Iinclude \
               $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH))
 BPFDIR     := src/bpf
-# libbpf linked in statically, so mfwd needs no libbpf on the machine;
-# libelf and zlib (and libzstd) it needs stay shared
-LIBBPF     := $(patsubst -lbpf,-l:libbpf.a,$(or $(shell pkg-config --static \
-              --libs libbpf 2>/dev/null),-lbpf -lelf -lz))
+# libxdp and libbpf linked in statically, so mfwd needs neither on the
+# machine (libxdp carries its dispatcher in it); libelf and zlib (and
+# libzstd) they need stay shared
+LIBBPF     := $(patsubst -lbpf,-l:libbpf.a,$(patsubst -lxdp,-l:libxdp.a, \
+              $(or $(shell pkg-config --static --libs libxdp 2>/dev/null), \
+              -lxdp -lbpf -lelf -lz)))
 
 LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
 MFWD_OBJS  := build/mfwd.o build/dataplane.o

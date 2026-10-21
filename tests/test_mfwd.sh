@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 # mfwd: protocol, attach/detach, refusals, restarts and purge, on dummy
 # interfaces in a private network namespace. No traffic (see
-# scripts/smoke-test.sh for that). Needs root.
+# scripts/smoke-test.sh for that). Needs root, and xdp-tools (xdp-loader,
+# xdp-filter) and clang; MFW_NO_XDP=1 attaches at TC only, and needs
+# neither.
 #
 # Uses its own pin root, socket and state directory, so it runs next to a
 # live mini-fw without touching it.
@@ -19,6 +21,9 @@ PASS=0 FAIL=0 PID=
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
 command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
+if [[ -z ${MFW_NO_XDP:-} ]] && ! command -v xdp-loader clang >/dev/null; then
+    echo "needs xdp-tools and clang (or MFW_NO_XDP=1)"; exit 1
+fi
 
 cleanup() {
     [[ -n $PID ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null
@@ -40,12 +45,14 @@ same() {  # same "description" actual expected
 }
 
 mfw()  { "$MFW" -s "$SOCK" "$@"; }
+in_ns() { nsenter --net=/var/run/netns/$NS "$@"; }
+# mini-fw's programs in the interface's XDP dispatcher
+xdp_in() { in_ns xdp-loader status "$1" 2>/dev/null | grep -c ' mfw_xdp '; }
 # ip link doesn't show tcx programs; bpftool does, and classic TC's
 # (MFW_NO_TCX=1, or a kernel before 6.6) as clsact/ingress
-tc_on() {
-    nsenter --net=/var/run/netns/$NS bpftool net show dev "$1" |
-        grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'
-}
+tc_on() { in_ns bpftool net show dev "$1" | grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'; }
+# mini-fw filters the interface, at XDP or TC
+on() { [[ -z ${MFW_NO_XDP:-} && $(xdp_in "$1") == 1 ]] || tc_on "$1"; }
 field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
 
 start() {
@@ -79,7 +86,7 @@ EOF
 }
 
 ip netns add "$NS"
-for i in d0 d1 d2; do ip -n "$NS" link add $i type dummy; ip -n "$NS" link set $i up; done
+for i in d0 d1 d2 d3; do ip -n "$NS" link add $i type dummy; ip -n "$NS" link set $i up; done
 
 POLICY="acl 10 10 deny host 192.0.2.1
 acl 100 10 permit tcp any any eq 22
@@ -99,9 +106,9 @@ echo "== apply"
 expect ok "apply" mfw apply <(echo "$POLICY")
 same "generation 1" "$(field generation)" 1
 same "attached d0,d1" "$(field attached)" d0,d1
-expect ok "TC on d0" tc_on d0
-expect ok "TC on d1" tc_on d1
-expect fail "no TC on d2" tc_on d2
+expect ok "on d0" on d0
+expect ok "on d1" on d1
+expect fail "not on d2" on d2
 same "show is canonical" "$(mfw show)" "acl 10 10 deny host 192.0.2.1
 acl 100 10 permit tcp any any eq 22
 acl 110 10 permit icmp any any
@@ -130,10 +137,10 @@ same "status: attached unchanged" "$(field attached)" d0,d1
 echo "== unbinding detaches"
 expect ok "apply d0 only" mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\n')
 same "attached d0" "$(field attached)" d0
-expect fail "no TC on d1" tc_on d1
+expect fail "not on d1" on d1
 expect ok "empty policy" mfw apply /dev/null
 same "nothing attached" "$(field attached)" -
-expect fail "no TC on d0" tc_on d0
+expect fail "not on d0" on d0
 
 echo "== protocol errors"
 same "unknown request" "$(raw 'FROB\n')" "ERR badreq unknown request 'FROB'"
@@ -151,7 +158,7 @@ same "mfwd still serves" "$(raw 'PING\n')" "OK"
 echo "== restart keeps the policy and the filtering"
 expect ok "apply" mfw apply <(echo "$POLICY")
 stop
-expect ok "TC stays on d0 while mfwd is down" tc_on d0
+expect ok "stays on d0 while mfwd is down" on d0
 start
 same "generation kept" "$(field generation)" 6
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
@@ -163,7 +170,7 @@ rm "$PINS/maps/stats"
 bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
 start
 same "generation kept" "$(field generation)" 6
-expect ok "TC stays on d0" tc_on d0
+expect ok "stays on d0" on d0
 expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
 
 echo "== lost pins: the saved policy is applied again"
@@ -171,7 +178,7 @@ stop
 rm -rf "$PINS"
 start
 same "attached again" "$(field attached)" d0,d1
-expect ok "TC on d0" tc_on d0
+expect ok "on d0" on d0
 grep -q "applying it again" "$LOG" && ok "log: applied again" || bad "log: applied again"
 
 echo "== re-created interface"
@@ -181,13 +188,63 @@ same "d0 no longer attached" "$(field attached)" d1
 expect ok "apply again" mfw apply <(echo "$POLICY")
 same "d0 attached again" "$(field attached)" d0,d1
 
+if [[ -z ${MFW_NO_XDP:-} ]]; then
+echo "== sharing the XDP hook"
+# dummy interfaces have no native XDP: mfwd fell back to skb
+same "d0 in its dispatcher" "$(xdp_in d0)" 1
+expect fail "not at TC on d0" tc_on d0
+stop
+start
+same "one program in d0's after a restart" "$(xdp_in d0)" 1
+# xdp-filter is libxdp's: mini-fw joins its dispatcher, and leaves it to it
+in_ns xdp-filter load -m skb d2
+# the customer's program on d3 is not: it stays, and mini-fw goes to TC
+cat > "$TMP/pass.bpf.c" <<'EOF'
+struct xdp_md;
+__attribute__((section("xdp"), used)) int customer(struct xdp_md *ctx)
+{
+    return 2;  /* XDP_PASS */
+}
+char LICENSE[] __attribute__((section("license"), used)) = "GPL";
+EOF
+clang -O2 -target bpf -c "$TMP/pass.bpf.c" -o "$TMP/pass.bpf.o"
+in_ns ip link set dev d3 xdpgeneric obj "$TMP/pass.bpf.o" sec xdp
+xdp_id() { in_ns ip -d link show "$1" | sed -n 's/.*prog\/xdp id \([0-9]*\).*/\1/p'; }
+customer=$(xdp_id d3)
+expect ok "apply binding d2, d3" mfw apply <(printf '%s\nbind d2 in 110\nbind d3 in 110\n' "$POLICY")
+same "attached d0..d3" "$(field attached)" d0,d1,d2,d3
+same "d2 in xdp-filter's dispatcher" "$(xdp_in d2)" 1
+expect ok "xdp-filter still there" bash -c "nsenter --net=/var/run/netns/$NS xdp-loader status d2 | grep -q xdpfilt_"
+expect ok "TC on d3" tc_on d3
+same "d3 degraded" "$(field degraded)" d3
+same "the customer's program left alone" "$(xdp_id d3)" "$customer"
+grep -q "d3: customer holds the XDP hook" "$LOG" && ok "log: degraded" || bad "log: degraded"
+# once the hook is free, a restart moves d3 to XDP
+in_ns ip link set dev d3 xdpgeneric off
+stop
+start
+same "d3 in a dispatcher" "$(xdp_in d3)" 1
+expect fail "not at TC on d3" tc_on d3
+same "nothing degraded" "$(field degraded)" -
+expect ok "apply without d2" mfw apply <(printf '%s\nbind d3 in 110\n' "$POLICY")
+same "d2 left" "$(xdp_in d2)" 0
+expect ok "xdp-filter stays" bash -c "nsenter --net=/var/run/netns/$NS xdp-loader status d2 | grep -q xdpfilt_"
+in_ns xdp-filter unload d2 --all
+# pins lost while attached: the program they named is taken out, not doubled
+stop
+rm -rf "$PINS"
+start
+same "one program in d0's after lost pins" "$(xdp_in d0)" 1
+fi
+
 echo "== purge"
 stop
 # in the interfaces' namespace: a classic TC filter is removed there
 expect ok "mfwd -P" nsenter --net=/var/run/netns/$NS "$MFWD" -P -p "$PINS" -d "$STATE"
 expect ok "pins removed" test ! -e "$PINS"
 expect ok "saved policy removed" test ! -e "$STATE/policy"
-expect fail "no TC on d0" tc_on d0
+expect fail "not on d0" on d0
+[[ -n ${MFW_NO_XDP:-} ]] || same "nothing in d3's dispatcher" "$(xdp_in d3)" 0
 
 echo "== without mfwd"
 out=$(mfw ping 2>&1)
