@@ -108,7 +108,7 @@ sudo apt install clang llvm make libbpf-dev linux-tools-common linux-tools-$(una
 On Amazon Linux 2023 (or RHEL 9 and its rebuilds):
 
 ```bash
-sudo dnf install clang llvm make gcc libbpf-devel bpftool
+sudo dnf install clang llvm make gcc libbpf-devel libbpf-static bpftool
 ```
 
 mfwd attaches with tcx on Linux 6.6 and later, and with classic TC (a

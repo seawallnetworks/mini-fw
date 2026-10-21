@@ -55,8 +55,8 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`), bpftool, Linux ≥ 6.1 with
-BTF. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd attaches
+Requirements: clang, libbpf ≥ 1.3 (`libbpf-dev`; mfwd links it in
+statically), bpftool, Linux ≥ 6.1 with BTF. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd attaches
 with tcx on 6.6 and later, and with classic TC (a cls_bpf filter on clsact)
 before.
 
