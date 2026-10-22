@@ -503,6 +503,21 @@ static void restore(struct mfwd *d)
     free(text);
 }
 
+/* /etc/group read directly: mfwd is static, and getgrnam's NSS would
+ * dlopen modules (libnss_systemd) built for a different libc */
+static struct group *find_group(const char *name)
+{
+    FILE *f = fopen("/etc/group", "re");
+    struct group *g;
+
+    if (!f)
+        return NULL;
+    while ((g = fgetgrent(f)) && strcmp(g->gr_name, name))
+        ;
+    fclose(f);
+    return g;
+}
+
 static void usage(FILE *f)
 {
     fprintf(f,
@@ -545,7 +560,7 @@ int main(int argc, char **argv)
             }
             break;
         case 'g': {
-            struct group *g = getgrnam(optarg);
+            struct group *g = find_group(optarg);
 
             if (!g) {
                 fprintf(stderr, "mfwd: no such group '%s'\n", optarg);

@@ -55,8 +55,9 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`;
-mfwd links both in statically), bpftool, Linux ≥ 6.1 with BTF, bpffs at
+Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`),
+and the static archives of libelf, zlib, libzstd and glibc (mfwd is linked
+fully static, so it needs no libraries on the machine), bpftool, Linux ≥ 6.1 with BTF, bpffs at
 `/sys/fs/bpf`. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
 attaches at XDP, in libxdp's dispatcher; on an interface where a program
 that is not a dispatcher holds the XDP hook, at TC ingress: with tcx on 6.6
