@@ -78,23 +78,30 @@ smoke: mfwd mfw
 
 install: install-runtime install-static-lib
 
-# what runs on the machine
+# what runs on the machine. The group mfw, which the unit gives the
+# socket to, is declared, not created: systemd-sysusers creates it now
+# (not when staging into DESTDIR), and at boot on a machine without it.
 install-runtime: mfwd mfw
 	install -D -m 0755 mfwd $(DESTDIR)$(PREFIX)/sbin/mfwd
 	install -D -m 0755 mfw $(DESTDIR)$(PREFIX)/bin/mfw
 	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
+	install -D -m 0644 sysusers.d/mini-fw.conf \
+	    $(DESTDIR)/etc/sysusers.d/mini-fw.conf
+	[ -n "$(DESTDIR)" ] || systemd-sysusers /etc/sysusers.d/mini-fw.conf
 
 # the client library and its headers, for linking (sw_configd)
 install-static-lib: libmfw.a
 	install -D -m 0644 libmfw.a $(DESTDIR)$(PREFIX)/lib/libmfw.a
 	install -D -m 0644 -t $(DESTDIR)$(PREFIX)/include $(HEADERS)
 
-# removes the files only: "mfwd -P" removes mini-fw from the interfaces
+# removes the files only: "mfwd -P" removes mini-fw from the interfaces;
+# the group mfw stays
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/sbin/mfwd $(DESTDIR)$(PREFIX)/bin/mfw \
 	    $(DESTDIR)$(PREFIX)/lib/libmfw.a \
 	    $(addprefix $(DESTDIR)$(PREFIX)/include/,$(notdir $(HEADERS))) \
-	    $(DESTDIR)/etc/systemd/system/mfwd.service
+	    $(DESTDIR)/etc/systemd/system/mfwd.service \
+	    $(DESTDIR)/etc/sysusers.d/mini-fw.conf
 
 clean:
 	rm -rf build src/mfw.skel.h mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d

@@ -5,10 +5,14 @@ Documentation=https://github.com/seawallnetworks/mini-fw
 Before=sw_configd.service
 
 [Service]
-# root, but only with the capabilities BPF and TC need
-ExecStart=/usr/local/seawall/sbin/mfwd
+# The socket, /run/mfwd.sock, is mode 0660, group mfw (sysusers.d/mini-fw.conf):
+# root and the group's members, such as sw_configd, may connect. Whoever can
+# replaces the policy. For root alone, drop -g and -m with "systemctl edit mfwd".
+ExecStart=/usr/local/seawall/sbin/mfwd -g mfw -m 0660
 Restart=on-failure
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON
+# root, but only with the capabilities BPF and TC need, and CAP_CHOWN to
+# give the socket to its group
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON CAP_CHOWN
 ProtectSystem=strict
 ReadWritePaths=/sys/fs/bpf /run
 ProtectHome=yes

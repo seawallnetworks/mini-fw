@@ -54,7 +54,7 @@ see [`implementation.md`](implementation.md).
 | Linux kernel 6.1 or newer, with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
 | bpffs mounted at `/sys/fs/bpf` | `mount \| grep /sys/fs/bpf` |
 | mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) | `mfwd.service` does this |
-| `mfw` needs access to mfwd's socket | root by default; see `mfwd -m` / `-g` |
+| `mfw` needs access to mfwd's socket | root, or a member of the group `mfw` with the shipped unit; see `mfwd -m` / `-g` |
 | To build: clang, make, bpftool, libbpf-dev | `clang --version`, `bpftool version` |
 
 If bpffs is not mounted:
@@ -71,7 +71,7 @@ sudo mount -t bpf bpf /sys/fs/bpf
 git clone git@github.com:seawallnetworks/mini-fw.git && cd mini-fw
 make                     # mfwd, mfw and libmfw.a
 sudo make install        # /usr/local/seawall/{sbin/mfwd,bin/mfw,lib/libmfw.a,include/*},
-                         # /etc/systemd/system/mfwd.service
+                         # /etc/systemd/system/mfwd.service, and the group mfw
 sudo systemctl daemon-reload
 sudo systemctl enable --now mfwd
 mfw version
@@ -682,7 +682,7 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `mfw: cannot reach mfwd: No such file or directory` | mfwd not running | `sudo systemctl start mfwd`; `journalctl -u mfwd` |
-| `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or start mfwd with `-g <group> -m 0660` |
+| `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or join the group `mfw` (`sudo usermod -aG mfw $USER`, then log in again); a mfwd started by hand needs `-g mfw -m 0660` |
 | `… is not on bpffs` (mfwd log) | bpffs missing | `sudo mount -t bpf bpf /sys/fs/bpf` |
 | `load BPF object: …` (mfwd log) | kernel too old (< 6.1), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
 | `eth0: attach TC ingress: …` | missing capabilities | check §1.2 |

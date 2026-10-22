@@ -74,7 +74,8 @@ make smoke            # real traffic through mfwd in two network namespaces (sud
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
 
-`make install` is `install-runtime` (`mfwd`, `mfw`, `mfwd.service`) and
+`make install` is `install-runtime` (`mfwd`, `mfw`, `mfwd.service`, the
+group `mfw`) and
 `install-static-lib` (`libmfw.a` and its headers, for linking a front
 end such as sw_configd), which can also be run on their own.
 
@@ -119,7 +120,8 @@ One request per connection on the Unix socket; mfwd replies and closes.
 Errors are `ERR <code> <message>`, with code `badreq` (malformed request),
 `invalid` (the policy was refused; the message names the line), `kernel`
 or `internal`. A request must arrive within 3 s and be at most 1 MiB.
-The socket is root-only by default (`-m`, `-g` to change that).
+mfwd's socket is root-only by default (`-m`, `-g` to change that).
+The shipped unit gives it to the group `mfw`, mode `0660`.
 
 ## Stateless caveats (until conntrack lands)
 
