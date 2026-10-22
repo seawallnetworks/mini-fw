@@ -19,7 +19,8 @@ LIBBPF     := -static $(or $(shell pkg-config --static --libs libxdp 2>/dev/null
               -lxdp -lbpf -lelf -lz -lzstd)
 
 LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
-MFWD_OBJS  := build/mfwd.o build/dataplane.o
+MFWD_OBJS  := build/mfwd.o build/dataplane.o build/dp_xdp.o build/dp_tc.o \
+              build/util.o
 HEADERS    := include/mfw.h include/mfw_policy.h include/mfw_client.h
 
 .PHONY: all clean test test-bpf test-mfwd smoke install install-runtime \
@@ -39,7 +40,7 @@ build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # the skeleton embeds the BPF object
-build/dataplane.o: src/mfw.skel.h
+build/dataplane.o build/dp_xdp.o: src/mfw.skel.h
 
 libmfw.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
