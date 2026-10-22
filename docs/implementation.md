@@ -654,7 +654,7 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 - **The socket is the policy.** Whoever can connect to mfwd's socket can
   replace the policy. It is `0600` root by default; `-g` / `-m` widen it to
   one group. The shipped unit uses `-g mfw -m 0660`: the group `mfw`
-  (`sysusers.d/mini-fw.conf`), which sw_configd runs in, so that it
+  (declared by the seawall repo), which sw_configd runs in, so that it
   needn't run as root. Membership is as good as root over the firewall.
 - mfwd parses only the line protocol and the policy grammar; it has no JSON
   or other complex input.

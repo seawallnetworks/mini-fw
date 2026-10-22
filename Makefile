@@ -19,7 +19,8 @@ LIBBPF     := -static $(or $(shell pkg-config --static --libs libxdp 2>/dev/null
               -lxdp -lbpf -lelf -lz -lzstd)
 
 LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
-MFWD_OBJS  := build/mfwd.o build/dataplane.o
+MFWD_OBJS  := build/mfwd.o build/dataplane.o build/dp_xdp.o build/dp_tc.o \
+              build/util.o
 HEADERS    := include/mfw.h include/mfw_policy.h include/mfw_client.h
 
 .PHONY: all clean test test-bpf test-mfwd smoke install install-runtime \
@@ -39,7 +40,7 @@ build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # the skeleton embeds the BPF object
-build/dataplane.o: src/mfw.skel.h
+build/dataplane.o build/dp_xdp.o: src/mfw.skel.h
 
 libmfw.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
@@ -78,30 +79,28 @@ smoke: mfwd mfw
 
 install: install-runtime install-static-lib
 
-# what runs on the machine. The group mfw, which the unit gives the
-# socket to, is declared, not created: systemd-sysusers creates it now
-# (not when staging into DESTDIR), and at boot on a machine without it.
+# what runs on the machine. The unit gives the socket to the group mfw,
+# from the seawall repo; without it (checked unless staging into DESTDIR)
+# mfwd couldn't start, so nothing is installed.
 install-runtime: mfwd mfw
+	[ -n "$(DESTDIR)" ] || getent group mfw >/dev/null || { \
+	    echo "group mfw missing: install seawall first" >&2; \
+	    exit 1; }
 	install -D -m 0755 mfwd $(DESTDIR)$(PREFIX)/sbin/mfwd
 	install -D -m 0755 mfw $(DESTDIR)$(PREFIX)/bin/mfw
 	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
-	install -D -m 0644 sysusers.d/mini-fw.conf \
-	    $(DESTDIR)/etc/sysusers.d/mini-fw.conf
-	[ -n "$(DESTDIR)" ] || systemd-sysusers /etc/sysusers.d/mini-fw.conf
 
 # the client library and its headers, for linking (sw_configd)
 install-static-lib: libmfw.a
 	install -D -m 0644 libmfw.a $(DESTDIR)$(PREFIX)/lib/libmfw.a
 	install -D -m 0644 -t $(DESTDIR)$(PREFIX)/include $(HEADERS)
 
-# removes the files only: "mfwd -P" removes mini-fw from the interfaces;
-# the group mfw stays
+# removes the files only: "mfwd -P" removes mini-fw from the interfaces
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/sbin/mfwd $(DESTDIR)$(PREFIX)/bin/mfw \
 	    $(DESTDIR)$(PREFIX)/lib/libmfw.a \
 	    $(addprefix $(DESTDIR)$(PREFIX)/include/,$(notdir $(HEADERS))) \
-	    $(DESTDIR)/etc/systemd/system/mfwd.service \
-	    $(DESTDIR)/etc/sysusers.d/mini-fw.conf
+	    $(DESTDIR)/etc/systemd/system/mfwd.service
 
 clean:
 	rm -rf build src/mfw.skel.h mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d

@@ -74,8 +74,8 @@ make smoke            # real traffic through mfwd in two network namespaces (sud
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
 
-`make install` is `install-runtime` (`mfwd`, `mfw`, `mfwd.service`, the
-group `mfw`) and
+`make install` is `install-runtime` (`mfwd`, `mfw`, `mfwd.service`; it
+needs the group `mfw` from the seawall repo, installed first) and
 `install-static-lib` (`libmfw.a` and its headers, for linking a front
 end such as sw_configd), which can also be run on their own.
 

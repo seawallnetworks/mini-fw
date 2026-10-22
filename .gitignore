@@ -8,5 +8,3 @@ build/
 /tests/test_policy
 /tests/test_bpf
 *.d
-# but not the directory of the group declaration
-!/sysusers.d/

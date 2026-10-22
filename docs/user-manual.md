@@ -71,7 +71,8 @@ sudo mount -t bpf bpf /sys/fs/bpf
 git clone git@github.com:seawallnetworks/mini-fw.git && cd mini-fw
 make                     # mfwd, mfw and libmfw.a
 sudo make install        # /usr/local/seawall/{sbin/mfwd,bin/mfw,lib/libmfw.a,include/*},
-                         # /etc/systemd/system/mfwd.service, and the group mfw
+                         # /etc/systemd/system/mfwd.service; needs the group
+                         # mfw, from the seawall repo, installed first
 sudo systemctl daemon-reload
 sudo systemctl enable --now mfwd
 mfw version
