@@ -9,7 +9,7 @@ what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 ingress when another program holds the XDP hook; inbound only, driven by
 a daemon.** The target is protecting a local VM, so there is no router or
 forwarding mode, and **egress is never filtered**. In the dispatcher a DDoS
-gate such as [voidGate](https://github.com/seawallnetworks/voidGate) runs
+gate such as [voidGate](https://github.com/seawallnetworks/voidgate) runs
 first. There is no conntrack or fragment tracking yet (design PR5a–c).
 
 | List | Numbers | Matches | End of list |
