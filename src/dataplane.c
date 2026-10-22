@@ -86,7 +86,7 @@ typedef enum {
 
 static int fail(char *err, size_t len, const char *fmt, ...);
 static int ensure_dir(const char *path);
-static void link_path(const char *root, const char *ifname, char *buf,
+static void tcx_path(const char *root, const char *ifname, char *buf,
     size_t len);
 static void tc_path(const char *root, const char *ifname, char *buf,
     size_t len);
@@ -108,8 +108,8 @@ static int tc_attach(int ifindex, int prog_fd);
 static void tc_detach(int ifindex);
 static int tc_attached(const char *root, const char *ifname);
 static int tc_pin(const char *root, const char *ifname, int prog_fd);
-static __u32 link_ifindex(int fd);
-static int open_link(const char *root, const char *ifname);
+static __u32 tcx_link_ifindex(int fd);
+static int tcx_open(const char *root, const char *ifname);
 static int name_cmp(const void *a, const void *b);
 static int check_bpffs(const char *root, char *err, size_t len);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
@@ -167,7 +167,7 @@ ensure_dir(const char *path)
 
 
 static void
-link_path(const char *root, const char *ifname, char *buf, size_t len)
+tcx_path(const char *root, const char *ifname, char *buf, size_t len)
 {
     snprintf(buf, len, "%s/link/tcx_%.*s", root, IF_NAMESIZE, ifname);
 }
@@ -638,7 +638,7 @@ tc_pin(const char *root, const char *ifname, int prog_fd)
  * interface is gone.
  */
 static __u32
-link_ifindex(int fd)
+tcx_link_ifindex(int fd)
 {
     __u32                  len;
     struct bpf_link_info   info = {};
@@ -661,13 +661,13 @@ link_ifindex(int fd)
  * was deleted or re-created) is deleted.
  */
 static int
-open_link(const char *root, const char *ifname)
+tcx_open(const char *root, const char *ifname)
 {
     int    fd;
     __u32  now;
     char   path[PATH_MAX];
 
-    link_path(root, ifname, path, sizeof(path));
+    tcx_path(root, ifname, path, sizeof(path));
 
     fd = bpf_obj_get(path);
     if (fd < 0) {
@@ -676,7 +676,7 @@ open_link(const char *root, const char *ifname)
 
     now = if_nametoindex(ifname);
 
-    if (now == 0 || link_ifindex(fd) != now) {
+    if (now == 0 || tcx_link_ifindex(fd) != now) {
         close(fd);
         unlink(path);
         return -1;
@@ -695,7 +695,7 @@ mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
         return 1;
     }
 
-    fd = open_link(dp->root, ifname);
+    fd = tcx_open(dp->root, ifname);
     if (fd < 0) {
         return tc_attached(dp->root, ifname);
     }
@@ -844,7 +844,7 @@ tc_off(const char *root, const char *ifname)
     int   ifindex;
     char  path[PATH_MAX];
 
-    link_path(root, ifname, path, sizeof(path));
+    tcx_path(root, ifname, path, sizeof(path));
     /* the pin is the link's last reference: the kernel detaches it */
     unlink(path);
 
@@ -909,7 +909,7 @@ upgrade_links(struct mfw_dp *dp)
             fprintf(stderr, "mfwd: %s: the XDP hook is free: "
                     "moved from TC to XDP\n", names[i]);
 
-        } else if ((fd = open_link(dp->root, names[i])) >= 0) {
+        } else if ((fd = tcx_open(dp->root, names[i])) >= 0) {
             if (bpf_link_update(fd, dp->prog_fd, NULL) != 0) {
                 e = errno;
             }
@@ -1137,7 +1137,7 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
                     strerror(errno));
     }
 
-    link_path(dp->root, ifname, path, sizeof(path));
+    tcx_path(dp->root, ifname, path, sizeof(path));
 
     if (bpf_obj_pin(fd, path) != 0) {
         e = errno;
