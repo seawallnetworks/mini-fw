@@ -204,26 +204,29 @@ mfw_xdp_attached(const char *root, const char *ifname)
 
     ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
-        unlink(path);  /* the interface is gone */
-        return 0;
+        goto stale;  /* the interface is gone */
+    }
+
+    mp = xdp_multiprog__get_from_ifindex(ifindex);
+    if (libxdp_get_error(mp) != 0) {
+        goto stale;  /* nothing on its XDP hook */
     }
 
     p = NULL;
-    mp = xdp_multiprog__get_from_ifindex(ifindex);
 
-    if (libxdp_get_error(mp) == 0) {
-        while ((p = xdp_multiprog__next_prog(p, mp)) != NULL) {
-            if (xdp_program__id(p) == id) {
-                break;
-            }
+    while ((p = xdp_multiprog__next_prog(p, mp)) != NULL) {
+        if (xdp_program__id(p) == id) {
+            break;
         }
-
-        xdp_multiprog__close(mp);
     }
+
+    xdp_multiprog__close(mp);
 
     if (p != NULL) {
         return 1;
     }
+
+stale:
 
     unlink(path);
 
