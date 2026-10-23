@@ -9,7 +9,7 @@ what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
 ingress when another program holds the XDP hook; inbound only, driven by
 a daemon.** The target is protecting a local VM, so there is no router or
 forwarding mode, and **egress is never filtered**. In the dispatcher a DDoS
-gate such as [voidGate](https://github.com/seawallnetworks/voidgate) runs
+gate such as [voidgate](https://github.com/seawallnetworks/voidgate) runs
 first. There is no conntrack or fragment tracking yet (design PR5a–c).
 
 | List | Numbers | Matches | End of list |
@@ -144,7 +144,7 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   upgrades the BPF code without a gap.
 - **Ingress only, at XDP or TC.** Both lists run in one program with two
   entries over one `mfw_judge()`: `mfw_xdp`, in libxdp's dispatcher at
-  priority 20, after a DDoS gate's (voidGate's is 10), and `mfw_tc` at TC
+  priority 20, after a DDoS gate's (voidgate's is 10), and `mfw_tc` at TC
   ingress. An interface's XDP hook holds one program; libxdp's dispatcher
   runs several in turn, and mini-fw never replaces a program that is not
   one: on that interface it filters at TC instead (degraded: a TC drop costs

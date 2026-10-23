@@ -15,7 +15,7 @@
  *
  *   link/xdp_<if>   the normal case: mini-fw's XDP program in the
  *                   interface's libxdp dispatcher, at priority 20 (after
- *                   voidGate's 10)
+ *                   voidgate's 10)
  *   link/tcx_<if>   degraded: a program that is not a dispatcher holds
  *                   the XDP hook, and mini-fw never replaces it, so the
  *                   TC ingress program is attached with a tcx link

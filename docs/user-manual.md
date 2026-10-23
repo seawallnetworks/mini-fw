@@ -3,7 +3,7 @@
 mini-fw is a small inbound firewall for a Linux VM. It filters IPv4 traffic
 at TC ingress, before the kernel's IP stack and netfilter, using
 Cisco IOS-style numbered access lists. XDP, which comes earlier, is left
-to a DDoS gate such as voidGate.
+to a DDoS gate such as voidgate.
 
 It has two programs:
 
@@ -113,7 +113,7 @@ sudo dnf install clang llvm make gcc libbpf-devel libbpf-static libxdp-devel lib
 ```
 
 mfwd attaches at XDP, in libxdp's dispatcher, which the interface's other
-XDP programs share: voidGate's runs first, and mini-fw sees what it
+XDP programs share: voidgate's runs first, and mini-fw sees what it
 passes. It never replaces an XDP program that is not a dispatcher: on that
 interface it filters at TC ingress instead, and `mfw status` lists it as
 `degraded`, since a drop there costs more. At TC it attaches with tcx on
@@ -717,7 +717,7 @@ sudo bpftool map dump id <inner map id>                       # that interface's
 **Does mini-fw replace iptables or nftables?**
 No. They can run side by side. mini-fw decides first (at TC ingress);
 packets it accepts then go through netfilter as usual. An XDP program,
-such as voidGate's, runs before mini-fw.
+such as voidgate's, runs before mini-fw.
 
 **Can I filter outgoing traffic?**
 No. mini-fw only filters inbound traffic.

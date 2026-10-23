@@ -15,7 +15,7 @@
  * traffic must be permitted explicitly (or via "established").
  *
  * Two entries share mfw_judge(): mfw_xdp, run by libxdp's dispatcher after
- * a DDoS gate such as voidGate, and mfw_tc, at TC ingress when another
+ * a DDoS gate such as voidgate, and mfw_tc, at TC ingress when another
  * program holds the XDP hook. At TC "pass" is TC_ACT_UNSPEC (tcx's
  * TCX_NEXT, which Linux 6.1's headers lack), so a tc program after
  * mini-fw still runs; "drop" is TC_ACT_SHOT (TCX_DROP).
@@ -374,7 +374,7 @@ drop:
     return MFW_DROP;
 }
 
-/* libxdp's dispatcher runs mini-fw after voidGate (priority 10), and only
+/* libxdp's dispatcher runs mini-fw after voidgate (priority 10), and only
  * a pass goes on to the next program. Frags: the headers are in the first
  * buffer, so a jumbo-MTU interface keeps the dispatcher. */
 struct {

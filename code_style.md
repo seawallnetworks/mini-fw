@@ -5,7 +5,7 @@ Formatting follows the nginx Code style chapter:
 https://nginx.org/en/docs/dev/development_guide.html#code_style
 
 This file is mini-fw's version: same rules, `mfw_` / `MFW_` names, and
-the deviations in the last section. It is voidGate's guide, adjusted:
+the deviations in the last section. It is voidgate's guide, adjusted:
 both projects in the Seawall stack read the same way.
 
 Hand-written C and H in `src/`, `src/bpf/`, `include/` and `tests/`

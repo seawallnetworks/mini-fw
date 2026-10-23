@@ -24,7 +24,7 @@ does today.** Where the two disagree, §10 explains why.
 - **Inbound only.** Packets the host sends are never inspected.
 - **One program**, attached to every protected interface, with **one
   ruleset per interface**: at XDP, in libxdp's dispatcher after a DDoS gate
-  such as voidGate; at TC ingress (tcx) on an interface whose XDP hook
+  such as voidgate; at TC ingress (tcx) on an interface whose XDP hook
   another program holds (§5.3, §10).
 - **Stateless.** Every packet is judged on its own headers. There is no connection table.
 - **A daemon, mfwd, owns the kernel side.** Clients send it the whole policy
@@ -71,12 +71,12 @@ does today.** Where the two disagree, §10 explains why.
    link/tcx_<if>     or, degraded, a pinned bpf_link (keeps mfw_tc attached)
    link/tc_<if>      or, degraded before 6.6, mfw_tc: attached by classic TC
 
- NIC ──► XDP dispatcher: voidGate (10) ──► mfw_xdp (20) ──► GRO ──► IP stack ──► sockets
+ NIC ──► XDP dispatcher: voidgate (10) ──► mfw_xdp (20) ──► GRO ──► IP stack ──► sockets
                                   │                │
                                   └──► XDP_DROP ◄──┘
 
  degraded, another program on the XDP hook:
- NIC ──► XDP (theirs) ──► GRO ──► tcx ingress voidGate ──► mfw_tc ──► TCX_NEXT ──► IP stack
+ NIC ──► XDP (theirs) ──► GRO ──► tcx ingress voidgate ──► mfw_tc ──► TCX_NEXT ──► IP stack
                                                                 │
                                                                 └──► TCX_DROP
 ```
@@ -409,7 +409,7 @@ interface at TC ingress, logs it as degraded, and `STATUS` lists it in
 `MFW_NO_XDP=1` attaches every interface at TC, for the tests. At TC:
 
 - **Attach:** `bpf_link_create(BPF_TCX_INGRESS)`, appended after any tcx
-  program already there, such as voidGate's, and pin the link as
+  program already there, such as voidgate's, and pin the link as
   `link/tcx_<if>`.
 - **A link is live** when its pin exists and `bpf_link_get_info_by_fd()`
   reports the interface's current ifindex. A pin whose interface was
@@ -696,7 +696,7 @@ Notes:
 
 | Area | `design.md` (Rev 18) | Step 1 | Why |
 |------|----------------------|--------|-----|
-| Hooks | XDP + TC ingress + TC egress | XDP in libxdp's dispatcher, or TC ingress (tcx) where another program holds XDP | Local VM only, no egress. The dispatcher shares the XDP hook with the DDoS gate (voidGate), first |
+| Hooks | XDP + TC ingress + TC egress | XDP in libxdp's dispatcher, or TC ingress (tcx) where another program holds XDP | Local VM only, no egress. The dispatcher shares the XDP hook with the DDoS gate (voidgate), first |
 | Extended list | TC ingress and egress | TC ingress, after the standard list | A stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
 | Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
