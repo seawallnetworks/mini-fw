@@ -233,6 +233,13 @@ static const char  *mfwd_sock = MFW_SOCKET;
 static int  mfwd_purge = 0;
 ```
 
+A local structure may be zeroed on declaration with `= {}`, in place of
+a `memset()`. Other locals get their values in the code:
+
+```c
+struct bpf_prog_info   info = {};
+```
+
 ## Functions
 
 All functions (even static ones) should have prototypes. Prototypes
