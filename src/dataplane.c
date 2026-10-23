@@ -396,10 +396,10 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
 
     /* reuses the pinned maps, and pins any that don't exist yet */
     if (mfw_bpf__load(dp->skel) != 0) {
-        mfw_dp_close(dp);
-        return mfw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with "
-                        "BTF, CAP_BPF and CAP_NET_ADMIN needed; MFW_DEBUG=1 "
-                        "for the verifier log)", strerror(errno));
+        mfw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
+                 "CAP_BPF and CAP_NET_ADMIN needed; MFW_DEBUG=1 for the "
+                 "verifier log)", strerror(errno));
+        goto failed;
     }
 
     dp->prog_fd = bpf_program__fd(dp->skel->progs.mfw_tc);
@@ -411,13 +411,18 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     libxdp_set_print(libxdp_print);
 
     if (init_config(dp, err, errlen) != 0) {
-        mfw_dp_close(dp);
-        return -1;
+        goto failed;
     }
 
     upgrade_links(dp);
 
     return 0;
+
+failed:
+
+    mfw_dp_close(dp);
+
+    return -1;
 }
 
 

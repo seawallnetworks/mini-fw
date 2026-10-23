@@ -278,15 +278,19 @@ mfw_xdp_load(const char *root, const char *ifname, int ifindex,
     xdp_program__set_xdp_frags_support(xp, true);
 
     e = xdp_program__attach(xp, ifindex, mode, 0);
-    if (e == 0) {
-        mfw_xdp_path(root, ifname, path, sizeof(path));
-        unlink(path);
-
-        if (bpf_obj_pin(xdp_program__fd(xp), path) != 0) {
-            e = -errno;
-            xdp_program__detach(xp, ifindex, mode, 0);
-        }
+    if (e != 0) {
+        goto done;
     }
+
+    mfw_xdp_path(root, ifname, path, sizeof(path));
+    unlink(path);
+
+    if (bpf_obj_pin(xdp_program__fd(xp), path) != 0) {
+        e = -errno;
+        xdp_program__detach(xp, ifindex, mode, 0);
+    }
+
+done:
 
     xdp_program__close(xp);
     /* the program stays attached: the dispatcher's pins hold it */
