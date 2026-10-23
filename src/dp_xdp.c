@@ -202,11 +202,17 @@ mfw_xdp_attached(const char *root, const char *ifname)
         return 0;
     }
 
-    p = NULL;
     ifindex = if_nametoindex(ifname);
-    mp = ifindex != 0 ? xdp_multiprog__get_from_ifindex(ifindex) : NULL;
+    if (ifindex == 0) {
+        /* the interface is gone */
+        unlink(path);
+        return 0;
+    }
 
-    if (mp != NULL && libxdp_get_error(mp) == 0) {
+    p = NULL;
+    mp = xdp_multiprog__get_from_ifindex(ifindex);
+
+    if (libxdp_get_error(mp) == 0) {
         while ((p = xdp_multiprog__next_prog(p, mp)) != NULL) {
             if (xdp_program__id(p) == id) {
                 break;
