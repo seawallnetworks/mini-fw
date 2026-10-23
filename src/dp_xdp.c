@@ -27,7 +27,7 @@
 #define MFW_XDP_PROG  "mfw_xdp"
 
 
-static int libxdp_bpffs(void);
+static int mfw_xdp_bpffs_mounted(void);
 
 
 void
@@ -43,7 +43,7 @@ mfw_xdp_path(const char *root, const char *ifname, char *buf, size_t len)
  * without a dispatcher, and no other program can join the hook after it.
  */
 static int
-libxdp_bpffs(void)
+mfw_xdp_bpffs_mounted(void)
 {
     const char     *dir;
     struct statfs   st;
@@ -311,7 +311,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
     int                   e, i, state;
     enum xdp_attach_mode  mode;
 
-    if (!libxdp_bpffs()) {
+    if (!mfw_xdp_bpffs_mounted()) {
         return -ENOTSUP;
     }
 

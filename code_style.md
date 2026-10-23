@@ -240,7 +240,7 @@ include argument names. Long prototypes are wrapped with a single
 indentation on continuation lines:
 
 ```c
-static int libxdp_bpffs(void);
+static int mfw_xdp_bpffs_mounted(void);
 static int fail(char *err, size_t errlen, const char *fmt, ...);
 
 int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err,
@@ -255,7 +255,7 @@ indented. There are two empty lines between functions:
 
 ```c
 static int
-libxdp_bpffs(void)
+mfw_xdp_bpffs_mounted(void)
 {
     const char     *dir;
     struct statfs   st;
