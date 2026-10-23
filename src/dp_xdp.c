@@ -143,8 +143,7 @@ mfw_xdp_remove(int ifindex, __u32 id)
     e = 0;
 
     if (p != NULL) {
-        e = xdp_program__detach(p, ifindex, xdp_multiprog__attach_mode(mp),
-                                0);
+        e = xdp_program__detach(p, ifindex, xdp_multiprog__attach_mode(mp), 0);
     }
 
     xdp_multiprog__close(mp);
