@@ -45,7 +45,11 @@ static void usage(FILE *f)
         "mfwd attaches every bound interface and detaches the others. Only\n"
         "inbound traffic is filtered. Socket: -s, else $MFW_SOCKET, else "
         MFW_SOCKET ".\n"
-        "Exit status: 0 ok, 1 refused by mfwd, 2 usage or connection error.\n");
+        "Exit status: 0 ok, 1 refused by mfwd, 2 usage or connection error.\n"
+        "\n"
+        "In the Seawall stack sw_configd owns the policy and sends its own back\n"
+        "within 5 s of any other apply: change it there (telnet 127.0.0.1 2323,\n"
+        "access-list / ip access-group), and use mfw for show, status and stats.\n");
 }
 
 static char *read_all(FILE *f)

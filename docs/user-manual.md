@@ -184,6 +184,11 @@ bind eth0 in 100
 - Lists left out of the file are gone.
 - The file is checked completely first. If anything is wrong, **nothing
   changes** and the error names the line.
+
+In the Seawall stack, don't: sw_configd owns the policy, notices any other
+apply within 5 seconds and sends its own back. Change the lists in its CLI
+(`telnet 127.0.0.1 2323`, `access-list` and `ip access-group`) or the web
+UI, and use `mfw` for `show`, `status` and `stats`.
 - Each interface switches to its new rules in one step: no packet ever sees
   half of an update.
 
