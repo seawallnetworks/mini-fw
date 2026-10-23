@@ -131,13 +131,12 @@ mfw_xdp_remove(int ifindex, __u32 id)
 
     p = NULL;
 
-    if (!xdp_multiprog__is_legacy(mp)) {
-        while ((p = xdp_multiprog__next_prog(p, mp)) != NULL) {
-            if (id != 0 ? xdp_program__id(p) == id
-                        : strcmp(xdp_program__name(p), MFW_XDP_PROG) == 0)
-            {
-                break;
-            }
+    /* NULL at once for a program attached without a dispatcher */
+    while ((p = xdp_multiprog__next_prog(p, mp)) != NULL) {
+        if (id != 0 ? xdp_program__id(p) == id
+                    : strcmp(xdp_program__name(p), MFW_XDP_PROG) == 0)
+        {
+            break;
         }
     }
 
