@@ -19,6 +19,14 @@ SOCK=$TMP/sock STATE=$TMP/state LOG=$TMP/log
 PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+# Its own mount namespace and bpffs: libxdp pins each dispatcher under
+# /sys/fs/bpf/xdp, and those pins would outlive the namespace's interfaces
+# on the host's bpffs.
+if [[ ${1:-} != --private ]]; then
+    exec unshare --mount --propagation private "$0" --private "$@"
+fi
+shift
+mount -t bpf bpf /sys/fs/bpf || { echo "cannot mount a private bpffs"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
 command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
 if [[ -z ${MFW_NO_XDP:-} ]] && ! command -v xdp-loader clang >/dev/null; then

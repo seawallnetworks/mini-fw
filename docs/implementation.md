@@ -680,10 +680,13 @@ Notes:
 - `test_bpf` loads the skeleton with pinning disabled and runs in its own
   network namespace with two dummy interfaces, whose ifindexes it passes
   as `ingress_ifindex`. It touches no host interface and no pins.
-- `test_mfwd.sh` and `smoke-test.sh` start mfwd with `nsenter --net`
-  rather than `ip netns exec`, because the latter remounts `/sys` and hides
-  the host's bpffs. Both use their own pin root (`/sys/fs/bpf/mfw*-<pid>`),
-  socket and state directory, so they run next to a live installation.
+- `test_mfwd.sh` and `smoke-test.sh` run in a mount namespace of their
+  own with a private bpffs, so libxdp's dispatcher pins
+  (`/sys/fs/bpf/xdp/dispatch-<ifindex>-<id>`) go with the test instead of
+  piling up on the host's. They start mfwd with `nsenter --net` rather
+  than `ip netns exec`, because the latter remounts `/sys` and hides that
+  bpffs. Both use their own pin root, socket and state directory, so they
+  run next to a live installation.
 - To check the verifier budget after changes, load the skeleton with
   pinning disabled (as `test_bpf` does) and read `verified_insns` from
   `bpf_prog_get_info_by_fd()`. `bpftool prog loadall` also works, but it

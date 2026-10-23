@@ -24,6 +24,14 @@ SOCK=$TMP/sock
 PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+# Its own mount namespace and bpffs: libxdp pins each dispatcher under
+# /sys/fs/bpf/xdp, and those pins would outlive the namespace's interfaces
+# on the host's bpffs.
+if [[ ${1:-} != --private ]]; then
+    exec unshare --mount --propagation private "$0" --private "$@"
+fi
+shift
+mount -t bpf bpf /sys/fs/bpf || { echo "cannot mount a private bpffs"; exit 1; }
 [[ -x $MFWD && -x $MFW ]] || { echo "build first: make"; exit 1; }
 command -v bpftool >/dev/null || { echo "needs bpftool"; exit 1; }
 if [[ -z ${MFW_NO_XDP:-} ]] && ! command -v xdp-loader >/dev/null; then
@@ -37,7 +45,7 @@ in_fw()  { ip netns exec "$FW" "$@"; }
 tcx_on() { in_fw bpftool net show dev "$1" | grep -Eq "(tcx|clsact)/${2:-ingress} mfw_tc[ :]"; }
 xdp_on() { in_fw ip link show "$1" | grep -q ' xdp'; }
 # mini-fw in the interface's XDP dispatcher; xdp-loader reads it from the
-# host's bpffs, which ip netns exec hides
+# test's bpffs, which ip netns exec hides
 xdp_in() { nsenter --net=/var/run/netns/$FW xdp-loader status "$1" 2>/dev/null |
            grep -q ' mfw_xdp '; }
 # mini-fw filters the interface, at XDP or TC
@@ -45,7 +53,7 @@ on()     { { [[ -z ${MFW_NO_XDP:-} ]] && xdp_in "$1"; } || tcx_on "$1"; }
 mfw()    { "$MFW" -s "$SOCK" "$@"; }
 
 start_mfwd() {
-    # nsenter (not ip netns exec, which hides the host's bpffs) execs mfwd
+    # nsenter (not ip netns exec, which hides the test's bpffs) execs mfwd
     nsenter --net=/var/run/netns/$FW "$MFWD" -s "$SOCK" -p "$PINS" -d "$TMP/state" \
         >>"$TMP/log" 2>&1 &
     PID=$!
