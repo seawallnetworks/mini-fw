@@ -204,8 +204,7 @@ mfw_xdp_attached(const char *root, const char *ifname)
 
     ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
-        /* the interface is gone */
-        unlink(path);
+        unlink(path);  /* the interface is gone */
         return 0;
     }
 
