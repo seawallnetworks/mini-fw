@@ -204,12 +204,12 @@ mfw_xdp_attached(const char *root, const char *ifname)
 
     ifindex = if_nametoindex(ifname);
     if (ifindex == 0) {
-        goto stale;  /* the interface is gone */
+        goto not_found;  /* the interface is gone */
     }
 
     mp = xdp_multiprog__get_from_ifindex(ifindex);
     if (libxdp_get_error(mp) != 0) {
-        goto stale;  /* nothing on its XDP hook */
+        goto not_found;  /* nothing on its XDP hook */
     }
 
     p = NULL;
@@ -226,7 +226,7 @@ mfw_xdp_attached(const char *root, const char *ifname)
         return 1;
     }
 
-stale:
+not_found:
 
     unlink(path);
 
