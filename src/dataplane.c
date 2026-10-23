@@ -56,6 +56,7 @@ static int name_cmp(const void *a, const void *b);
 static int check_bpffs(const char *root, char *err, size_t len);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
 static void upgrade_links(struct mfw_dp *dp);
+static int upgrade_link(struct mfw_dp *dp, const char *ifname);
 static int libbpf_print(enum libbpf_print_level level, const char *fmt,
     va_list ap);
 static int libxdp_print(enum libxdp_print_level level, const char *fmt,
@@ -226,63 +227,92 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
 static void
 upgrade_links(struct mfw_dp *dp)
 {
-    int                   e, fd, i, ifindex, n;
-    __u32                 old;
-    enum xdp_attach_mode  mode;
-    char                  holder[BPF_OBJ_NAME_LEN];
-    char                  path[PATH_MAX];
-    char                  names[MFW_MAX_IFACES][IF_NAMESIZE];
+    int   e, i, n;
+    char  names[MFW_MAX_IFACES][IF_NAMESIZE];
 
     n = mfw_dp_list(dp, names, MFW_MAX_IFACES);
 
     for (i = 0; i < n; i++) {
-        e = 0;
-        mode = XDP_MODE_NATIVE;
-        ifindex = if_nametoindex(names[i]);
-
-        if (mfw_xdp_attached(dp->root, names[i])) {
-            mfw_xdp_path(dp->root, names[i], path, sizeof(path));
-            old = mfw_xdp_pinned_id(path);
-
-            if (mfw_xdp_state(ifindex, &mode, holder, sizeof(holder))
-                != mfw_xdp_shared)
-            {
-                e = ENOENT;
-
-            } else {
-                e = -mfw_xdp_load(dp->root, names[i], ifindex, mode);
-                if (e == 0) {
-                    mfw_xdp_remove(ifindex, old);
-                }
-            }
-
-        } else if (!dp->no_xdp
-                   && mfw_xdp_attach(dp->root, names[i], ifindex, holder,
-                                     sizeof(holder)) == 0)
-        {
-            mfw_tc_off(dp->root, names[i]);
-            fprintf(stderr, "mfwd: %s: the XDP hook is free: "
-                    "moved from TC to XDP\n", names[i]);
-
-        } else if ((fd = mfw_tcx_open(dp->root, names[i])) >= 0) {
-            if (bpf_link_update(fd, dp->prog_fd, NULL) != 0) {
-                e = errno;
-            }
-
-            close(fd);
-
-        } else if (mfw_tc_attached(dp->root, names[i])) {
-            e = -mfw_tc_attach(ifindex, dp->prog_fd);
-            if (e == 0 && mfw_tc_pin(dp->root, names[i], dp->prog_fd) != 0) {
-                e = errno;
-            }
-        }
-
+        e = upgrade_link(dp, names[i]);
         if (e != 0) {
             fprintf(stderr, "mfwd: %s: update program: %s\n", names[i],
                     strerror(e));
         }
     }
+}
+
+
+/* One interface of upgrade_links(). Returns 0 or an errno. */
+static int
+upgrade_link(struct mfw_dp *dp, const char *ifname)
+{
+    int                   e, fd, ifindex;
+    __u32                 old;
+    enum xdp_attach_mode  mode;
+    char                  holder[BPF_OBJ_NAME_LEN];
+    char                  path[PATH_MAX];
+
+    ifindex = if_nametoindex(ifname);
+
+    if (mfw_xdp_attached(dp->root, ifname)) {
+        mfw_xdp_path(dp->root, ifname, path, sizeof(path));
+        old = mfw_xdp_pinned_id(path);
+
+        mode = XDP_MODE_NATIVE;
+
+        if (mfw_xdp_state(ifindex, &mode, holder, sizeof(holder))
+            != mfw_xdp_shared)
+        {
+            return ENOENT;
+        }
+
+        e = -mfw_xdp_load(dp->root, ifname, ifindex, mode);
+        if (e != 0) {
+            return e;
+        }
+
+        mfw_xdp_remove(ifindex, old);
+
+        return 0;
+    }
+
+    if (!dp->no_xdp
+        && mfw_xdp_attach(dp->root, ifname, ifindex, holder, sizeof(holder))
+           == 0)
+    {
+        mfw_tc_off(dp->root, ifname);
+        fprintf(stderr, "mfwd: %s: the XDP hook is free: "
+                "moved from TC to XDP\n", ifname);
+        return 0;
+    }
+
+    fd = mfw_tcx_open(dp->root, ifname);
+    if (fd >= 0) {
+        e = 0;
+
+        if (bpf_link_update(fd, dp->prog_fd, NULL) != 0) {
+            e = errno;
+        }
+
+        close(fd);
+
+        return e;
+    }
+
+    if (!mfw_tc_attached(dp->root, ifname)) {
+        return 0;
+    }
+
+    e = -mfw_tc_attach(ifindex, dp->prog_fd);
+    if (e != 0) {
+        return e;
+    }
+
+    if (mfw_tc_pin(dp->root, ifname, dp->prog_fd) != 0) {
+        return errno;
+    }
+
+    return 0;
 }
 
 
