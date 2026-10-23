@@ -85,6 +85,7 @@ mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder, size_t len)
         return e;
     }
 
+    /* what the hook holds: the dispatcher, or a program on its own */
     main = xdp_multiprog__main_prog(mp);
 
     if (!xdp_multiprog__is_legacy(mp)) {
