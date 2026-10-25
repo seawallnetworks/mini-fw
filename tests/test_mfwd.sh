@@ -171,7 +171,22 @@ echo "== restart keeps the policy and the filtering"
 expect ok "apply" mfw apply <(echo "$POLICY")
 stop
 expect ok "stays on d0 while mfwd is down" on d0
-start
+# started as systemd does a Type=notify unit: READY=1 comes once mfwd
+# listens, which is when sw_configd, ordered after it, connects
+python3 - "$TMP/notify" "$TMP/notified" "$SOCK" <<'PY' &
+import os, socket, stat, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind(sys.argv[1])
+s.settimeout(10)
+msg = s.recv(256).decode()
+up = os.path.exists(sys.argv[3]) and stat.S_ISSOCK(os.stat(sys.argv[3]).st_mode)
+open(sys.argv[2], "w").write(msg + (" listening" if up else " not-listening") + "\n")
+PY
+notifier=$!
+for _ in $(seq 50); do [[ -S $TMP/notify ]] && break; sleep 0.1; done
+NOTIFY_SOCKET=$TMP/notify start
+wait "$notifier"
+same "READY=1 once it listens" "$(cat "$TMP/notified" 2>/dev/null)" "READY=1 listening"
 same "generation kept" "$(field generation)" 6
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
 grep -q "policy generation 6 is in place" "$LOG" && ok "log: in place" || bad "log: in place"

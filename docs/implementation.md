@@ -403,7 +403,9 @@ counters restart on such an upgrade while the rulesets and links stay.
 6. **Restore** the saved policy, if there is one. If the kernel still runs
    its generation (`config.generation`), it is simply taken over. If not
    (the pins were removed, e.g. by hand), it is applied again.
-7. Listen on the socket (default `0600`; `-m`, `-g`).
+7. Listen on the socket (default `0600`; `-m`, `-g`), then tell systemd
+   mfwd is ready (`READY=1` to `$NOTIFY_SOCKET`; `mfwd.service` is
+   `Type=notify`), so sw_configd, ordered after mfwd, finds the socket.
 
 ### 5.2 Stop
 

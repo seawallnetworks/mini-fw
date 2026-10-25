@@ -22,9 +22,11 @@
  * The applied policy is saved under the state directory (/run/mfwd), so a
  * restarted mfwd knows it; the kernel side is pinned and keeps filtering
  * while mfwd is down. Single-threaded: requests are handled one at a
- * time. */
+ * time. Under systemd (Type=notify) it says it is ready once it listens,
+ * so a front end ordered after it, such as sw_configd, finds the socket. */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stddef.h>
 #include <getopt.h>
 #include <grp.h>
 #include <signal.h>
@@ -505,6 +507,35 @@ static void restore(struct mfwd *d)
     free(text);
 }
 
+/* Tells systemd the socket is up (Type=notify): with Type=simple a unit
+ * ordered after mfwd starts as soon as mfwd's process does, and finds no
+ * socket. One datagram to $NOTIFY_SOCKET, so no libsystemd; without it
+ * (not under systemd), nothing. */
+static void notify_ready(void)
+{
+    const char *path = getenv("NOTIFY_SOCKET");
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    size_t len;
+    int fd;
+
+    if (!path || (path[0] != '/' && path[0] != '@'))
+        return;
+    len = strlen(path);
+    if (len >= sizeof(addr.sun_path)) {
+        logmsg("NOTIFY_SOCKET too long: systemd not told mfwd is ready");
+        return;
+    }
+    memcpy(addr.sun_path, path, len);
+    if (path[0] == '@')  /* an abstract socket */
+        addr.sun_path[0] = '\0';
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0 || sendto(fd, "READY=1", 7, 0, (struct sockaddr *)&addr,
+                         offsetof(struct sockaddr_un, sun_path) + len) < 0)
+        logmsg("tell systemd mfwd is ready: %s", strerror(errno));
+    if (fd >= 0)
+        close(fd);
+}
+
 /* /etc/group read directly: mfwd is static, and getgrnam's NSS would
  * dlopen modules (libnss_systemd) built for a different libc */
 static struct group *find_group(const char *name)
@@ -618,6 +649,7 @@ int main(int argc, char **argv)
            d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
            : d.dp.tcx ? "libxdp's dispatcher, else tcx"
            : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");
+    notify_ready();
 
     while (!stop) {
         int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);

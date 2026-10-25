@@ -9,6 +9,9 @@ After=sw_flowd.service
 Wants=sw_flowd.service
 
 [Service]
+# ready once the socket listens (mfwd tells systemd), so sw_configd, after
+# it, finds the socket
+Type=notify
 # The socket, /run/mfwd.sock, is mode 0660, group mfw (from the seawall repo):
 # root and the group's members, such as sw_configd, may connect. Whoever can
 # replaces the policy. For root alone, drop -g and -m with "systemctl edit mfwd".
