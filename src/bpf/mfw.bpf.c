@@ -275,20 +275,12 @@ static __always_inline int match_std(const struct mfw_ruleset *rs, __be32 saddr)
  * host's SYN; mfw_ext_ace_match() only asks for TCP and UDP. */
 static __always_inline int is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
 {
-    struct sf_flow_key k = {};
-    struct sf_flow *f;
+    __u64 seen;
 
     if (p->proto == IPPROTO_TCP && !(p->tcp_flags & (TCP_FLAG_ACK | TCP_FLAG_RST)))
         return 0;
-    k.family = SF_FAMILY_V4;
-    k.protocol = p->proto;
-    __builtin_memcpy(k.raddr, &p->saddr, 4);
-    k.rport = bpf_htons(p->sport);
-    k.lport = bpf_htons(p->dport);
-    f = bpf_map_lookup_elem(&flows, &k);
-    if (!f)
-        return 0;
-    return bpf_ktime_get_ns() - f->last_seen < r->reply_idle * 1000000000ULL;
+    seen = sf_flow_seen(&flows, SF_FAMILY_V4, p->proto, &p->saddr, p->sport, p->dport);
+    return seen && bpf_ktime_get_ns() - seen < r->reply_idle * 1000000000ULL;
 }
 
 /* L3/L4 fields of one extended ACE vs the packet. A global (non-static)
