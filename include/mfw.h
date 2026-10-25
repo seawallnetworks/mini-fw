@@ -4,7 +4,9 @@
  * Step 1 (stateless, ingress only): standard and extended ACLs both run in
  * one TC ingress program. Egress is not filtered (local-VM protection only).
  * Each interface has its own ruleset (struct mfw_ruleset), found by the
- * ifindex the packet arrived on.
+ * ifindex the packet arrived on. "reply" ACEs look the packet up in
+ * sw_flowd's table of the flows the host opened (Seawall proposal 0009);
+ * mfw.h itself doesn't need sw_flowd.h, so front ends build without it.
  */
 #ifndef MFW_H
 #define MFW_H
@@ -46,6 +48,13 @@ enum mfw_acl_kind {
 
 /* mfw_rule.flags */
 #define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* Cisco "established": TCP with ACK or RST */
+#define MFW_RULE_F_REPLY        (1 << 1)  /* a reply to a flow the host opened */
+
+/* "reply" ACEs' idle limits, in seconds: how long after a flow last left
+ * its replies still match ("set reply-idle-tcp|reply-idle-udp N") */
+#define MFW_REPLY_IDLE_TCP      86400
+#define MFW_REPLY_IDLE_UDP      180
+#define MFW_REPLY_IDLE_MAX      31536000  /* a year */
 
 struct mfw_cidr {
     __be32 addr;   /* IPv4 network address, big-endian wire order ONLY */
@@ -79,7 +88,8 @@ struct mfw_rule {
     struct mfw_port_range sport;   /* any for standard */
     struct mfw_port_range dport;
     __u32 rule_id;      /* stable id for delete */
-    __u32 pad1;
+    __u32 reply_idle;   /* "reply": the policy's reply-idle-tcp or -udp, in
+                           seconds; set by mfw_policy_compile() */
 };
 
 /*

@@ -118,7 +118,7 @@ mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder, size_t len)
  * no such program in it, or -errno if libxdp fails to detach it.
  */
 int
-mfw_xdp_remove(int ifindex, __u32 id)
+mfw_xdp_unload(int ifindex, __u32 id)
 {
     int                    e;
     struct xdp_program    *p;
@@ -238,12 +238,12 @@ not_found:
  * Load a new copy of mini-fw's XDP program into ifindex's dispatcher, in
  * this mode, and pin it as link/xdp_<ifname>. libxdp joins the dispatcher
  * there, or makes one. The copy is a new BPF object that shares the
- * pinned maps; libxdp loads it as an extension of the dispatcher.
- * Returns 0 or -errno.
+ * pinned maps, and binds sw_flowd's table, flows_fd, unless that is -1;
+ * libxdp loads it as an extension of the dispatcher. Returns 0 or -errno.
  */
 int
 mfw_xdp_load(const char *root, const char *ifname, int ifindex,
-    enum xdp_attach_mode mode)
+    enum xdp_attach_mode mode, int flows_fd)
 {
     char                 maps[PATH_MAX], path[PATH_MAX];
     LIBBPF_OPTS(bpf_object_open_opts, oopts, .pin_root_path = maps);
@@ -260,6 +260,13 @@ mfw_xdp_load(const char *root, const char *ifname, int ifindex,
     }
 
     bpf_program__set_autoload(skel->progs.mfw_tc, false);
+
+    if (flows_fd >= 0 && bpf_map__reuse_fd(skel->maps.flows, flows_fd) != 0) {
+        e = -errno;
+        mfw_bpf__destroy(skel);
+        return e;
+    }
+
     xopts.obj = skel->obj;
 
     xp = xdp_program__create(&xopts);
@@ -313,11 +320,12 @@ done:
  *   so the caller can fall back to TC.
  *
  * Returns 0 when attached, 1 when the hook is held, or -errno
- * (-ENOTSUP if bpffs is not mounted, which libxdp needs).
+ * (-ENOTSUP if bpffs is not mounted, which libxdp needs). flows_fd is
+ * mfw_xdp_load()'s.
  */
 int
 mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
-    char *holder, size_t len)
+    int flows_fd, char *holder, size_t len)
 {
     int                   e, i, state;
     enum xdp_attach_mode  mode;
@@ -341,9 +349,9 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
      * Take out copies of mfw_xdp left by a crash or a lost pin, which
      * would otherwise run along with the new one.
      */
-    for (i = 0; i < 10 && mfw_xdp_remove(ifindex, 0) > 0; i++) { /* void */ }
+    for (i = 0; i < 10 && mfw_xdp_unload(ifindex, 0) > 0; i++) { /* void */ }
 
-    e = mfw_xdp_load(root, ifname, ifindex, mode);
+    e = mfw_xdp_load(root, ifname, ifindex, mode, flows_fd);
 
     /*
      * A new dispatcher was tried in native mode: if the driver refused,
@@ -354,7 +362,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
         && e != -EBUSY
         && e != -EEXIST)
     {
-        e = mfw_xdp_load(root, ifname, ifindex, XDP_MODE_SKB);
+        e = mfw_xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd);
     }
 
     /* another program took the hook after mfw_xdp_state() looked */
@@ -380,7 +388,7 @@ mfw_xdp_detach(const char *root, const char *ifname)
     ifindex = if_nametoindex(ifname);
 
     if (id != 0 && ifindex != 0) {
-        mfw_xdp_remove(ifindex, id);
+        mfw_xdp_unload(ifindex, id);
     }
 
     unlink(path);

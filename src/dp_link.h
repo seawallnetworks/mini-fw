@@ -27,13 +27,13 @@ typedef enum {
 void mfw_xdp_path(const char *root, const char *ifname, char *buf, size_t len);
 int mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder,
     size_t len);
-int mfw_xdp_remove(int ifindex, __u32 id);
+int mfw_xdp_unload(int ifindex, __u32 id);
 __u32 mfw_xdp_pinned_id(const char *path);
 int mfw_xdp_attached(const char *root, const char *ifname);
 int mfw_xdp_load(const char *root, const char *ifname, int ifindex,
-    enum xdp_attach_mode mode);
+    enum xdp_attach_mode mode, int flows_fd);
 int mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
-    char *holder, size_t len);
+    int flows_fd, char *holder, size_t len);
 void mfw_xdp_detach(const char *root, const char *ifname);
 
 int mfw_have_tcx(void);

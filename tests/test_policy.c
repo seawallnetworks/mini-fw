@@ -54,22 +54,29 @@ static void test_parse_and_format(void)
         "bind eth0 in 100\n"
         "bind eth0 in 10\n"
         "acl 110 5 permit icmp any any\n"
+        "acl 110 10 permit tcp any any reply\n"
+        "set reply-idle-udp 60\n"
         "set drop-ipv4-fragments 1";        /* no final newline */
     const char *canon =
         "acl 10 10 deny host 203.0.113.66\n"
         "acl 100 10 permit tcp any host 10.0.0.5 eq 22\n"
         "acl 100 20 permit udp any eq 53 any\n"
         "acl 110 5 permit icmp any any\n"
+        "acl 110 10 permit tcp any any reply\n"
         "bind eth0 in 10\n"
         "bind eth0 in 100\n"
         "bind eth1 in 110\n"
-        "set drop-ipv4-fragments 1\n";
+        "set drop-ipv4-fragments 1\n"
+        "set reply-idle-tcp 86400\n"
+        "set reply-idle-udp 60\n";
     struct mfw_policy p, q;
     char err[MFW_ERR_LEN], *out, *again;
 
     CHECK(mfw_policy_parse(text, &p, err, sizeof(err)) == 0, "rejected: %s", err);
-    CHECK(p.n_rules == 4 && p.n_binds == 2 && p.drop_ipv4_fragments == 1,
+    CHECK(p.n_rules == 5 && p.n_binds == 2 && p.drop_ipv4_fragments == 1,
           "%d rules, %d binds", p.n_rules, p.n_binds);
+    CHECK(p.reply_idle_tcp == MFW_REPLY_IDLE_TCP && p.reply_idle_udp == 60,
+          "reply idle %u/%u", p.reply_idle_tcp, p.reply_idle_udp);
     CHECK(!strcmp(p.binds[0].ifname, "eth0") && p.binds[0].std_acl == 10 &&
           p.binds[0].ext_acl == 100, "eth0 binds");
     CHECK(!strcmp(p.binds[1].ifname, "eth1") && p.binds[1].std_acl == 0 &&
@@ -90,7 +97,9 @@ static void test_parse_and_format(void)
     /* empty policy: nothing bound, fragments passed */
     CHECK(mfw_policy_parse("", &p, err, sizeof(err)) == 0, "empty rejected: %s", err);
     out = mfw_policy_format(&p);
-    CHECK(out && !strcmp(out, "set drop-ipv4-fragments 0\n"), "empty: %s", out);
+    CHECK(out && !strcmp(out, "set drop-ipv4-fragments 0\n"
+                         "set reply-idle-tcp 86400\nset reply-idle-udp 180\n"),
+          "empty: %s", out);
     free(out);
     mfw_policy_free(&p);
 }
@@ -116,8 +125,15 @@ static void test_rejections(void)
     reject("bind abcdefghijklmnop in 10\n", "line 1: bad interface name 'abcdefghijklmnop'");
     reject("bind eth0 in 10\nbind eth0 in 20\n", "line 2: eth0 already has standard list 10");
     reject("bind eth0 in 100\nbind eth0 in 100\n", "line 2: eth0 already has extended list 100");
-    reject("set drop-ipv4-fragments 2\n", "line 1: expected: set drop-ipv4-fragments 0|1");
-    reject("set frob 1\n", "line 1: expected: set drop-ipv4-fragments 0|1");
+    reject("set drop-ipv4-fragments 2\n", "line 1: expected: set drop-ipv4-fragments 0|1, "
+           "or set reply-idle-tcp|reply-idle-udp <seconds>");
+    reject("set frob 1\n", "line 1: expected: set drop-ipv4-fragments 0|1, "
+           "or set reply-idle-tcp|reply-idle-udp <seconds>");
+    reject("set reply-idle-tcp 0\n", "line 1: reply-idle-tcp must be 1-31536000 seconds");
+    reject("set reply-idle-udp 31536001\n",
+           "line 1: reply-idle-udp must be 1-31536000 seconds");
+    reject("set reply-idle-udp\n", "line 1: expected: set drop-ipv4-fragments 0|1, "
+           "or set reply-idle-tcp|reply-idle-udp <seconds>");
 }
 
 static void test_limits(void)
@@ -170,9 +186,14 @@ static void test_compile(void)
         "acl 10 10 deny host 192.0.2.1\n"
         "acl 100 10 permit tcp any any eq 22\n"
         "acl 20 10 deny any\n"
+        "acl 102 10 permit tcp any any reply\n"
+        "acl 102 20 permit udp any any reply\n"
+        "acl 102 30 permit udp any any\n"
         "bind eth0 in 10\n"
         "bind eth0 in 100\n"
-        "bind eth1 in 101\n";       /* bound but no ACEs */
+        "bind eth1 in 101\n"        /* bound but no ACEs */
+        "bind eth2 in 102\n"
+        "set reply-idle-udp 60\n";
     struct mfw_policy p;
     struct mfw_ruleset rs;
     char err[MFW_ERR_LEN];
@@ -190,6 +211,11 @@ static void test_compile(void)
     mfw_policy_compile(&p, 1, &rs);
     CHECK(rs.std_acl == 0 && rs.n_std == 0 && rs.ext_acl == 101 && rs.n_ext == 0,
           "eth1: an empty bound extended list stays bound");
+    mfw_policy_compile(&p, 2, &rs);
+    CHECK(rs.n_ext == 3 && rs.ext[0].reply_idle == MFW_REPLY_IDLE_TCP &&
+          rs.ext[1].reply_idle == 60 && rs.ext[2].reply_idle == 0,
+          "eth2: each reply ACE carries its protocol's idle limit: %u %u %u",
+          rs.ext[0].reply_idle, rs.ext[1].reply_idle, rs.ext[2].reply_idle);
     mfw_policy_free(&p);
 }
 

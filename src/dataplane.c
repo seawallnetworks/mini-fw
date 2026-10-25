@@ -11,6 +11,11 @@
  *   maps/config     array: flags, generation
  *   maps/stats      per-CPU counters
  *
+ * "reply" ACEs look up sw_flowd's table, /sys/fs/bpf/seawall/flows/outbound
+ * (Seawall proposal 0009), which every program mfwd loads binds at load:
+ * sw_flowd starts first. Without it, a program gets an empty map of its
+ * own, and keeps it until an mfwd started with the table replaces it.
+ *
  * Each attached interface has one of three link pins:
  *
  *   link/xdp_<if>   the normal case: mini-fw's XDP program in the
@@ -38,6 +43,8 @@
 #include "mfw.skel.h"
 #include "util.h"
 
+#include <sw_flowd/sw_flowd.h>
+
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <dirent.h>
@@ -63,6 +70,7 @@ static int libxdp_print(enum libxdp_print_level level, const char *fmt,
     va_list ap);
 static void drop_old_stats(const char *root);
 static void links_detach(const char *root);
+static void flows_open(struct mfw_dp *dp);
 
 
 int
@@ -266,18 +274,19 @@ upgrade_link(struct mfw_dp *dp, const char *ifname)
             return ENOENT;
         }
 
-        e = -mfw_xdp_load(dp->root, ifname, ifindex, mode);
+        e = -mfw_xdp_load(dp->root, ifname, ifindex, mode, dp->flows_fd);
         if (e != 0) {
             return e;
         }
 
-        mfw_xdp_remove(ifindex, old);
+        mfw_xdp_unload(ifindex, old);
 
         return 0;
     }
 
     if (!dp->no_xdp
-        && mfw_xdp_attach(dp->root, ifname, ifindex, holder, sizeof(holder))
+        && mfw_xdp_attach(dp->root, ifname, ifindex, dp->flows_fd, holder,
+                          sizeof(holder))
            == 0)
     {
         mfw_tc_off(dp->root, ifname);
@@ -391,6 +400,7 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->rulesets_fd = -1;
     dp->config_fd = -1;
     dp->stats_fd = -1;
+    dp->flows_fd = -1;
 
     if (strlen(root) >= sizeof(dp->root)) {
         return mfw_fail(err, errlen, "pin root too long");
@@ -415,6 +425,16 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->skel = mfw_bpf__open_opts(&opts);
     if (dp->skel == NULL) {
         return mfw_fail(err, errlen, "open BPF object: %s", strerror(errno));
+    }
+
+    flows_open(dp);
+
+    if (dp->flows_fd >= 0
+        && bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0)
+    {
+        mfw_fail(err, errlen, "bind sw_flowd's flow table: %s",
+                 strerror(errno));
+        goto failed;
     }
 
     /*
@@ -461,6 +481,11 @@ mfw_dp_close(struct mfw_dp *dp)
 {
     mfw_bpf__destroy(dp->skel);  /* the pins keep maps and links alive */
     dp->skel = NULL;
+
+    if (dp->flows_fd >= 0) {
+        close(dp->flows_fd);
+        dp->flows_fd = -1;
+    }
 }
 
 
@@ -481,7 +506,8 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
     }
 
     if (!dp->no_xdp) {
-        e = mfw_xdp_attach(dp->root, ifname, ifindex, holder, sizeof(holder));
+        e = mfw_xdp_attach(dp->root, ifname, ifindex, dp->flows_fd, holder,
+                           sizeof(holder));
 
         if (e == 0) {
             return 0;
@@ -627,6 +653,50 @@ mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
 }
 
 
+/*
+ * sw_flowd's table, for every program this mfwd loads to bind. The table
+ * is not versioned: one of another layout is a sw_flowd built from
+ * another sw_flowd.h than mini-fw was, and is not bound. Either way "reply"
+ * ACEs match nothing until mfwd restarts with the right one.
+ */
+static void
+flows_open(struct mfw_dp *dp)
+{
+    int                  fd;
+    __u32                len;
+    struct bpf_map_info  info;
+
+    fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_OUTBOUND);
+
+    if (fd < 0) {
+        fprintf(stderr, "mfwd: no sw_flowd flow table under %s: \"reply\" "
+                "ACEs match nothing until mfwd restarts with it (start "
+                "sw_flowd first)\n", SF_PIN_ROOT);
+        return;
+    }
+
+    memset(&info, 0, sizeof(info));
+    len = sizeof(info);
+
+    if (bpf_map_get_info_by_fd(fd, &info, &len) != 0
+        || info.type != BPF_MAP_TYPE_LRU_HASH
+        || info.key_size != sizeof(struct sf_flow_key)
+        || info.value_size != sizeof(struct sf_flow))
+    {
+        fprintf(stderr, "mfwd: sw_flowd's flow table under %s is not the "
+                "layout this mfwd reads: \"reply\" ACEs match nothing\n",
+                SF_PIN_ROOT);
+        close(fd);
+        return;
+    }
+
+    dp->flows_fd = fd;
+    fprintf(stderr, "mfwd: reading sw_flowd's flow table (%u flows): "
+            "\"reply\" ACEs match replies to the host's own flows\n",
+            info.max_entries);
+}
+
+
 int
 mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
 {
@@ -693,7 +763,7 @@ links_detach(const char *root)
             ifindex = if_nametoindex(de->d_name + 4);
             if (ifindex != 0) {
                 mfw_xdp_path(root, de->d_name + 4, path, sizeof(path));
-                mfw_xdp_remove(ifindex, mfw_xdp_pinned_id(path));
+                mfw_xdp_unload(ifindex, mfw_xdp_pinned_id(path));
             }
         }
     }

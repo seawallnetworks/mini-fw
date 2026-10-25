@@ -26,7 +26,8 @@ static void usage(FILE *f)
         "  check [file]       check a policy here, without sending it\n"
         "  show               the policy mfwd enforces\n"
         "  status             generation, attached, missing and degraded\n"
-        "                     (at TC: another program holds XDP) interfaces\n"
+        "                     (at TC: another program holds XDP) interfaces;\n"
+        "                     flows: sw_flowd, when reply ACEs read its table\n"
         "  stats [--json]     packet counters\n"
         "  ping\n"
         "  version\n"
@@ -35,9 +36,10 @@ static void usage(FILE *f)
         "  acl <list> <seq> permit|deny ...   an ACE, Cisco syntax\n"
         "  bind <ifname> in <list>            one standard + one extended list per interface\n"
         "  set drop-ipv4-fragments 0|1\n"
+        "  set reply-idle-tcp|reply-idle-udp <seconds>   default 86400, 180\n"
         "\n"
         "  standard ACE (1-99):    permit|deny <addr>\n"
-        "  extended ACE (100-199): permit|deny <proto> <addr> [<port>] <addr> [<port>] [established]\n"
+        "  extended ACE (100-199): permit|deny <proto> <addr> [<port>] <addr> [<port>] [established|reply]\n"
         "    <addr>:  any | host A.B.C.D | A.B.C.D <wildcard> | A.B.C.D/len\n"
         "    <proto>: ip | tcp | udp | icmp | 0-255\n"
         "    <port>:  eq N | range LO HI | gt N | lt N   (tcp/udp only)\n"
@@ -180,6 +182,7 @@ static int cmd_status(const mfw_client_t *c)
     printf("missing              %s\n", *st.missing ? st.missing : "-");
     printf("degraded             %s\n", *st.degraded ? st.degraded : "-");
     printf("drop-ipv4-fragments  %d\n", st.drop_ipv4_fragments);
+    printf("flows                %s\n", *st.flows ? st.flows : "-");
     return EXIT_OK;
 }
 

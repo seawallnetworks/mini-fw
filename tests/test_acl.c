@@ -124,6 +124,8 @@ int main(void)
     roundtrip("100 permit tcp any any lt 1024", "permit tcp any any lt 1024");
     roundtrip("100 permit tcp any any range 1 65535", "permit tcp any any range 1 65535");
     roundtrip("100 permit tcp any any established", "permit tcp any any established");
+    roundtrip("100 permit tcp any any reply", "permit tcp any any reply");
+    roundtrip("100 permit udp any eq 53 any reply", "permit udp any eq 53 any reply");
     roundtrip("110 deny ip host 10.0.0.5 10.0.0.0 0.0.0.255",
               "deny ip host 10.0.0.5 10.0.0.0 0.0.0.255");
     roundtrip("199 permit icmp any any", "permit icmp any any");
@@ -140,6 +142,10 @@ int main(void)
     reject("100 permit icmp any eq 5 any");     /* ports on icmp */
     reject("100 permit ip any any eq 80");
     reject("100 permit udp any any established");
+    reject("100 permit ip any any reply");       /* tcp or udp only */
+    reject("100 permit icmp any any reply");
+    reject("100 permit tcp any any established reply");
+    reject("10 permit any reply");               /* std: source only */
     reject("100 permit tcp any any range 90 80");
     reject("100 permit tcp any any eq 0");      /* port 0 = any sentinel */
     reject("100 permit tcp 10.0.0.1 any");      /* ext needs wildcard/host */

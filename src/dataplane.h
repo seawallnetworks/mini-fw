@@ -20,6 +20,7 @@ struct mfw_dp {
     int             rulesets_fd;
     int             config_fd;
     int             stats_fd;
+    int             flows_fd;     /* sw_flowd's table, bound at load; -1: none */
     int             tcx;      /* attach with tcx links (6.6+), not classic TC */
     int             no_xdp;   /* MFW_NO_XDP: TC only, for tests */
 };

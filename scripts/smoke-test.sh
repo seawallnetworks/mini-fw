@@ -10,18 +10,20 @@
 # so this runs next to a live mini-fw without touching it. The second veth
 # pair checks that each interface enforces only its own lists. Needs root
 # and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only, and needs no
-# xdp-tools.
+# xdp-tools. "reply" ACEs are tested with sw_flowd recording fw's flows
+# (SW_FLOWD, or ../sw_flowd/sw_flowd), and skipped without it.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MFWD=$ROOT/mfwd MFW=$ROOT/mfw
+FLOWD=${SW_FLOWD:-$ROOT/../sw_flowd/sw_flowd}
 CLI=mfw-cli-$$ FW=mfw-fw-$$
 CLI_IP=10.200.0.1 FW_IP=10.200.0.2
 CLI_IP2=10.201.0.1 FW_IP2=10.201.0.2
 PINS=/sys/fs/bpf/mfw-smoke-$$
 TMP=$(mktemp -d)
 SOCK=$TMP/sock
-PASS=0 FAIL=0 PID=
+PASS=0 FAIL=0 PID= FLOWD_PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 # Its own mount namespace and bpffs: libxdp pins each dispatcher under
@@ -62,8 +64,19 @@ start_mfwd() {
 }
 stop_mfwd() { kill "$PID"; wait "$PID" 2>/dev/null; PID=; }
 
+start_flowd() {
+    printf 'interfaces = veth-fw veth-fw2\ntick_ms = 200\n' > "$TMP/sw_flowd.conf"
+    nsenter --net=/var/run/netns/$FW "$FLOWD" -c "$TMP/sw_flowd.conf" \
+        >>"$TMP/sw_flowd.log" 2>&1 &
+    FLOWD_PID=$!
+}
+stop_flowd() { kill "$FLOWD_PID"; wait "$FLOWD_PID" 2>/dev/null; FLOWD_PID=; }
+flows_is() { mfw status | grep -q "^flows  *$1\$"; }
+
 cleanup() {
     [[ -n $PID ]] && stop_mfwd
+    [[ -n $FLOWD_PID ]] && stop_flowd
+    [[ -x $FLOWD ]] && nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
     "$MFWD" -P -p "$PINS" -d "$TMP/state" >/dev/null 2>&1
     for ns in "$CLI" "$FW"; do
         ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
@@ -91,6 +104,16 @@ ping_fw2() { in_cli ping -c1 -W1 "$FW_IP2"; }
 tcp_to_fw()  { in_cli nc -z -w1 "$FW_IP" "$1"; }
 tcp_to_cli() { in_fw  nc -z -w1 "$CLI_IP" "$1"; }
 udp_echo_fw() { in_cli bash -c "echo hi | nc -u -w1 $FW_IP $1 | grep -q hi"; }
+udp_echo_cli() { in_fw bash -c "echo hi | nc -u -w1 $CLI_IP $1 | grep -q hi"; }
+# n bare ACKs from cli to fw's port: what an ACK flood sends
+acks_to_fw() {
+    in_cli python3 -c "
+import socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+for i in range($2):
+    s.sendto(struct.pack('!HHIIBBHHH', 40000 + i, $1, 1, 1, 5 << 4, 0x10,
+                         1024, 0, 0), ('$FW_IP', 0))"
+}
 stat_of() { mfw stats --json | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
 # ---- topology ----
@@ -107,6 +130,11 @@ for port in 8080 8081; do
     in_fw bash -c "while :; do nc -l $port >/dev/null; done" &
 done
 in_cli bash -c "while :; do nc -l 9090 >/dev/null; done" &
+in_cli python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('$CLI_IP', 5354))
+while True:
+    d, a = s.recvfrom(2048); s.sendto(d, a)" &
 in_fw python3 -c "
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('$FW_IP', 5353))
@@ -179,6 +207,46 @@ start_mfwd
 expect fail "veth-fw2 still blocked after restart" ping_fw2
 expect ok   "policy kept" bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
 policy
+
+echo "== reply: replies to the flows fw opened (sw_flowd)"
+if [[ -x $FLOWD ]]; then
+    REPLY=("acl 100 10 permit tcp any host $FW_IP eq 8080"
+           "acl 100 20 permit tcp any any reply"
+           "acl 100 30 permit udp any any reply"
+           "bind veth-fw in 100")
+    policy "${REPLY[@]}"
+    expect ok   "flows: none before sw_flowd" flows_is none
+    expect fail "outbound tcp: reply matches nothing without sw_flowd" tcp_to_cli 9090
+    start_flowd
+    sleep 0.5   # sw_flowd's pins, and its first sync: the ephemeral port range
+    expect ok   "flows: none until mfwd restarts" flows_is none
+    stop_mfwd; start_mfwd   # mfwd binds sw_flowd's table when it starts
+    expect ok   "flows: sw_flowd once mfwd starts after it" flows_is sw_flowd
+    expect ok   "outbound tcp with 'reply'" tcp_to_cli 9090
+    expect ok   "outbound udp with 'reply'" udp_echo_cli 5354
+    expect fail "inbound SYN to 8081 still denied" tcp_to_fw 8081
+    expect ok   "inbound tcp 8080 still permitted" tcp_to_fw 8080
+    before=$(stat_of ext_implicit_deny)
+    acks_to_fw 8081 100
+    expect ok   "an ACK flood is dropped" test $(( $(stat_of ext_implicit_deny) - before )) -ge 100
+    policy "${REPLY[@]}" "acl 100 40 permit tcp any any established"
+    before=$(stat_of ext_permit)
+    acks_to_fw 8081 100
+    expect ok   "('established' lets the same flood in)" \
+        test $(( $(stat_of ext_permit) - before )) -ge 100
+    policy "${REPLY[@]}"
+    stop_flowd
+    expect ok   "sw_flowd stopped: its pinned link still records" tcp_to_cli 9090
+    # mfwd keeps the table it bound, whose flows match until idle, until
+    # it restarts: a layout change restarts the readers (0009)
+    nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
+    stop_mfwd; start_mfwd
+    expect ok   "flows: none for an mfwd started without sw_flowd" flows_is none
+    expect fail "replies denied again" tcp_to_cli 9090
+    policy
+else
+    echo "  skip: no sw_flowd at $FLOWD (set SW_FLOWD)"
+fi
 
 echo "== ingress only; egress is never filtered"
 policy "acl 100 10 permit ip any any" "bind veth-fw in 100"

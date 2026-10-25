@@ -41,6 +41,8 @@ struct mfw_status {
     char  missing[1024];        /* bound interfaces that do not exist */
     char  degraded[1024];       /* attached at TC ingress, not XDP: another
                                  * program holds the XDP hook */
+    char  flows[16];            /* "sw_flowd": "reply" ACEs read its table;
+                                 * "none" without it; "" from an older mfwd */
 };
 
 const char *mfw_strerror(int rc);

@@ -10,12 +10,15 @@ ingress when another program holds the XDP hook; inbound only, driven by
 a daemon.** The target is protecting a local VM, so there is no router or
 forwarding mode, and **egress is never filtered**. In the dispatcher a DDoS
 gate such as [voidgate](https://github.com/seawallnetworks/voidgate) runs
-first. There is no conntrack or fragment tracking yet (design PR5a–c).
+first. There is no conntrack or fragment tracking yet (design PR5a–c):
+replies to the host's own connections are matched with `reply`, from
+[sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table of the
+flows the host opened (Seawall proposal 0009).
 
 | List | Numbers | Matches | End of list |
 |------|---------|---------|-------------|
 | Standard | 1–99 | source IP | **pass** (blacklist) |
-| Extended | 100–199 | proto, src, dst, ports, `established` | **deny** (implicit) |
+| Extended | 100–199 | proto, src, dst, ports, `established` or `reply` | **deny** (implicit) |
 
 Each interface has its own lists: one standard and one extended list. Each
 inbound IPv4 packet is checked against the lists of the interface it
@@ -41,11 +44,13 @@ A **policy** is the whole desired state, one item per line, sent at once:
 ```text
 acl 10 10 deny host 203.0.113.66
 acl 100 10 permit tcp any host 10.0.0.5 eq 22
-acl 100 20 permit tcp any any established    # replies to our outbound TCP
-acl 100 30 permit udp any eq 53 any          # DNS replies
+acl 100 20 permit tcp any any reply          # replies to our outbound TCP
+acl 100 30 permit udp any any reply          # and UDP (DNS, NTP...)
 bind eth0 in 10
 bind eth0 in 100
 set drop-ipv4-fragments 0
+set reply-idle-tcp 86400                     # the defaults
+set reply-idle-udp 180
 ```
 
 mfwd checks all of it first, so a bad line changes nothing. Then it
@@ -58,7 +63,10 @@ pinned, so filtering continues while mfwd is stopped or restarting.
 Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`),
 and the static archives of libelf, zlib, libzstd and glibc (mfwd is linked
 fully static, so it needs no libraries on the machine), bpftool, Linux ≥ 6.1 with BTF, bpffs at
-`/sys/fs/bpf`. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
+`/sys/fs/bpf`, and sw_flowd's header (`<sw_flowd/sw_flowd.h>`, the
+layout of its table: `make -C ../sw_flowd install-header`, or its `make
+install`, puts it in `/usr/local/seawall/include`; `SW_FLOWD_PREFIX`
+points elsewhere). `libmfw.a` alone doesn't need it. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
 attaches at XDP, in libxdp's dispatcher; on an interface where a program
 that is not a dispatcher holds the XDP hook, at TC ingress: with tcx on 6.6
 and later, and with classic TC (a cls_bpf filter on clsact) before. The
@@ -70,7 +78,8 @@ make                  # mfwd, mfw, libmfw.a (objects in build/)
 make test             # ACE and policy parser tests
 make test-bpf         # the BPF program on crafted packets (BPF_PROG_TEST_RUN, sudo)
 make test-mfwd        # mfwd on dummy interfaces: protocol, attach/detach, restarts, sharing XDP (sudo)
-make smoke            # real traffic through mfwd in two network namespaces (sudo)
+make smoke            # real traffic through mfwd in two network namespaces (sudo); "reply"
+                      # with sw_flowd (SW_FLOWD, or ../sw_flowd/sw_flowd), else skipped
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
 
@@ -112,7 +121,7 @@ One request per connection on the Unix socket; mfwd replies and closes.
 | Request | Reply |
 |---------|-------|
 | `PING` | `OK` |
-| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d` (`degraded`: at TC, another program holds XDP) |
+| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` (`degraded`: at TC, another program holds XDP; `flows`: whether `reply` ACEs read sw_flowd's table) |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …` (every counter) |
 | `SHOW` | `OK <n>`, then the running policy in n lines |
 | `APPLY`, policy lines, `END` | `OK <generation>[ missing=a,b]` |
@@ -126,8 +135,15 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 ## Stateless caveats (until conntrack lands)
 
 - **Outbound traffic always leaves, but its replies are inbound and get
-  filtered.** If you bind an extended list, also permit those replies. Use `established` for
-  TCP (matches ACK or RST) and source-port ACEs for UDP. Example: `permit udp any eq 53 any`.
+  filtered.** If you bind an extended list, also permit those replies:
+  `permit tcp any any reply` and `permit udp any any reply`, with sw_flowd
+  running. `reply` matches only a reply to a flow the host opened, that
+  last left within `reply-idle-tcp` or `reply-idle-udp` seconds, so an
+  ACK flood doesn't pass it. Without sw_flowd when mfwd started, `reply`
+  matches nothing (fails closed), and so do connections opened before sw_flowd's first
+  start, and flows its full table evicted. `established` (TCP with ACK or
+  RST) and source-port ACEs (`permit udp any eq 53 any`) work without it,
+  but let in anything that looks like a reply.
 - **Non-first IPv4 fragments skip the extended list** and go to the kernel;
   the standard list, which needs only the source, still applies. The first
   fragment carries the ports and is filtered as usual; if it is dropped,
@@ -168,6 +184,19 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   takes no ACE slot, so an extended list holds 128 ACEs.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
+- **`reply` keyword, instead of the design's conntrack.** mini-fw reads
+  sw_flowd's pinned table (Seawall proposal 0009), which records the flows
+  the host opens at TC egress; it never writes it. sw_flowd starts first
+  (`mfwd.service` is `After=` and `Wants=sw_flowd.service`): mfwd opens
+  the table's pin when it starts, and every program it loads binds it
+  (`bpf_map__reuse_fd`). An mfwd started without it warns, and `reply`
+  matches nothing until mfwd restarts; a restart of sw_flowd changes
+  nothing for mfwd. The idle limits travel in the rules: each compiled
+  `reply` ACE holds its protocol's, in `mfw_rule.reply_idle` (the spare
+  word it had), so there is no map for them and the rule's layout is
+  unchanged. The lookup is the last check of an ACE, so only a packet the
+  rest of the ACE matched pays for it. A table of another layout (a sw_flowd built from another
+  `sw_flowd.h`) is refused.
 - **Attach.** The XDP entry in the interface's libxdp dispatcher, made or
   joined, in its mode (native, else skb, for a new one), loaded by libxdp
   from an object of its own on the pinned maps; mini-fw pins it as

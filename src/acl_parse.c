@@ -241,6 +241,11 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
             return fail(err, errlen, "'established' is only valid with tcp");
         out->flags |= MFW_RULE_F_ESTABLISHED;
         i++;
+    } else if (i < argc && !strcmp(argv[i], "reply")) {
+        if (out->proto != MFW_PROTO_TCP && out->proto != MFW_PROTO_UDP)
+            return fail(err, errlen, "'reply' is only valid with tcp or udp");
+        out->flags |= MFW_RULE_F_REPLY;
+        i++;
     }
     if (i < argc)
         return fail(err, errlen, "unexpected '%s'", argv[i]);
@@ -313,6 +318,7 @@ void mfw_format_ace(const struct mfw_rule *r, char *buf, size_t len)
     case MFW_PROTO_ICMP: snprintf(proto, sizeof(proto), "icmp"); break;
     default:             snprintf(proto, sizeof(proto), "%u", r->proto); break;
     }
-    snprintf(buf, len, "%s %s %s%s %s%s%s", act, proto, src, sp, dst, dp,
-             (r->flags & MFW_RULE_F_ESTABLISHED) ? " established" : "");
+    snprintf(buf, len, "%s %s %s%s %s%s%s%s", act, proto, src, sp, dst, dp,
+             (r->flags & MFW_RULE_F_ESTABLISHED) ? " established" : "",
+             (r->flags & MFW_RULE_F_REPLY) ? " reply" : "");
 }

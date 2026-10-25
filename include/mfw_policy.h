@@ -12,10 +12,16 @@
  *     bind eth0 in 10
  *     bind eth0 in 100
  *     set drop-ipv4-fragments 0
+ *     set reply-idle-tcp 86400
+ *     set reply-idle-udp 180
  *
  * "acl <list> <seq> <ACE>" defines one ACE in Cisco syntax; "bind <if> in
  * <list>" puts a list on an interface (one standard and one extended list
- * per interface); "set drop-ipv4-fragments 0|1" is global. '#' starts a
+ * per interface); the "set" items are global. An extended tcp or udp ACE
+ * that ends in "reply" matches only replies to flows the host opened, as
+ * sw_flowd recorded them, that last left within reply-idle-tcp or
+ * reply-idle-udp seconds (default 86400 and 180); without sw_flowd it
+ * matches nothing. '#' starts a
  * comment, to the end of the line; blank lines are ignored. Lists that are
  * not bound are kept but enforce nothing.
  */
@@ -65,6 +71,8 @@ struct mfw_policy {
     struct mfw_bind  binds[MFW_MAX_IFACES];   /* sorted by ifname */
     int              n_binds;
     int              drop_ipv4_fragments;
+    __u32            reply_idle_tcp;    /* seconds */
+    __u32            reply_idle_udp;
 };
 
 /*

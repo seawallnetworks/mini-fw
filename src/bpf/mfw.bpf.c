@@ -11,8 +11,10 @@
  * Egress is not filtered. With no extended list bound there is no implicit
  * deny: whatever the standard list does not deny passes, and an interface
  * without a ruleset gets only the header checks. This is the default, not
- * a failure mode. Non-IPv4 always passes. No conntrack yet, so return
- * traffic must be permitted explicitly (or via "established").
+ * a failure mode. Non-IPv4 always passes. No conntrack of its own: return
+ * traffic is permitted explicitly, with "established", or with "reply":
+ * a reply to a flow the host opened, in sw_flowd's table (Seawall
+ * proposal 0009). Without the table, "reply" matches nothing.
  *
  * Two entries share mfw_judge(): mfw_xdp, run by libxdp's dispatcher after
  * a DDoS gate such as voidgate, and mfw_tc, at TC ingress when another
@@ -32,6 +34,7 @@
 #include <bpf/bpf_endian.h>
 
 #include "mfw.h"
+#include <sw_flowd/sw_flowd.h>
 
 /* The most parse_pkt() reads: Ethernet, 2 VLAN tags, IPv4 with options,
  * TCP. */
@@ -85,6 +88,16 @@ struct {
     __type(value, struct mfw_stat_value);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } stats SEC(".maps");
+
+/* sw_flowd's table (Seawall proposal 0009): mfwd binds its pinned map
+ * here before the load (bpf_map__reuse_fd), with sw_flowd's size. Without
+ * it, this is a map of mini-fw's own that stays empty: no reply. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1);
+    __type(key, struct sf_flow_key);
+    __type(value, struct sf_flow);
+} flows SEC(".maps");
 
 struct pkt_meta {
     __be32 saddr;
@@ -257,6 +270,27 @@ static __always_inline int match_std(const struct mfw_ruleset *rs, __be32 saddr)
     return MATCH_MISS;
 }
 
+/* Is p a reply to a flow the host opened: one sw_flowd recorded leaving
+ * within the ACE's idle limit? A TCP reply has ACK or RST, as after the
+ * host's SYN; mfw_ext_ace_match() only asks for TCP and UDP. */
+static __always_inline int is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
+{
+    struct sf_flow_key k = {};
+    struct sf_flow *f;
+
+    if (p->proto == IPPROTO_TCP && !(p->tcp_flags & (TCP_FLAG_ACK | TCP_FLAG_RST)))
+        return 0;
+    k.family = SF_FAMILY_V4;
+    k.protocol = p->proto;
+    __builtin_memcpy(k.raddr, &p->saddr, 4);
+    k.rport = bpf_htons(p->sport);
+    k.lport = bpf_htons(p->dport);
+    f = bpf_map_lookup_elem(&flows, &k);
+    if (!f)
+        return 0;
+    return bpf_ktime_get_ns() - f->last_seen < r->reply_idle * 1000000000ULL;
+}
+
 /* L3/L4 fields of one extended ACE vs the packet. A global (non-static)
  * function is verified once on its own, which keeps the 128-ACE loop below
  * from multiplying verifier states by every branch in here. */
@@ -274,6 +308,9 @@ __noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_meta
         return 0;
     if ((r->flags & MFW_RULE_F_ESTABLISHED) &&
         !(p->tcp_flags & (TCP_FLAG_ACK | TCP_FLAG_RST)))
+        return 0;
+    /* last: the one lookup, only for a packet the rest matched */
+    if ((r->flags & MFW_RULE_F_REPLY) && !is_reply(r, p))
         return 0;
     return 1;
 }

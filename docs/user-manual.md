@@ -42,7 +42,8 @@ see [`implementation.md`](implementation.md).
   lists to.
 - **Never touches outbound traffic.** Everything the VM sends leaves normally.
 - Is **stateless**: each packet is judged on its own, with no memory of
-  connections. This matters for reply traffic (§3.4).
+  connections. This matters for reply traffic (§3.4): with sw_flowd
+  running, `reply` rules let in only replies to the flows the VM opened.
 - **Passes all non-IPv4 traffic** untouched: ARP, IPv6, LLDP and so on.
 - **Keeps filtering when mfwd stops.** The kernel side is pinned; mfwd is
   only needed to change or inspect the policy.
@@ -56,6 +57,8 @@ see [`implementation.md`](implementation.md).
 | mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) | `mfwd.service` does this |
 | `mfw` needs access to mfwd's socket | root, or a member of the group `mfw` with the shipped unit; see `mfwd -m` / `-g` |
 | To build: clang, make, bpftool, libbpf-dev | `clang --version`, `bpftool version` |
+| To build: sw_flowd's header | `ls /usr/local/seawall/include/sw_flowd/sw_flowd.h`; sw_flowd's `make install-header` puts it there |
+| For `reply` rules: sw_flowd running | `sudo mfw status` shows `flows sw_flowd` |
 
 If bpffs is not mounted:
 
@@ -141,7 +144,7 @@ make smoke       # real traffic between two network namespaces
 | | Standard list | Extended list |
 |--|---------------|---------------|
 | Numbers | **1–99** | **100–199** |
-| Matches on | source IP only | protocol, source, destination, ports, TCP `established` |
+| Matches on | source IP only | protocol, source, destination, ports, TCP `established`, `reply` |
 | Purpose | **blacklist**: block specific sources early | **allowlist**: say exactly what may come in |
 | If no rule matches | packet **continues** | packet is **dropped** (implicit deny) |
 
@@ -210,6 +213,18 @@ extended list:
 | DHCP lease renewal | UDP 67 → 68 | `permit udp any eq 67 any eq 68` |
 | ping | ICMP echo reply | `permit icmp any any` |
 
+With sw_flowd (it ships in the Seawall stack) the first rows have a
+better rule. sw_flowd records each flow the VM opens as it leaves, and
+`reply` matches only a packet back on such a flow:
+
+| Your VM does | Rule that lets the replies in |
+|--------------|-------------------------------|
+| opens TCP connections | `permit tcp any any reply` |
+| DNS lookups, NTP, other UDP from an ephemeral port | `permit udp any any reply` |
+
+`established` lets in any TCP packet with ACK set, so an ACK flood passes
+it; `reply` doesn't. §5.5 has the details.
+
 **Forgetting these is the most common mistake.** Section 6.1 has a ready-made
 baseline.
 
@@ -256,6 +271,7 @@ generation           1
 attached             eth0
 missing              -
 drop-ipv4-fragments  0
+flows                none
 ```
 
 ---
@@ -271,13 +287,15 @@ lines are ignored.
 acl <list> <seq> permit|deny ...        one rule (§5.2)
 bind <interface> in <list>              enforce a list on an interface (§5.7)
 set drop-ipv4-fragments 0|1             1 drops every IPv4 fragment; default 0
+set reply-idle-tcp <seconds>            how long an idle TCP flow's replies match; default 86400
+set reply-idle-udp <seconds>            the same for UDP; default 180
 ```
 
 `acl` rules:
 
 ```text
 acl <1-99>    <seq> permit|deny <source>
-acl <100-199> <seq> permit|deny <protocol> <source> [<port>] <destination> [<port>] [established]
+acl <100-199> <seq> permit|deny <protocol> <source> [<port>] <destination> [<port>] [established|reply]
 ```
 
 The order of lines in the file doesn't matter: rules are sorted by list and
@@ -330,7 +348,7 @@ Remember that a **source** port comes right after the source address:
 
 Port 0 cannot be used.
 
-### 5.5 `established` (tcp only)
+### 5.5 `established` (tcp only) and `reply` (tcp and udp)
 
 `established` matches TCP packets with the ACK or RST flag set, which means
 everything except the opening SYN of a new connection. Use it to let in
@@ -340,6 +358,29 @@ connections. It must be the last word of the rule.
 It is a stateless approximation: a forged packet with ACK set will also
 pass. The receiving kernel rejects such packets for unknown connections,
 but they do reach it.
+
+`reply` matches only a reply to a flow your VM opened: sw_flowd records
+each TCP connection the VM starts and each UDP flow it sends from an
+ephemeral port, as they leave, and `reply` looks the packet up there by
+its addresses and ports. A TCP reply must also have ACK or RST set. It
+must be the last word of the rule, and can't be combined with
+`established`.
+
+- **Idle limits.** A flow's replies match while it last sent within
+  `reply-idle-tcp` seconds (default 86400, a day: well past TCP's 2-hour
+  keepalive) or `reply-idle-udp` (default 180). A connection that stays
+  silent longer loses its replies; it must reconnect.
+- **It fails closed.** mfwd takes sw_flowd's table when it starts, so
+  sw_flowd starts first (the units say so). An mfwd started without it
+  (`mfw status` shows `flows none`) matches nothing with `reply` until it
+  is restarted, so replies hit the implicit deny. Restarting sw_flowd
+  needs no restart of mfwd; `sw_flowd -P` does. The replies of
+  connections opened before sw_flowd first started are dropped too, and
+  so are those of flows its table evicted when full (`sw_flowd -S` counts
+  them as `evicted`).
+- **What sw_flowd doesn't record** isn't matched either: UDP sent from a
+  fixed port (DHCP's 68, a server's own port) or from a port a local UDP
+  service listens on. Permit those by port, as in §6.1.
 
 ### 5.6 Sequence numbers
 
@@ -394,6 +435,15 @@ Each recipe shows lines to add to the policy file. They assume
 ### 6.1 Baseline for a VM that needs the internet
 
 Start every extended list with these, then add your services:
+
+```text
+acl 100 10 permit tcp any any reply
+acl 100 20 permit udp any any reply
+acl 100 30 permit udp any eq 67 any eq 68
+acl 100 40 permit icmp any any
+```
+
+The `reply` lines need sw_flowd (§5.5). Without it:
 
 ```text
 acl 100 10 permit tcp any any established
@@ -584,6 +634,7 @@ generation           4
 attached             eth0,eth1
 missing              eth2
 drop-ipv4-fragments  0
+flows                sw_flowd
 ```
 
 - **generation** counts applied policies ("none" before the first since
@@ -591,6 +642,8 @@ drop-ipv4-fragments  0
 - **attached**: the interfaces mini-fw runs on.
 - **missing**: interfaces the policy binds lists to that don't exist. Apply
   the policy again once they do.
+- **flows**: `sw_flowd` while `reply` rules read sw_flowd's table, `none`
+  without it (they match nothing then).
 
 ---
 
@@ -696,6 +749,8 @@ sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all 
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
 | DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
+| `reply` rules let nothing in; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`) | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release |
+| one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |

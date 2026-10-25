@@ -32,7 +32,7 @@ does today.** Where the two disagree, §10 explains why.
   through `libmfw.a`.
 - **Cisco IOS-style numbered ACLs**:
   - standard lists 1–99 match source IP only, and act as a blacklist;
-  - extended lists 100–199 match protocol, addresses, ports and TCP `established`, with implicit deny.
+  - extended lists 100–199 match protocol, addresses, ports, TCP `established`, and `reply` (a reply to a flow the host opened, in sw_flowd's table), with implicit deny.
 
 ### 1.2 What step 1 is not
 
@@ -214,7 +214,13 @@ other field is ignored, so a standard ACE applies to all IPv4 protocols.
    `sport` and `dport` are in range; `(0,0)` means any. If the ACE has
    `established`, the TCP flags must include ACK or RST. Every packet that
    reaches the extended list has its ports: non-first fragments never get
-   here.
+   here. If the ACE has `reply`, checked last: the packet, TCP with ACK or
+   RST or UDP, must be in sw_flowd's table as `{AF_INET, proto, saddr,
+   sport, dport}` (`struct sf_flow_key`), and its flow's `last_seen` within
+   the ACE's `reply_idle` of now: `mfw_policy_compile()` puts the
+   policy's `reply-idle-tcp` or `reply-idle-udp` there. Without
+   sw_flowd's table, `flows` is an empty map of the program's own, and
+   matches nothing.
 4. For ICMP and other protocols, port fields and flags are ignored.
 
 **CIDR match:** `(addr & mask) == (rule.addr & mask)` in network byte order.
@@ -272,10 +278,11 @@ All shared types are in `include/mfw.h`, fixed-width with explicit padding.
 | `direction` | `u8` | always `MFW_DIR_INGRESS` in step 1 (kept for ABI) |
 | `enabled` | `u8` | set to 1 by the parser; BPF scans by `n_std` / `n_ext` instead |
 | `kind` | `u8` | `MFW_ACL_STANDARD` = 1, `MFW_ACL_EXTENDED` = 2 |
-| `flags` | `u8` | `MFW_RULE_F_ESTABLISHED` (bit 0) |
+| `flags` | `u8` | `MFW_RULE_F_ESTABLISHED` (bit 0), `MFW_RULE_F_REPLY` (bit 1) |
 | `src`, `dst` | `mfw_cidr` | `addr` (network order) + `prefix` 0–32, normalized (host bits cleared) |
 | `sport`, `dport` | `mfw_port_range` | inclusive `min..max`, host order; `(0,0)` = any |
 | `rule_id` | `u32` | `(acl_id << 16) \| seq`, the same as the `acl_db` key |
+| `reply_idle` | `u32` | `reply` ACEs: the idle limit in seconds, from `set reply-idle-tcp` / `-udp`, filled in by `mfw_policy_compile()`; 0 otherwise. Was padding: the layout is unchanged |
 
 Port 0 cannot be filtered, because `(0,0)` is the "any" sentinel. The parser
 rejects `eq 0`.
@@ -311,6 +318,23 @@ Everything one interface enforces, compiled from its bindings:
 | (inner, not pinned) | ARRAY | `0` → `mfw_ruleset` | 1 | mfwd, once | mfw_tc |
 | `maps/config` | ARRAY | `0` → `mfw_config` | 1 | mfwd | mfw_tc |
 | `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | mfw_tc | mfwd |
+| `flows` (sw_flowd's `outbound`) | LRU_HASH | `sf_flow_key` → `sf_flow` | sw_flowd's | sw_flowd | mfw_tc |
+
+`flows` is sw_flowd's pinned table, `/sys/fs/bpf/seawall/flows/outbound`
+(Seawall proposal 0009), not one of mini-fw's pins. sw_flowd starts
+first: mfwd opens the pin when it starts, refuses a table whose type, key
+or value size is not `sw_flowd.h`'s, and binds it to every program it
+loads, the TC entry and each XDP copy, with `bpf_map__reuse_fd()`. An
+mfwd started without it warns; its programs get an empty map of their
+own, and `reply` matches nothing until an mfwd started with the table
+replaces them (§5.1). The programs hold the table, so a restart of
+sw_flowd changes nothing; `sw_flowd -P` makes a new one, which a restart
+of mfwd picks up. mini-fw only looks the table up. Its layout comes from
+sw_flowd's installed header, `<sw_flowd/sw_flowd.h>`, which mfwd and the
+BPF program build against (`SW_FLOWD_PREFIX`); libmfw does not need it.
+`reply` adds no map of mini-fw's own: its idle limits are in the ACEs
+(§4.1), so the pins of an mfwd from before `reply` are reused as they
+are.
 
 The maps are created by libbpf when mfwd first starts
 (`LIBBPF_PIN_BY_NAME` with pin root `<pinroot>/maps`) and reused by every
@@ -365,14 +389,17 @@ counters restart on such an upgrade while the rulesets and links stay.
 
 1. Check that the pin root's parent is on bpffs (`statfs` magic).
 2. Create `maps/` and `link/` with mode 0700.
-3. Open the embedded skeleton with pin root `maps/` and load it. libbpf
-   reuses existing map pins, or creates and pins new ones.
+3. Open sw_flowd's table pin, if there is one of its layout (§4.4).
+   Open the embedded skeleton with pin root `maps/`, bind that table to
+   `flows`, and load it. libbpf reuses existing map pins, or creates and
+   pins new ones. Every XDP copy loaded later binds the same table.
 4. Initialize `config` if `abi_version` is 0. If it holds a different ABI
    version, refuse to start (`mfwd -P` removes the old pins).
 5. **Upgrade attached interfaces:** every live link in `link/` gets the
    program just loaded, with `bpf_link_update` (atomic), and every
    classic TC filter too, replaced in one netlink request. Upgrading mfwd
-   therefore upgrades the BPF code without a gap.
+   therefore upgrades the BPF code without a gap, and an mfwd started
+   after sw_flowd moves every interface to programs that read its table.
 6. **Restore** the saved policy, if there is one. If the kernel still runs
    its generation (`config.generation`), it is simply taken over. If not
    (the pins were removed, e.g. by hand), it is applied again.
@@ -501,7 +528,7 @@ case-sensitive.
 | Request | Reply |
 |---------|-------|
 | `PING` | `OK` |
-| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c` |
+| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …`, every counter by name |
 | `SHOW` | `OK <n>` then the applied policy, n lines, canonical form |
 | `APPLY`, the policy lines, `END` | `OK <generation>[ missing=a,b]` |
@@ -553,10 +580,12 @@ line `END`, which would end the block early.
 | | `gt N` | `N+1..65535` |
 | | `lt N` | `1..N-1` |
 | flag | `established` (tcp only, last token) | `MFW_RULE_F_ESTABLISHED` |
+| | `reply` (tcp or udp, last token) | `MFW_RULE_F_REPLY` |
 
 Validation rejects: list numbers outside 1–199; destination, ports or
 protocol on standard lists; non-contiguous wildcards (`0.0.2.255`); prefixes
-above 32; ports on non-TCP/UDP protocols; `established` without `tcp`; port
+above 32; ports on non-TCP/UDP protocols; `established` without `tcp`;
+`reply` without `tcp` or `udp`, or after `established`; port
 0; inverted ranges; `gt 65535` and `lt 1`; and, on extended lists, a bare
 address without `host` or a wildcard.
 
@@ -589,7 +618,20 @@ acl 100 30 permit icmp any any              # ping replies, ICMP errors
 
 `established` is the classic stateless approximation: it lets through any
 TCP segment with ACK or RST set, including forged ones. It blocks only
-unsolicited SYNs. Conntrack is the real fix (§9).
+unsolicited SYNs. With sw_flowd running, `reply` is the better rule:
+
+```text
+acl 100 10 permit tcp any any reply         # replies to the host's TCP
+acl 100 20 permit udp any any reply         # and UDP from ephemeral ports
+acl 100 30 permit icmp any any
+```
+
+It matches only what sw_flowd recorded the host sending: a forged packet
+needs the flow's addresses and both ports. It fails closed: without
+sw_flowd, for connections opened before its first start, and for flows
+its full table evicted, the replies are dropped. The idle limits (`set
+reply-idle-tcp`, default a day; `set reply-idle-udp`, 180 s) end a flow
+that stays silent longer.
 
 ### 8.2 Fragments
 
@@ -671,9 +713,9 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 |-------|---------|-------|--------|
 | ACE parser | `make test` | nothing | wildcard→prefix, field values, normalization, canonical round trips, every rejection rule |
 | Policy | `make test` | nothing | parse and canonical form with comments and CRLF, every refusal with its line number, size limits (64/128 bound, 4096 total, 64 interfaces), compile |
-| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first: standard list only, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), stats |
-| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart keeps policy and filtering, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, purge, no daemon |
-| End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic through mfwd between two network namespaces over two veth pairs: standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, filtering while mfwd is down and after a restart, no TC filters, refused policies, purge |
+| Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first: standard list only, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), `reply` with and without a flow table (ports, address, flags, idle limits, the ACE's other fields), stats |
+| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart keeps policy and filtering, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, sw_flowd's table bound only at start (by the TC entry and every XDP copy), and refused for its layout, purge, no daemon |
+| End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic through mfwd between two network namespaces over two veth pairs: standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, filtering while mfwd is down and after a restart, with sw_flowd (else skipped): its table taken when mfwd starts after it, `reply` for outbound TCP and UDP, an ACK flood dropped, recording through sw_flowd's pinned link while it is stopped, nothing for an mfwd started after `sw_flowd -P`; no TC filters, refused policies, purge |
 
 Notes:
 
@@ -702,7 +744,7 @@ Notes:
 | Hooks | XDP + TC ingress + TC egress | XDP in libxdp's dispatcher, or TC ingress (tcx) where another program holds XDP | Local VM only, no egress. The dispatcher shares the XDP hook with the DDoS gate (voidgate), first |
 | Extended list | TC ingress and egress | TC ingress, after the standard list | A stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
-| Conntrack | Cilium-style, TC | none | Deferred; `established` as a stopgap |
+| Conntrack | Cilium-style, TC | none; `reply` reads sw_flowd's table of the host's flows | Seawall proposal 0009: one egress table shared with voidgate; `established` without it |
 | Fragment tracking | Cilium-style port recovery, TC | none; non-first fragments skip the extended list (§8.2), TCP offset 1 dropped | Enough for local traffic; recovery deferred |
 | Control plane | CLI loader compiling ACEs into the maps per command | mfwd daemon, whole-policy `APPLY` over a socket; `mfw` is a client | One writer; whole-policy checks; front ends (sw_configd) link `libmfw` |
 | ACL definitions | not specified (examples define lists before attach) | in the policy; mfwd saves the applied one in `/run/mfwd/policy` | The front end (or a policy file) is the source of truth |

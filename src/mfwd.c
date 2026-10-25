@@ -9,6 +9,7 @@
  *   PING                     OK
  *   STATUS                   OK generation=N drop-ipv4-fragments=0|1 attached=a,b missing=c
  *                            degraded=d (at TC: another program holds XDP)
+ *                            flows=sw_flowd|none (what "reply" ACEs read)
  *   STATS                    OK xdp_pass=N xdp_drop=N ...
  *   SHOW                     OK <n>, then the applied policy in n lines
  *   APPLY                    OK <generation>[ missing=a,b]
@@ -259,8 +260,9 @@ static void status(struct mfwd *d, char **reply)
     }
     mfw_dp_get_config(&d->dp, &cfg);
     if (asprintf(reply, "OK generation=%u drop-ipv4-fragments=%u attached=%s missing=%s "
-                 "degraded=%s\n", d->policy ? d->generation : 0, cfg.drop_ipv4_fragments,
-                 attached, missing, degraded) < 0)
+                 "degraded=%s flows=%s\n", d->policy ? d->generation : 0,
+                 cfg.drop_ipv4_fragments, attached, missing, degraded,
+                 d->dp.flows_fd >= 0 ? "sw_flowd" : "none") < 0)
         *reply = NULL;
 }
 

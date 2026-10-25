@@ -123,7 +123,9 @@ acl 110 10 permit icmp any any
 bind d0 in 10
 bind d0 in 100
 bind d1 in 110
-set drop-ipv4-fragments 0"
+set drop-ipv4-fragments 0
+set reply-idle-tcp 86400
+set reply-idle-udp 180"
 expect ok "check accepts it" mfw check <(echo "$POLICY")
 expect ok "stats" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
 
@@ -158,9 +160,11 @@ same "no newline" "$(raw 'PING')" "ERR badreq request not complete"
 same "too long" "$(raw '' huge)" "ERR badreq request too long"
 same "too slow" "$(raw 'PI' hold)" "ERR badreq request not complete in time"
 same "raw APPLY" "$(raw 'APPLY\nbind d2 in 100\nEND\n')" "OK 5"
-same "SHOW framing" "$(raw 'SHOW\n')" "OK 2
+same "SHOW framing" "$(raw 'SHOW\n')" "OK 4
 bind d2 in 100
-set drop-ipv4-fragments 0"
+set drop-ipv4-fragments 0
+set reply-idle-tcp 86400
+set reply-idle-udp 180"
 same "mfwd still serves" "$(raw 'PING\n')" "OK"
 
 echo "== restart keeps the policy and the filtering"
@@ -244,6 +248,45 @@ rm -rf "$PINS"
 start
 same "one program in d0's after lost pins" "$(xdp_in d0)" 1
 fi
+
+echo "== sw_flowd's table"
+# stand-ins for sw_flowd's pin, on the test's own bpffs; real traffic is
+# in scripts/smoke-test.sh. mfwd binds the table when it starts.
+FLOWS=/sys/fs/bpf/seawall/flows
+# the ids of the maps mini-fw's loaded programs use
+prog_maps() { bpftool -j prog show | python3 -c '
+import json, sys
+print(" ".join(str(m) for p in json.load(sys.stdin)
+               if p.get("name") in ("mfw_tc", "mfw_xdp") for m in p.get("map_ids", [])))'; }
+map_id() { bpftool -j map show pinned "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'; }
+grep -q 'no sw_flowd flow table' "$LOG" && ok "log: no table" || bad "log: no table"
+same "flows: none" "$(field flows)" none
+mkdir -p "$FLOWS"
+bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 entries 1024 name outbound
+sleep 1.5
+same "a table that comes later is not picked up" "$(field flows)" none
+stop
+start
+same "flows: sw_flowd after a restart" "$(field flows)" sw_flowd
+grep -q "reading sw_flowd's flow table (1024 flows)" "$LOG" && ok "log: reading" || bad "log: reading"
+id=$(map_id "$FLOWS/outbound")
+[[ " $(prog_maps) " == *" $id "* ]] && ok "the loaded programs use the pinned table" \
+    || bad "the loaded programs use the pinned table ($id not in $(prog_maps))"
+if [[ -z ${MFW_NO_XDP:-} ]]; then
+    # each interface's copy in its dispatcher, not only the TC entry
+    for i in d0 d1; do
+        xid=$(in_ns xdp-loader status "$i" 2>/dev/null | awk '$3 == "mfw_xdp" { print $4 }')
+        [[ -n $xid ]] && bpftool -j prog show id "$xid" | grep -q "\"map_ids\":\[[0-9,]*\b$id\b" \
+            && ok "$i's XDP copy uses it" || bad "$i's XDP copy uses it (prog '$xid')"
+    done
+fi
+rm "$FLOWS/outbound"
+bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 16 entries 1024 name outbound
+stop
+start
+same "another layout is refused" "$(field flows)" none
+grep -q "is not the layout this mfwd reads" "$LOG" && ok "log: refused" || bad "log: refused"
+rm -rf "$FLOWS"
 
 echo "== purge"
 stop

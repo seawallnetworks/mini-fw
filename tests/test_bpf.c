@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -25,8 +26,10 @@
 
 #include "mfw_policy.h"
 #include "mfw.skel.h"
+#include <sw_flowd/sw_flowd.h>
 
 static struct mfw_bpf *skel;
+static int flows_table;          /* sw_flowd's, as mfwd binds it at load */
 static int failures;
 static __u32 if0, if1;           /* the dummy interfaces mfwt0, mfwt1 */
 
@@ -196,6 +199,9 @@ static void add(const char *line)
         return;
     }
     r.direction = MFW_DIR_INGRESS;
+    /* as mfw_policy_compile() sets it: an hour for TCP, a minute for UDP */
+    if (r.flags & MFW_RULE_F_REPLY)
+        r.reply_idle = r.proto == MFW_PROTO_TCP ? 3600 : 60;
     if (r.kind == MFW_ACL_STANDARD) {
         rs.std_acl = r.acl_id;
         rs.std[rs.n_std++] = r;
@@ -331,6 +337,83 @@ static void test_established(void)
     CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x12) == TC_ACT_UNSPEC, "SYN-ACK ok");
     CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x10) == TC_ACT_UNSPEC, "ACK ok");
     CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == TC_ACT_UNSPEC, "RST ok");
+}
+
+/* bpf_ktime_get_ns()'s clock */
+static __u64 now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/* A flow the host opened, as sw_flowd records it: to raddr:rport from
+ * lport, last out ago_s seconds ago. */
+static void flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
+                     __u16 lport, __u64 ago_s)
+{
+    struct sf_flow_key k = { .family = SF_FAMILY_V4, .protocol = proto,
+                             .rport = htons(rport), .lport = htons(lport) };
+    struct sf_flow f = { .last_seen = now_ns() - ago_s * 1000000000ULL };
+    __be32 a = inet_addr(raddr);
+
+    memcpy(k.raddr, &a, 4);
+    if (bpf_map_update_elem(table, &k, &f, BPF_ANY)) {
+        perror("flow_add");
+        failures++;
+    }
+}
+
+/* "reply": only replies to flows in sw_flowd's table, within the idle
+ * limits; nothing while the table is empty, as without sw_flowd. */
+static void test_reply(void)
+{
+    int table = flows_table;
+
+    reset();
+    add("100 permit tcp any any reply");
+    add("100 permit udp any any reply");
+    commit();
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "empty table: reply matches nothing");
+
+    flow_add(table, IPPROTO_TCP, "1.1.1.1", 443, 40000, 0);
+    flow_add(table, IPPROTO_TCP, "1.1.1.2", 443, 40001, 7200);   /* idle 2 h */
+    flow_add(table, IPPROTO_UDP, "8.8.8.8", 53, 50000, 10);
+    flow_add(table, IPPROTO_UDP, "8.8.4.4", 53, 50001, 120);     /* idle 2 min */
+
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x12) == TC_ACT_UNSPEC, "SYN-ACK of a flow the host opened");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x10) == TC_ACT_UNSPEC, "ACK of it");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x04) == TC_ACT_UNSPEC, "RST of it");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x02) == TC_ACT_SHOT, "a SYN is no reply");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40002,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "ACK to another local port");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 444, .dport = 40000,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "ACK from another remote port");
+    CHECK(TC(.src = "1.1.1.3", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "ACK from another address");
+    CHECK(TC(.src = "1.1.1.2", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40001,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "a flow idle past reply-idle-tcp");
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 50000)
+          == TC_ACT_UNSPEC, "UDP reply");
+    CHECK(TC(.src = "8.8.8.8", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 50001)
+          == TC_ACT_SHOT, "UDP to another local port");
+    CHECK(TC(.src = "8.8.4.4", .dst = "10.0.0.5", UDP, .sport = 53, .dport = 50001)
+          == TC_ACT_SHOT, "a UDP flow idle past reply-idle-udp");
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", UDP, .sport = 443, .dport = 40000)
+          == TC_ACT_SHOT, "UDP doesn't match a TCP flow");
+
+    /* the ACE's other fields still apply: the lookup is last */
+    reset();
+    add("100 permit tcp host 9.9.9.9 any reply");
+    commit();
+    CHECK(TC(.src = "1.1.1.1", .dst = "10.0.0.5", TCP, .sport = 443, .dport = 40000,
+             .tcp_flags = 0x10) == TC_ACT_SHOT, "reply from outside the ACE's source");
 }
 
 static void test_fragments(void)
@@ -473,6 +556,15 @@ int main(void)
     }
     bpf_object__for_each_map(m, skel->obj)
         bpf_map__set_pin_path(m, NULL);  /* private maps: no pins */
+    /* a table of sw_flowd's layout and its own size, bound as mfwd binds
+     * the pinned one */
+    flows_table = bpf_map_create(BPF_MAP_TYPE_LRU_HASH, "outbound",
+                                 sizeof(struct sf_flow_key), sizeof(struct sf_flow),
+                                 1024, NULL);
+    if (flows_table < 0 || bpf_map__reuse_fd(skel->maps.flows, flows_table)) {
+        perror("flow table");
+        return 1;
+    }
     if (mfw_bpf__load(skel)) {
         fprintf(stderr, "load failed (root needed)\n");
         return 1;
@@ -483,6 +575,7 @@ int main(void)
     test_extended();
     test_combined();
     test_established();
+    test_reply();
     test_fragments();
     test_full_tables();
     test_per_interface();

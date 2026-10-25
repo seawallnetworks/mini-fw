@@ -133,13 +133,27 @@ static int parse_bind(struct mfw_policy *p, struct bind_lines *bl, int argc,
     return 0;
 }
 
-/* set drop-ipv4-fragments 0|1 */
+/* set drop-ipv4-fragments 0|1, set reply-idle-tcp|reply-idle-udp N */
 static int parse_set(struct mfw_policy *p, int argc, char **argv, int line,
                      char *err, size_t len)
 {
+    long v;
+
+    if (argc == 3 && (!strcmp(argv[1], "reply-idle-tcp") ||
+                      !strcmp(argv[1], "reply-idle-udp"))) {
+        if (parse_num(argv[2], 1, MFW_REPLY_IDLE_MAX, &v))
+            return fail(err, len, line, "%s must be 1-%d seconds", argv[1],
+                        MFW_REPLY_IDLE_MAX);
+        if (!strcmp(argv[1], "reply-idle-tcp"))
+            p->reply_idle_tcp = v;
+        else
+            p->reply_idle_udp = v;
+        return 0;
+    }
     if (argc != 3 || strcmp(argv[1], "drop-ipv4-fragments") ||
         (strcmp(argv[2], "0") && strcmp(argv[2], "1")))
-        return fail(err, len, line, "expected: set drop-ipv4-fragments 0|1");
+        return fail(err, len, line, "expected: set drop-ipv4-fragments 0|1, "
+                    "or set reply-idle-tcp|reply-idle-udp <seconds>");
     p->drop_ipv4_fragments = argv[2][0] == '1';
     return 0;
 }
@@ -221,6 +235,8 @@ int mfw_policy_parse(const char *text, struct mfw_policy *p,
     int n = 0, rc = 0;
 
     memset(p, 0, sizeof(*p));
+    p->reply_idle_tcp = MFW_REPLY_IDLE_TCP;
+    p->reply_idle_udp = MFW_REPLY_IDLE_UDP;
     copy = strdup(text);
     p->rules = calloc(MFW_ACL_MAX, sizeof(*p->rules));
     if (!copy || !p->rules) {
@@ -277,11 +293,16 @@ void mfw_policy_compile(const struct mfw_policy *p, int i, struct mfw_ruleset *r
     /* a bound extended list denies what it does not permit, even when empty */
     if (b->ext_acl)
         rs->n_ext = copy_list(p, b->ext_acl, rs->ext, MFW_MAX_EXT_ACES);
+    /* each "reply" ACE carries its protocol's idle limit: no map for it */
+    for (int j = 0; j < rs->n_ext; j++)
+        if (rs->ext[j].flags & MFW_RULE_F_REPLY)
+            rs->ext[j].reply_idle = rs->ext[j].proto == MFW_PROTO_TCP
+                                    ? p->reply_idle_tcp : p->reply_idle_udp;
 }
 
 char *mfw_policy_format(const struct mfw_policy *p)
 {
-    size_t size = (size_t)p->n_rules * 160 + (size_t)p->n_binds * 2 * 48 + 64;
+    size_t size = (size_t)p->n_rules * 160 + (size_t)p->n_binds * 2 * 48 + 128;
     char *buf = malloc(size), ace[160];
     size_t off = 0;
 
@@ -301,7 +322,8 @@ char *mfw_policy_format(const struct mfw_policy *p)
             off += snprintf(buf + off, size - off, "bind %s in %u\n",
                             p->binds[i].ifname, p->binds[i].ext_acl);
     }
-    snprintf(buf + off, size - off, "set drop-ipv4-fragments %d\n",
-             p->drop_ipv4_fragments);
+    snprintf(buf + off, size - off, "set drop-ipv4-fragments %d\n"
+             "set reply-idle-tcp %u\nset reply-idle-udp %u\n",
+             p->drop_ipv4_fragments, p->reply_idle_tcp, p->reply_idle_udp);
     return buf;
 }
