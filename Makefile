@@ -12,11 +12,16 @@ PREFIX    ?= /usr/local/seawall
 # its program need it, not libmfw.a.
 SW_FLOWD_PREFIX ?= $(PREFIX)
 SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
+# libpkt, the stack's packet parser (Seawall proposal 0010):
+# <libpkt/parse.h>, which libpkt's "make install" puts there. Only the
+# BPF program needs it.
+LIBPKT_PREFIX ?= $(PREFIX)
+LIBPKT_H := $(LIBPKT_PREFIX)/include/libpkt/parse.h
 
 CFLAGS     ?= -O2 -g -Wall -Wextra
 CFLAGS     += -Iinclude -Isrc -MMD -MP
 BPF_CFLAGS := -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Iinclude \
-              -I$(SW_FLOWD_PREFIX)/include \
+              -I$(SW_FLOWD_PREFIX)/include -I$(LIBPKT_PREFIX)/include \
               $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH))
 BPFDIR     := src/bpf
 # mfwd is linked fully static (libxdp, which carries its dispatcher,
@@ -36,12 +41,18 @@ all: mfwd mfw libmfw.a
 build:
 	mkdir -p $@
 
-build/mfw.bpf.o: $(BPFDIR)/mfw.bpf.c include/mfw.h $(SW_FLOWD_H) | build
+build/mfw.bpf.o: $(BPFDIR)/mfw.bpf.c include/mfw.h $(SW_FLOWD_H) $(LIBPKT_H) \
+		| build
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 $(SW_FLOWD_H):
 	@echo "$@ missing: install sw_flowd's header first" \
 	    "(make -C ../sw_flowd install-header), or set SW_FLOWD_PREFIX" >&2
+	@exit 1
+
+$(LIBPKT_H):
+	@echo "$@ missing: install libpkt first" \
+	    "(make -C ../libpkt install), or set LIBPKT_PREFIX" >&2
 	@exit 1
 
 src/mfw.skel.h: build/mfw.bpf.o

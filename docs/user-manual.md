@@ -610,7 +610,7 @@ tcp_frag_off1      0
 | `ext_permit` | accepted by an extended `permit` rule |
 | `ext_deny` | dropped by an extended `deny` rule |
 | `ext_implicit_deny` | dropped because no extended rule matched |
-| `parse_err` | dropped because the IPv4 or VLAN header was malformed |
+| `parse_err` | dropped because the frame, or its VLAN, IPv4, TCP or UDP header, was cut short or malformed |
 | `frag_drop` | dropped fragments (`drop-ipv4-fragments` is 1) |
 | `non_ipv4` | non-IPv4 packets passed through unchecked |
 | `tcp_frag_off1` | dropped TCP fragments at offset 1 (an attack, RFC 1858) |

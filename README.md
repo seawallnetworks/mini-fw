@@ -66,7 +66,10 @@ fully static, so it needs no libraries on the machine), bpftool, Linux ≥ 6.1 w
 `/sys/fs/bpf`, and sw_flowd's header (`<sw_flowd/sw_flowd.h>`, the
 layout of its table: `make -C ../sw_flowd install-header`, or its `make
 install`, puts it in `/usr/local/seawall/include`; `SW_FLOWD_PREFIX`
-points elsewhere). `libmfw.a` alone doesn't need it. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
+points elsewhere), and libpkt's headers (`<libpkt/parse.h>`, the
+stack's packet parser: `make -C ../libpkt install` puts them in
+`/usr/local/seawall/include`; `LIBPKT_PREFIX` points elsewhere).
+`libmfw.a` alone needs neither. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
 attaches at XDP, in libxdp's dispatcher; on an interface where a program
 that is not a dispatcher holds the XDP hook, at TC ingress: with tcx on 6.6
 and later, and with classic TC (a cls_bpf filter on clsact) before. The

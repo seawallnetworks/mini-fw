@@ -23,11 +23,7 @@
  * mini-fw still runs; "drop" is TC_ACT_SHOT (TCX_DROP).
  */
 #include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
 #include <linux/in.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
 #include <linux/pkt_cls.h>
 #include <bpf/bpf_helpers.h>
 #include <xdp/xdp_helpers.h>
@@ -36,24 +32,11 @@
 #include "mfw.h"
 #include <sw_flowd/sw_flowd.h>
 
-/* The most parse_pkt() reads: Ethernet, 2 VLAN tags, IPv4 with options,
- * TCP. */
-#define MFW_HDR_MAX  (14 + 2 * 4 + 60 + 20)
-
-#ifndef ETH_P_8021Q
-#define ETH_P_8021Q  0x8100
-#endif
-#ifndef ETH_P_8021AD
-#define ETH_P_8021AD 0x88A8
-#endif
-
-#define IP_MF     0x2000
-#define IP_OFFSET 0x1FFF
-
-struct vlan_hdr {
-    __be16 h_vlan_TCI;
-    __be16 h_vlan_encapsulated_proto;
-};
+/* libpkt, the stack's parser (Seawall proposal 0010): Ethernet, up to two
+ * VLAN tags, IPv4, TCP/UDP. IPv4 only until mini-fw filters IPv6: an
+ * IPv6 frame is PKT_NOT_IP, as any other ethertype. */
+#define PKT_NO_IPV6
+#include <libpkt/parse.h>
 
 /* ifindex → inner map holding that interface's one mfw_ruleset. Sizes,
  * not BTF types: clang emits struct mfw_ruleset only as a forward
@@ -99,26 +82,6 @@ struct {
     __type(value, struct sf_flow);
 } flows SEC(".maps");
 
-struct pkt_meta {
-    __be32 saddr;
-    __be32 daddr;
-    __u16  sport;     /* host order; 0 unless TCP/UDP */
-    __u16  dport;
-    __u8   proto;
-    __u8   tcp_flags; /* byte 13 of the TCP header */
-    __u8   is_frag;   /* MF set or offset != 0 */
-    __u8   pad;
-};
-
-/* parse_pkt() results; negative ones are dropped. */
-enum {
-    PARSE_OK               = 0,   /* IPv4; ports filled in for TCP/UDP */
-    PARSE_NOT_IPV4         = 1,   /* other ethertype, or runt frame */
-    PARSE_NONFIRST_FRAG    = 2,   /* offset != 0: no L4 header */
-    PARSE_MALFORMED        = -1,  /* truncated or invalid header */
-    PARSE_TCP_OVERLAP_FRAG = -2,  /* TCP fragment at offset 1 (RFC 1858) */
-};
-
 /* mfw_judge()'s verdict; each entry turns it into its hook's. */
 enum {
     MFW_PASS = 0,
@@ -131,9 +94,6 @@ enum {
     MATCH_MISS    = -1,  /* list bound, no explicit ACE matched */
     MATCH_UNBOUND = -2,  /* no access-group for this list */
 };
-
-#define TCP_FLAG_RST 0x04
-#define TCP_FLAG_ACK 0x10
 
 static __always_inline void stat_inc(__u32 id)
 {
@@ -151,87 +111,13 @@ static __always_inline int cfg_drop_ipv4_fragments(void)
     return cfg && cfg->drop_ipv4_fragments;
 }
 
-/* Ethernet → (≤2 VLAN tags) → IPv4 → TCP/UDP ports. */
-static __always_inline int parse_pkt(void *data, void *data_end,
-                                     struct pkt_meta *p)
+/* An IPv4 address of pkt_meta's, which keeps it in bytes. */
+static __always_inline __be32 ipv4_addr(const __u8 *a)
 {
-    struct ethhdr *eth = data;
-    __u32 off = sizeof(*eth);
-    __be16 proto;
-    int i;
+    __be32 addr;
 
-    if ((void *)(eth + 1) > data_end)
-        return PARSE_NOT_IPV4;  /* runt frame: not ours to judge */
-    proto = eth->h_proto;
-
-#pragma unroll
-    for (i = 0; i < 2; i++) {
-        struct vlan_hdr *vh;
-
-        if (proto != bpf_htons(ETH_P_8021Q) && proto != bpf_htons(ETH_P_8021AD))
-            break;
-        vh = data + off;
-        if ((void *)(vh + 1) > data_end)
-            return PARSE_MALFORMED;
-        proto = vh->h_vlan_encapsulated_proto;
-        off += sizeof(*vh);
-    }
-    if (proto != bpf_htons(ETH_P_IP))
-        return PARSE_NOT_IPV4;
-
-    struct iphdr *ip = data + off;
-
-    if ((void *)(ip + 1) > data_end)
-        return PARSE_MALFORMED;
-    /* The kernel's own IPv4 sanity check (ip_rcv_core()), made early:
-     * frames the stack would drop as header errors, not a protocol
-     * filter. Other ethertypes passed above, and IP protocols other
-     * than TCP/UDP are left to the lists. */
-    if (ip->version != 4 || ip->ihl < 5)
-        return PARSE_MALFORMED;
-    __u32 ihl = ip->ihl * 4;
-
-    if (data + off + ihl > data_end)
-        return PARSE_MALFORMED;
-
-    __u16 frag = bpf_ntohs(ip->frag_off);
-
-    p->saddr = ip->saddr;
-    p->daddr = ip->daddr;
-    p->proto = ip->protocol;
-    p->is_frag = (frag & (IP_MF | IP_OFFSET)) != 0;
-    p->sport = p->dport = 0;
-    p->tcp_flags = 0;
-
-    /* A TCP fragment at offset 1 (8 bytes) can only exist to overwrite
-     * the flags and window of the first fragment's header after it was
-     * checked (RFC 1858 §3.2); no real stack sends one. */
-    if ((frag & IP_OFFSET) == 1 && p->proto == IPPROTO_TCP)
-        return PARSE_TCP_OVERLAP_FRAG;
-    if (frag & IP_OFFSET)
-        return PARSE_NONFIRST_FRAG;
-
-    void *l4 = data + off + ihl;
-
-    if (p->proto == IPPROTO_TCP) {
-        struct tcphdr *th = l4;
-
-        /* A first fragment too short for its ports would slip past
-         * port ACEs (tiny-fragment attack, RFC 1858). */
-        if ((void *)(th + 1) > data_end)
-            return PARSE_MALFORMED;
-        p->sport = bpf_ntohs(th->source);
-        p->dport = bpf_ntohs(th->dest);
-        p->tcp_flags = ((__u8 *)th)[13];
-    } else if (p->proto == IPPROTO_UDP) {
-        struct udphdr *uh = l4;
-
-        if ((void *)(uh + 1) > data_end)
-            return PARSE_MALFORMED;
-        p->sport = bpf_ntohs(uh->source);
-        p->dport = bpf_ntohs(uh->dest);
-    }
-    return PARSE_OK;
+    __builtin_memcpy(&addr, a, sizeof(addr));
+    return addr;
 }
 
 static __always_inline int cidr_match(__be32 addr, const struct mfw_cidr *c)
@@ -277,9 +163,10 @@ static __always_inline int is_reply(const struct mfw_rule *r, const struct pkt_m
 {
     __u64 seen;
 
-    if (p->proto == IPPROTO_TCP && !(p->tcp_flags & (TCP_FLAG_ACK | TCP_FLAG_RST)))
+    if (p->l4_proto == IPPROTO_TCP && !(p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)))
         return 0;
-    seen = sf_flow_seen(&flows, SF_FAMILY_V4, p->proto, &p->saddr, p->sport, p->dport);
+    seen = sf_flow_seen(&flows, SF_FAMILY_V4, p->l4_proto, p->addr_src,
+                        bpf_ntohs(p->sport), bpf_ntohs(p->dport));
     return seen && bpf_ktime_get_ns() - seen < r->reply_idle * 1000000000ULL;
 }
 
@@ -290,16 +177,18 @@ __noinline int mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_meta
 {
     if (!r || !p)
         return 0;
-    if (r->proto != MFW_PROTO_ANY && r->proto != p->proto)
+    if (r->proto != MFW_PROTO_ANY && r->proto != p->l4_proto)
         return 0;
-    if (!cidr_match(p->saddr, &r->src) || !cidr_match(p->daddr, &r->dst))
+    if (!cidr_match(ipv4_addr(p->addr_src), &r->src) ||
+        !cidr_match(ipv4_addr(p->addr_dst), &r->dst))
         return 0;
-    if (p->proto != IPPROTO_TCP && p->proto != IPPROTO_UDP)
+    if (p->l4_proto != IPPROTO_TCP && p->l4_proto != IPPROTO_UDP)
         return 1;  /* ports ignored for ICMP and other protocols */
-    if (!port_in_range(p->sport, &r->sport) || !port_in_range(p->dport, &r->dport))
+    if (!port_in_range(bpf_ntohs(p->sport), &r->sport) ||
+        !port_in_range(bpf_ntohs(p->dport), &r->dport))
         return 0;
     if ((r->flags & MFW_RULE_F_ESTABLISHED) &&
-        !(p->tcp_flags & (TCP_FLAG_ACK | TCP_FLAG_RST)))
+        !(p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)))
         return 0;
     /* last: the one lookup, only for a packet the rest matched */
     if ((r->flags & MFW_RULE_F_REPLY) && !is_reply(r, p))
@@ -339,34 +228,47 @@ static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex)
     return bpf_map_lookup_elem(inner, &zero);
 }
 
-/* The verdict on a packet that arrived on ifindex, from what parse_pkt()
- * returned for it: pr, and p. The entries parse, each from its own
+/* The verdict on a packet that arrived on ifindex, from what pkt_parse()
+ * returned for it: rc, and p. The entries parse, each from its own
  * context; nothing here reads the packet. */
-static __always_inline int mfw_judge(int pr, const struct pkt_meta *p, __u32 ifindex)
+static __always_inline int mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex)
 {
     const struct mfw_ruleset *rs;
-    int std;
+    int std, nonfirst;
 
-    if (pr == PARSE_NOT_IPV4) {
+    /* libpkt reports how far it got; what that is worth is mini-fw's.
+     * Another ethertype is not ours to judge. */
+    if (rc == PKT_NOT_IP) {
         stat_inc(MFW_STAT_NON_IPV4);
         goto pass;
     }
-    if (pr == PARSE_MALFORMED) {
+    /* The kernel's own IPv4 sanity check (ip_rcv_core()), made early, and
+     * any header cut short, a VLAN tag's included: a first fragment too
+     * short for its ports would slip past port ACEs (tiny-fragment
+     * attack, RFC 1858). */
+    if (rc == PKT_SHORT || rc == PKT_BAD_L3) {
         stat_inc(MFW_STAT_PARSE_ERR);
         goto drop;
     }
-    if (pr == PARSE_TCP_OVERLAP_FRAG) {
+    /* PKT_OK, or PKT_NO_L4: a non-first fragment, or an IP protocol
+     * without ports. Only PKT_NO_L4 can be a non-first fragment; asked
+     * of PKT_OK too, the verifier would follow both answers. A TCP
+     * fragment at offset 1 (8 bytes) can only exist to overwrite the
+     * flags and window of the first fragment's header after it was
+     * checked (RFC 1858 §3.2); no real stack sends one. */
+    nonfirst = rc == PKT_NO_L4 && p->frag_off != 0;
+    if (nonfirst && p->frag_off == 1 && p->l4_proto == IPPROTO_TCP) {
         stat_inc(MFW_STAT_TCP_FRAG_OFF1);
         goto drop;
     }
-    if (p->is_frag && cfg_drop_ipv4_fragments()) {
+    if ((p->flags & PKT_F_FRAG) && cfg_drop_ipv4_fragments()) {
         stat_inc(MFW_STAT_FRAG_DROP);
         goto drop;
     }
     rs = ruleset_of(ifindex);
 
     /* 1. Standard blacklist: only an explicit deny is final. */
-    std = match_std(rs, p->saddr);
+    std = match_std(rs, ipv4_addr(p->addr_src));
     if (std == MATCH_DENY) {
         stat_inc(MFW_STAT_STD_DENY);
         goto drop;
@@ -376,7 +278,7 @@ static __always_inline int mfw_judge(int pr, const struct pkt_meta *p, __u32 ifi
      * carries the ports and is filtered, and without it the kernel cannot
      * reassemble the datagram, so the rest expires in its reassembly
      * queue. */
-    if (pr == PARSE_NONFIRST_FRAG)
+    if (nonfirst)
         goto pass;
 
     /* 2. Extended list decides everything else. */
@@ -414,10 +316,10 @@ struct {
 SEC("xdp.frags")
 int mfw_xdp(struct xdp_md *ctx)
 {
-    struct pkt_meta p = {};
-    int pr = parse_pkt((void *)(long)ctx->data, (void *)(long)ctx->data_end, &p);
+    struct pkt_meta p;
+    int rc = pkt_parse((void *)(long)ctx->data, (void *)(long)ctx->data_end, &p);
 
-    return mfw_judge(pr, &p, ctx->ingress_ifindex) == MFW_DROP ? XDP_DROP : XDP_PASS;
+    return mfw_judge(rc, &p, ctx->ingress_ifindex) == MFW_DROP ? XDP_DROP : XDP_PASS;
 }
 
 SEC("tcx/ingress")
@@ -425,33 +327,32 @@ int mfw_tc(struct __sk_buff *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
-    struct pkt_meta p = {};
-    int pr;
+    struct pkt_meta p;
+    int rc;
 
     /* After GRO the headers may not all be in the skb's linear part,
      * the only part a TC program reads directly. Parse what is there
-     * first, and pull only if that fails and the linear part ends
-     * before the bytes parse_pkt() could use; if it already holds
-     * them, the packet is malformed for real. Pulling up front would
-     * hit every packet whose linear part is under MFW_HDR_MAX, even
-     * one that holds all its headers, and the pull makes the skb
-     * writable, copying the head of a cloned skb. A pull that fails
-     * leaves a short view, which the second parse drops as malformed. */
-    pr = parse_pkt(data, data_end, &p);
-    if (pr == PARSE_MALFORMED) {
-        __u32 want = ctx->len < MFW_HDR_MAX ? ctx->len : MFW_HDR_MAX;
+     * first, and pull only if a header was cut short and the linear
+     * part ends before the bytes pkt_parse() could use (PKT_HDR_MAX);
+     * if it already holds them, the packet is short for real. Pulling
+     * up front would hit every packet whose linear part is under
+     * PKT_HDR_MAX, even one that holds all its headers, and the pull
+     * makes the skb writable, copying the head of a cloned skb. A pull
+     * that fails leaves a short view, which the second parse reports
+     * short again. */
+    rc = pkt_parse(data, data_end, &p);
+    if (rc == PKT_SHORT) {
+        __u32 want = ctx->len < PKT_HDR_MAX ? ctx->len : PKT_HDR_MAX;
 
         if (data + want > data_end) {
             bpf_skb_pull_data(ctx, want);
             data = (void *)(long)ctx->data;
             data_end = (void *)(long)ctx->data_end;
-            __builtin_memset(&p, 0, sizeof(p));
-            pr = parse_pkt(data, data_end, &p);
+            rc = pkt_parse(data, data_end, &p);
         }
     }
 
-
-    if (mfw_judge(pr, &p, ctx->ingress_ifindex) == MFW_DROP)
+    if (mfw_judge(rc, &p, ctx->ingress_ifindex) == MFW_DROP)
         return TC_ACT_SHOT;
     return TC_ACT_UNSPEC;
 }

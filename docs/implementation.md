@@ -102,7 +102,7 @@ Key properties:
 include/mfw.h          shared UAPI: mfw_rule, mfw_ruleset, mfw_config, stat ids
 include/mfw_policy.h   libmfw: ACE and policy parsing, checks, compile, canonical form
 include/mfw_client.h   libmfw: the mfwd client
-src/bpf/mfw.bpf.c      TC ingress program: parser, standard + extended matching
+src/bpf/mfw.bpf.c      XDP and TC ingress program: libpkt's status to a verdict, standard + extended matching
 src/acl_parse.c        libmfw: Cisco ACE parser and formatter
 src/policy.c           libmfw: whole policies
 src/client.c           libmfw: socket client
@@ -131,7 +131,7 @@ privileges; `make install` puts it and the three public headers under
 frame
   │
   ├─ parse Ethernet; peel up to 2 VLAN tags (802.1Q / 802.1AD)
-  │     ├─ shorter than an Ethernet header ............. PASS   (non_ipv4)
+  │     ├─ shorter than an Ethernet header ............. DROP   (parse_err)
   │     ├─ truncated VLAN tag ............................ DROP   (parse_err)
   │     └─ inner ethertype ≠ IPv4 (ARP, IPv6, 3rd tag) ... PASS   (non_ipv4)
   │
@@ -166,13 +166,26 @@ Rules to remember:
 
 ### 3.2 Parsing details
 
+Parsing is libpkt's (Seawall proposal 0010), built with `PKT_NO_IPV6`, so
+an IPv6 frame is `PKT_NOT_IP` like any other ethertype. `pkt_parse()`
+fills a `struct pkt_meta` and returns how far it got; `mfw_judge()` maps
+that to mini-fw's policy:
+
+| libpkt status | mini-fw |
+|---------------|---------|
+| `PKT_NOT_IP` | PASS (`non_ipv4`) |
+| `PKT_SHORT`, `PKT_BAD_L3` | DROP (`parse_err`) |
+| `PKT_NO_L4`, `frag_off` ≠ 0 | non-first fragment: offset 1 and TCP DROP (`tcp_frag_off1`), else the standard list only |
+| `PKT_NO_L4`, `frag_off` = 0 | an IP protocol without ports: both lists, port fields ignored |
+| `PKT_OK` | both lists |
+
 | Check | Result |
 |-------|--------|
 | `version != 4` or `ihl < 5` | DROP (`parse_err`) |
 | IPv4 header (including options) beyond packet end | DROP |
 | TCP header (20 bytes) beyond packet end, offset-0 packet | DROP |
 | UDP header (8 bytes) beyond packet end, offset-0 packet | DROP |
-| `MF` set or fragment offset ≠ 0 | `is_frag = 1` |
+| `MF` set or fragment offset ≠ 0 | `PKT_F_FRAG` in `pkt_meta.flags` |
 | Fragment offset ≠ 0 (non-first fragment) | no L4 header parsed; skips the extended list (§8.2) |
 | TCP, fragment offset = 1 (8 bytes) | DROP (`tcp_frag_off1`) |
 | ICMP and other protocols | no ports; ACE port fields are ignored |
@@ -195,10 +208,11 @@ offset-0 rule above handles the other RFC 1858 attack.
 All parsing uses direct packet access with explicit bounds checks. After
 GRO the headers may not all be in the skb's linear part, the only part a TC
 program reads directly, so a packet shorter there than the most the parser
-reads (Ethernet, two tags, IPv4 with options, TCP: 102 bytes) is pulled in
-first with `bpf_skb_pull_data`. A pull that fails leaves a short view, which
-the parser drops as malformed. The VLAN loop is unrolled (two iterations),
-so the verifier sees fixed code. An outer tag the kernel has already taken
+reads (`PKT_HDR_MAX`: Ethernet, two tags, IPv4 with options, TCP: 102
+bytes) is pulled in with `bpf_skb_pull_data` and parsed again, after a
+parse that came back `PKT_SHORT`. A pull that fails leaves a short view,
+which is dropped. libpkt's VLAN loop is unrolled (two iterations), so the
+verifier sees fixed code. An outer tag the kernel has already taken
 off into the skb's metadata is simply not there to peel.
 
 ### 3.3 Matching semantics
