@@ -339,12 +339,13 @@ static void test_established(void)
     CHECK(TC(.src = "1.1.1.1", .dst = "2.2.2.2", TCP, .tcp_flags = 0x04) == TC_ACT_UNSPEC, "RST ok");
 }
 
-/* bpf_ktime_get_ns()'s clock */
+/* bpf_ktime_get_coarse_ns()'s clock, which sw_flowd and mfw_tc read: a
+ * last_seen from the fine one could be ahead of mfw_tc's now. */
 static __u64 now_ns(void)
 {
     struct timespec ts;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
     return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 

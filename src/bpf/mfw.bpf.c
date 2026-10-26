@@ -46,7 +46,7 @@
 #include <xdp/xdp_helpers.h>
 
 
-/* reply_idle is in seconds, bpf_ktime_get_ns() in ns */
+/* reply_idle is in seconds, bpf_ktime_get_coarse_ns() in ns */
 #define MFW_NSEC_PER_SEC  1000000000ULL
 
 
@@ -246,7 +246,9 @@ match_std(const struct mfw_ruleset *rs, __be32 saddr)
 /*
  * Is p a reply to a flow the host opened: one sw_flowd recorded leaving
  * within the ACE's idle limit? A TCP reply has ACK or RST, as after the
- * host's SYN; mfw_ext_ace_match() only asks for TCP and UDP.
+ * host's SYN; mfw_ext_ace_match() only asks for TCP and UDP. The clock
+ * is sw_flowd's, the coarse one: to the last tick, which is all an idle
+ * limit in seconds needs, and never behind the last_seen it wrote.
  */
 static __always_inline int
 is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
@@ -262,8 +264,12 @@ is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
     seen = sf_flow_seen(&flows, SF_FAMILY_V4, p->l4_proto, p->addr_src,
                         bpf_ntohs(p->sport), bpf_ntohs(p->dport));
 
-    return seen != 0
-           && bpf_ktime_get_ns() - seen < r->reply_idle * MFW_NSEC_PER_SEC;
+    if (seen == 0) {
+        return 0;
+    }
+
+    return bpf_ktime_get_coarse_ns() - seen
+           < r->reply_idle * MFW_NSEC_PER_SEC;
 }
 
 
