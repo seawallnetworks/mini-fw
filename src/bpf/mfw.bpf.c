@@ -177,16 +177,22 @@ cfg_drop_ipv4_fragments(void)
 }
 
 
-/* an IPv4 address of pkt_meta's, which keeps it in bytes */
+/*
+ * An IPv4 address of pkt_meta's, which keeps it in bytes. libpkt aligns
+ * the addresses to 8: said here, the copy is one 4-byte load.
+ */
 static __always_inline __be32
 ipv4_addr(const __u8 *a)
 {
     __be32  addr;
 
-    __builtin_memcpy(&addr, a, sizeof(addr));
+    __builtin_memcpy(&addr, __builtin_assume_aligned(a, 4), sizeof(addr));
 
     return addr;
 }
+
+_Static_assert(_Alignof(struct pkt_meta) >= 4,
+               "libpkt too old: pkt_meta's addresses not aligned");
 
 
 static __always_inline int
