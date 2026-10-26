@@ -80,21 +80,26 @@ struct ruleset_map {
 
 static __always_inline void stat_inc(__u32 id);
 static __always_inline int cfg_drop_ipv4_fragments(void);
+
 static __always_inline __be32 ipv4_addr(const __u8 *a);
 static __always_inline int cidr_match(__be32 addr, const struct mfw_cidr *c);
 static __always_inline int port_in_range(__u16 port,
     const struct mfw_port_range *r);
-static __always_inline mfw_match_e match_std(const struct mfw_ruleset *rs,
-    __be32 saddr);
+
 static __always_inline int is_reply(const struct mfw_rule *r,
     const struct pkt_meta *p);
 __noinline int mfw_ext_ace_match(const struct mfw_rule *r,
     const struct pkt_meta *p);
+
+static __always_inline mfw_match_e match_std(const struct mfw_ruleset *rs,
+    __be32 saddr);
 static __always_inline mfw_match_e match_ext(const struct mfw_ruleset *rs,
     const struct pkt_meta *p);
+
 static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex);
 static __always_inline mfw_verdict_e mfw_judge(int rc,
     const struct pkt_meta *p, __u32 ifindex);
+
 int mfw_xdp(struct xdp_md *ctx);
 int mfw_tc(struct __sk_buff *ctx);
 
@@ -221,34 +226,6 @@ port_in_range(__u16 port, const struct mfw_port_range *r)
 }
 
 
-/* Standard ACL: blacklist. Callers treat only mfw_match_deny as drop. */
-static __always_inline mfw_match_e
-match_std(const struct mfw_ruleset *rs, __be32 saddr)
-{
-    int                     i;
-    const struct mfw_rule  *r;
-
-    if (rs == NULL || !rs->std_acl) {
-        return mfw_match_unbound;
-    }
-
-    for (i = 0; i < MFW_MAX_STD_ACES; i++) {
-        if (i >= rs->n_std) {
-            break;
-        }
-
-        r = &rs->std[i];
-
-        if (cidr_match(saddr, &r->src)) {
-            return r->action == MFW_ACTION_PERMIT ? mfw_match_permit
-                                                  : mfw_match_deny;
-        }
-    }
-
-    return mfw_match_miss;
-}
-
-
 /*
  * Is p a reply to a flow the host opened: one sw_flowd recorded leaving
  * within the ACE's idle limit? A TCP reply has ACK or RST, as after the
@@ -324,6 +301,34 @@ mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_meta *p)
     }
 
     return 1;
+}
+
+
+/* Standard ACL: blacklist. Callers treat only mfw_match_deny as drop. */
+static __always_inline mfw_match_e
+match_std(const struct mfw_ruleset *rs, __be32 saddr)
+{
+    int                     i;
+    const struct mfw_rule  *r;
+
+    if (rs == NULL || !rs->std_acl) {
+        return mfw_match_unbound;
+    }
+
+    for (i = 0; i < MFW_MAX_STD_ACES; i++) {
+        if (i >= rs->n_std) {
+            break;
+        }
+
+        r = &rs->std[i];
+
+        if (cidr_match(saddr, &r->src)) {
+            return r->action == MFW_ACTION_PERMIT ? mfw_match_permit
+                                                  : mfw_match_deny;
+        }
+    }
+
+    return mfw_match_miss;
 }
 
 
