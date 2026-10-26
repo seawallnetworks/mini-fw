@@ -46,6 +46,10 @@
 #include <xdp/xdp_helpers.h>
 
 
+/* reply_idle is in seconds, bpf_ktime_get_ns() in ns */
+#define MFW_NSEC_PER_SEC  1000000000ULL
+
+
 /* mfw_judge()'s verdict; each entry turns it into its hook's */
 typedef enum {
     mfw_pass = 0,
@@ -259,7 +263,7 @@ is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
                         bpf_ntohs(p->sport), bpf_ntohs(p->dport));
 
     return seen != 0
-           && bpf_ktime_get_ns() - seen < r->reply_idle * 1000000000ULL;
+           && bpf_ktime_get_ns() - seen < r->reply_idle * MFW_NSEC_PER_SEC;
 }
 
 
@@ -472,13 +476,18 @@ int
 mfw_xdp(struct xdp_md *ctx)
 {
     int              rc;
+    mfw_verdict_e    v;
     struct pkt_meta  p;
 
     rc = pkt_parse((void *) (long) ctx->data, (void *) (long) ctx->data_end,
                    &p);
 
-    return mfw_judge(rc, &p, ctx->ingress_ifindex) == mfw_drop ? XDP_DROP
-                                                               : XDP_PASS;
+    v = mfw_judge(rc, &p, ctx->ingress_ifindex);
+    if (v == mfw_drop) {
+        return XDP_DROP;
+    }
+
+    return XDP_PASS;
 }
 
 
@@ -489,6 +498,7 @@ mfw_tc(struct __sk_buff *ctx)
     int              rc;
     void            *data, *data_end;
     __u32            want;
+    mfw_verdict_e    v;
     struct pkt_meta  p;
 
     data = (void *) (long) ctx->data;
@@ -518,7 +528,8 @@ mfw_tc(struct __sk_buff *ctx)
         }
     }
 
-    if (mfw_judge(rc, &p, ctx->ingress_ifindex) == mfw_drop) {
+    v = mfw_judge(rc, &p, ctx->ingress_ifindex);
+    if (v == mfw_drop) {
         return TC_ACT_SHOT;
     }
 
