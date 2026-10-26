@@ -62,7 +62,7 @@ does today.** Where the two disagree, §10 explains why.
  │  attach / swap rulesets / detach          │   restart knows it
  └────────────┬──────────────────────────────┘
               ▼
- /sys/fs/bpf/mfw/  (bpffs, mode 0700)
+ /sys/fs/bpf/seawall/mfw/  (bpffs, mode 0700)
    maps/rulesets     HASH_OF_MAPS  ifindex → that  ─┐
                      interface's compiled lists     │ read by mfw_tc
    maps/config       ARRAY  flags, generation      ─┤
@@ -378,7 +378,8 @@ counters restart on such an upgrade while the rulesets and links stay.
 ## 5. mfwd: lifecycle and pins
 
 ```text
-<pinroot>/                0700, root only (default /sys/fs/bpf/mfw, mfwd -p)
+<pinroot>/                0700, root only (default /sys/fs/bpf/seawall/mfw,
+                          beside sw_flowd's flows/; mfwd -p)
   maps/{rulesets,config,stats}
   link/tcx_<ifname>         or link/tc_<ifname> (classic TC, §5.3)
 <statedir>/policy         default /run/mfwd (mfwd -d): "# generation N", then
@@ -387,15 +388,22 @@ counters restart on such an upgrade while the rulesets and links stay.
 
 ### 5.1 Start
 
-1. Check that the pin root's parent is on bpffs (`statfs` magic).
-2. Create `maps/` and `link/` with mode 0700.
-3. Open sw_flowd's table pin, if there is one of its layout (§4.4).
+1. At the default pin root only: if `/sys/fs/bpf/mfw`, the default of
+   mfwd 0.4.0 and before, is there, rename it to `/sys/fs/bpf/seawall/mfw`.
+   A rename on bpffs moves the directory with everything pinned in it:
+   the links stay attached, and step 6 takes them over in place. Pins
+   under both refuse the start: a second set of links would attach
+   mini-fw twice. `mfwd -P` moves them first too, then removes them.
+2. Check that the pin root, or the nearest directory above it that
+   exists, is on bpffs (`statfs` magic).
+3. Create `maps/` and `link/` with mode 0700.
+4. Open sw_flowd's table pin, if there is one of its layout (§4.4).
    Open the embedded skeleton with pin root `maps/`, bind that table to
    `flows`, and load it. libbpf reuses existing map pins, or creates and
    pins new ones. Every XDP copy loaded later binds the same table.
-4. Initialize `config` if `abi_version` is 0. If it holds a different ABI
+5. Initialize `config` if `abi_version` is 0. If it holds a different ABI
    version, refuse to start (`mfwd -P` removes the old pins).
-5. **Upgrade attached interfaces:** every live link in `link/` gets the
+6. **Upgrade attached interfaces:** every live link in `link/` gets the
    program just loaded, with `bpf_link_update` (atomic), and every
    classic TC filter too, replaced in one netlink request. Upgrading mfwd
    therefore upgrades the BPF code without a gap, and an mfwd started
@@ -471,7 +479,7 @@ classic TC filter of its network namespace, then removes the maps,
 the pin root and the saved policy. Without mfwd:
 
 ```bash
-rm -r /sys/fs/bpf/mfw                  # detaches everything, removes all state
+rm -r /sys/fs/bpf/seawall/mfw          # detaches everything, removes all state
 # classic TC (before 6.6): its filters stay until deleted, per interface
 tc filter del dev eth0 ingress pref 49152 handle 0x4d46 bpf
 ```
@@ -694,7 +702,7 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 ### 8.7 Security
 
 - Pins are root-only (directory mode 0700). Anyone who can write
-  `/sys/fs/bpf/mfw` controls the policy.
+  `/sys/fs/bpf/seawall/mfw` controls the policy.
 - **The socket is the policy.** Whoever can connect to mfwd's socket can
   replace the policy. It is `0600` root by default; `-g` / `-m` widen it to
   one group. The shipped unit uses `-g mfw -m 0660`: the group `mfw`

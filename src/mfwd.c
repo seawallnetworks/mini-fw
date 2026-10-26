@@ -618,6 +618,21 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /*
+     * the pins of an mfwd from before /sys/fs/bpf/seawall: moved, and
+     * then purged or taken over in place like any others
+     */
+    if (strcmp(root, MFW_PIN_ROOT) == 0) {
+        c = mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err));
+        if (c < 0) {
+            logmsg("%s", err);
+            return 1;
+        }
+        if (c > 0) {
+            logmsg("moved the pins under %s to %s", MFW_PIN_ROOT_OLD, root);
+        }
+    }
+
     if (purge) {
         mfw_dp_purge(root);
         state_path(&d, path, sizeof(path), "");

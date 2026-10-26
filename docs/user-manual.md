@@ -683,7 +683,7 @@ mfwd -P [-p pinroot] [-d statedir]
 | `-s socket` | `/run/mfwd.sock` | where to listen |
 | `-m mode` | `0600` | socket permissions |
 | `-g group` | | socket group; with `-m 0660`, that group may use `mfw` without root |
-| `-p pinroot` | `/sys/fs/bpf/mfw` | bpffs directory for maps and links |
+| `-p pinroot` | `/sys/fs/bpf/seawall/mfw` | bpffs directory for maps and links; at the default, pins left under `/sys/fs/bpf/mfw` by mfwd 0.4.0 and before are moved there, filtering on |
 | `-d statedir` | `/run/mfwd` | where the running policy is saved |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |
@@ -731,7 +731,7 @@ Stopping mfwd alone does **not** stop the filtering.
 If the `mfwd` binary is gone but the firewall is still active:
 
 ```bash
-sudo rm -r /sys/fs/bpf/mfw               # detaches the program and removes all state
+sudo rm -r /sys/fs/bpf/seawall/mfw       # detaches the program and removes all state
 ```
 
 ---
@@ -766,7 +766,7 @@ Useful low-level checks:
 sudo xdp-loader status eth0                         # "mfw_xdp" in the dispatcher when attached at XDP
 sudo bpftool net show dev eth0                      # degraded: "tcx/ingress mfw_tc" ("clsact/ingress" before 6.6)
 sudo bpftool prog show name mfw_tc
-sudo bpftool map dump pinned /sys/fs/bpf/mfw/maps/rulesets   # ifindex → inner map id
+sudo bpftool map dump pinned /sys/fs/bpf/seawall/mfw/maps/rulesets   # ifindex → inner map id
 sudo bpftool map dump id <inner map id>                       # that interface's ruleset
 ```
 

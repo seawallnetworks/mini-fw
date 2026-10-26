@@ -4,7 +4,7 @@
 /*
  * The BPF side of mfwd: loads the program, keeps its maps, attaches it
  * to interfaces. Everything lives in pins under <root> (by default
- * /sys/fs/bpf/mfw):
+ * /sys/fs/bpf/seawall/mfw, beside sw_flowd's /sys/fs/bpf/seawall/flows):
  *
  *   maps/rulesets   hash of maps: ifindex → an inner map holding that
  *                   interface's mfw_ruleset
@@ -54,6 +54,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/vfs.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
@@ -163,20 +164,27 @@ check_bpffs(const char *root, char *err, size_t len)
 {
     char           *slash;
     struct statfs   st;
-    char            parent[PATH_MAX];
+    char            dir[PATH_MAX];
 
-    /* the pin root itself may not exist yet: check its parent */
-    snprintf(parent, sizeof(parent), "%s", root);
+    /*
+     * the pin root, and directories above it, may not exist yet: check
+     * the nearest that does
+     */
+    snprintf(dir, sizeof(dir), "%s", root);
 
-    slash = strrchr(parent, '/');
-    if (slash != NULL && slash != parent) {
+    while (statfs(dir, &st) != 0 && errno == ENOENT) {
+        slash = strrchr(dir, '/');
+        if (slash == NULL || slash == dir) {
+            break;
+        }
+
         *slash = '\0';
     }
 
-    if (statfs(parent, &st) != 0 || st.f_type != BPF_FS_MAGIC) {
+    if (statfs(dir, &st) != 0 || st.f_type != BPF_FS_MAGIC) {
         return mfw_fail(err, len,
                         "%s is not on bpffs (mount -t bpf bpf /sys/fs/bpf)",
-                        parent);
+                        dir);
     }
 
     return 0;
@@ -769,6 +777,51 @@ links_detach(const char *root)
     }
 
     closedir(d);
+}
+
+
+/*
+ * rename(2) on bpffs moves a directory with everything pinned in it:
+ * the links stay attached, the maps keep their contents, and the next
+ * mfw_dp_open() takes them over in place. Both are on the one bpffs, or
+ * the rename fails.
+ */
+int
+mfw_dp_move_root(const char *old, const char *root, char *err,
+    size_t errlen)
+{
+    char         *slash;
+    struct stat   st;
+    char          parent[PATH_MAX];
+
+    if (stat(old, &st) != 0) {
+        return 0;
+    }
+
+    /* a second set of links would attach mini-fw twice */
+    if (stat(root, &st) == 0) {
+        return mfw_fail(err, errlen, "pins under both %s and %s: "
+                        "mfwd -P -p %s removes the old ones", old, root, old);
+    }
+
+    snprintf(parent, sizeof(parent), "%s", root);
+
+    slash = strrchr(parent, '/');
+    if (slash != NULL && slash != parent) {
+        *slash = '\0';
+
+        if (mfw_ensure_dir(parent) != 0) {
+            return mfw_fail(err, errlen, "create %s: %s", parent,
+                            strerror(errno));
+        }
+    }
+
+    if (rename(old, root) != 0) {
+        return mfw_fail(err, errlen, "move %s to %s: %s", old, root,
+                        strerror(errno));
+    }
+
+    return 1;
 }
 
 

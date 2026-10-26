@@ -16,7 +16,8 @@
 #define MFW_MAX_STD_ACES       64     /* standard ACL map */
 #define MFW_MAX_EXT_ACES       128    /* extended ACL map */
 #define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
-#define MFW_PIN_PATH           "/sys/fs/bpf/mfw"
+/* under the stack's bpffs directory, beside sw_flowd's flows/ */
+#define MFW_PIN_PATH           "/sys/fs/bpf/seawall/mfw"
 #define MFW_ABI_VERSION        2      /* 2: per-interface rulesets */
 
 /* Rule action */
