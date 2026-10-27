@@ -22,28 +22,34 @@
  * The applied policy is saved under the state directory (/run/mfwd), so a
  * restarted mfwd knows it; the kernel side is pinned and keeps filtering
  * while mfwd is down. Single-threaded: requests are handled one at a
- * time. Under systemd (Type=notify) it says it is ready once it listens,
- * so a front end ordered after it, such as sw_configd, finds the socket. */
+ * time. Under systemd (Type=notify) it says it is ready once it serves,
+ * so a front end ordered after it, such as sw_configd, finds the socket.
+ *
+ * Logging, the socket, readiness and the saved policy's file are libsw's
+ * (Seawall proposal 0011). */
 #define _GNU_SOURCE
 #include <errno.h>
-#include <stddef.h>
 #include <getopt.h>
-#include <grp.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/un.h>
-#include <time.h>
 #include <unistd.h>
+
+#include <sw/bpf.h>
+#include <sw/conf.h>
+#include <sw/file.h>
+#include <sw/log.h>
+#include <sw/netif.h>
+#include <sw/notify.h>
+#include <sw/sock.h>
 
 #include "dataplane.h"
 #include "mfw_client.h"
 #include "mfw_policy.h"
+#include "util.h"
 
 #define MFWD_VERSION      "0.4.0"
 #define MFWD_STATE_DIR    "/run/mfwd"
@@ -64,17 +70,6 @@ static void on_signal(int sig)
     stop = 1;
 }
 
-static void logmsg(const char *fmt, ...)
-{
-    va_list ap;
-
-    va_start(ap, fmt);
-    fprintf(stderr, "mfwd: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
-}
-
 /* ---- the saved policy ---- */
 
 static void state_path(const struct mfwd *d, char *buf, size_t len, const char *suffix)
@@ -82,51 +77,27 @@ static void state_path(const struct mfwd *d, char *buf, size_t len, const char *
     snprintf(buf, len, "%s/policy%s", d->state_dir, suffix);
 }
 
-/* "# generation N\n" then the canonical policy; written atomically. */
-static int save_policy(const struct mfwd *d)
+/*
+ * "# generation N\n" then the canonical policy, written atomically, its
+ * directory synced too: a crash just after an APPLY keeps it.
+ */
+static void save_policy(const struct mfwd *d)
 {
-    char path[PATH_MAX], tmp[PATH_MAX];
-    FILE *f;
-    int ok;
+    char path[PATH_MAX], err[PATH_MAX + 128], *text;
+    int len;
 
-    if (mkdir(d->state_dir, 0700) && errno != EEXIST)
-        return -1;
+    len = asprintf(&text, "# generation %u\n%s", d->generation, d->policy);
+    if (len < 0) {
+        sw_log_err("cannot save the policy: out of memory");
+        return;
+    }
     state_path(d, path, sizeof(path), "");
-    state_path(d, tmp, sizeof(tmp), ".tmp");
-    f = fopen(tmp, "w");
-    if (!f)
-        return -1;
-    ok = fprintf(f, "# generation %u\n%s", d->generation, d->policy) >= 0;
-    ok &= fflush(f) == 0 && fsync(fileno(f)) == 0;
-    ok &= fclose(f) == 0;
-    if (!ok || rename(tmp, path)) {
-        unlink(tmp);
-        return -1;
-    }
-    return 0;
-}
-
-static char *read_file(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    char *buf;
-    long n;
-
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) || (n = ftell(f)) < 0 || n > MFW_REQUEST_MAX ||
-        fseek(f, 0, SEEK_SET) || !(buf = malloc(n + 1))) {
-        fclose(f);
-        return NULL;
-    }
-    if (fread(buf, 1, n, f) != (size_t)n) {
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-    buf[n] = '\0';
-    fclose(f);
-    return buf;
+    if (sw_file_mkdir_p(d->state_dir, 0700))
+        sw_log_err("cannot save the policy: create %s: %s", d->state_dir,
+                   strerror(errno));
+    else if (sw_file_write_atomic(path, text, len, 0600, err, sizeof(err)))
+        sw_log_err("cannot save the policy: %s", err);
+    free(text);
 }
 
 /* ---- APPLY ---- */
@@ -179,8 +150,16 @@ static void apply(struct mfwd *d, const char *text, char **reply)
 
     for (int i = 0; i < p.n_binds; i++) {
         const char *ifname = p.binds[i].ifname;
+        int idx = sw_netif_index(ifname, err, sizeof(err));
 
-        ifindex[i] = if_nametoindex(ifname);
+        /* can't tell whether it exists: the old policy stays */
+        if (idx < 0) {
+            for (int j = 0; j < n_added; j++)
+                mfw_dp_detach(&d->dp, added[j]);
+            error_reply(reply, "kernel", "%s", err);
+            goto out;
+        }
+        ifindex[i] = idx;
         if (!ifindex[i]) {
             append(missing, sizeof(missing), ifname);
             continue;
@@ -227,8 +206,7 @@ static void apply(struct mfwd *d, const char *text, char **reply)
     d->policy = canon;
     d->generation = gen;
     canon = NULL;
-    if (save_policy(d))
-        logmsg("cannot save the policy under %s: %s", d->state_dir, strerror(errno));
+    save_policy(d);
 
     if (asprintf(reply, "OK %u%s%s\n", gen, *missing ? " missing=" : "", missing) < 0)
         *reply = NULL;
@@ -255,8 +233,9 @@ static void status(struct mfwd *d, char **reply)
             append(degraded, sizeof(degraded), names[i]);
     }
     if (d->policy && mfw_policy_parse(d->policy, &p, err, sizeof(err)) == 0) {
+        /* missing only if it isn't there, not if it can't be told */
         for (int i = 0; i < p.n_binds; i++)
-            if (!if_nametoindex(p.binds[i].ifname))
+            if (sw_netif_index(p.binds[i].ifname, NULL, 0) == 0)
                 append(missing, sizeof(missing), p.binds[i].ifname);
         mfw_policy_free(&p);
     }
@@ -315,10 +294,10 @@ static void handle(struct mfwd *d, char *req, uid_t uid, char **reply)
         *end = '\0';
         apply(d, body, reply);
         if (*reply && !strncmp(*reply, "OK", 2))
-            logmsg("APPLY from uid %u: generation %u", uid, d->generation);
+            sw_log_info("APPLY from uid %u: generation %u", uid, d->generation);
         else if (*reply)
-            logmsg("APPLY from uid %u refused: %.*s", uid,
-                   (int)strcspn(*reply, "\n"), *reply);
+            sw_log_warn("APPLY from uid %u refused: %.*s", uid,
+                        (int)strcspn(*reply, "\n"), *reply);
     } else {
         error_reply(reply, "badreq", "unknown request '%.32s'", req);
     }
@@ -384,110 +363,47 @@ fail:
     return NULL;
 }
 
-static void send_all(int fd, const char *p, size_t len)
-{
-    while (len > 0) {
-        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
-
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return;
-        p += n;
-        len -= n;
-    }
-}
-
-/*
- * Reads and drops what the client still sends, for at most a second.
- * Closing a Unix socket with unread input resets the connection, and the
- * client would lose the reply (e.g. "request too long") before reading it.
- */
-static void drain(int fd)
-{
-    struct timeval tv = { 0, 100 * 1000 }, start, now;
-    char buf[65536];
-
-    shutdown(fd, SHUT_WR);
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    gettimeofday(&start, NULL);
-    while (recv(fd, buf, sizeof(buf), 0) > 0) {
-        gettimeofday(&now, NULL);
-        if (now.tv_sec - start.tv_sec >= 1)
-            break;
-    }
-}
-
 static void serve(struct mfwd *d, int fd)
 {
-    struct timeval tv = { MFWD_READ_SECS, 0 };
-    struct ucred cred = {};
-    socklen_t clen = sizeof(cred);
+    uid_t uid = (uid_t)-1;
     char *req, *reply = NULL;
     const char *why;
 
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen);
+    sw_sock_timeouts(fd, MFWD_READ_SECS * 1000);
+    sw_sock_peer(fd, NULL, &uid, NULL);
 
     req = read_request(fd, &why);
     if (req)
-        handle(d, req, cred.uid, &reply);
+        handle(d, req, uid, &reply);
     else
         error_reply(&reply, "badreq", "%s", why);
     if (!reply)
         reply = strdup("ERR internal out of memory\n");
     if (reply)
-        send_all(fd, reply, strlen(reply));
-    drain(fd);
+        sw_sock_send_all(fd, reply, strlen(reply));
+    /* unread input would reset the connection, and lose the reply */
+    sw_sock_drain(fd);
     free(reply);
     free(req);
-}
-
-static int listen_on(const char *path, mode_t mode, gid_t gid)
-{
-    struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    struct stat st;
-    int fd;
-
-    if (strlen(path) >= sizeof(addr.sun_path)) {
-        logmsg("socket path too long: %s", path);
-        return -1;
-    }
-    strcpy(addr.sun_path, path);
-    if (lstat(path, &st) == 0) {
-        if (!S_ISSOCK(st.st_mode)) {
-            logmsg("%s exists and is not a socket", path);
-            return -1;
-        }
-        unlink(path);
-    }
-    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0 || bind(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
-        chmod(path, mode) || (gid != (gid_t)-1 && chown(path, -1, gid)) ||
-        listen(fd, 16)) {
-        logmsg("listen on %s: %s", path, strerror(errno));
-        if (fd >= 0)
-            close(fd);
-        return -1;
-    }
-    return fd;
 }
 
 /* A policy saved by an earlier mfwd: kept if the kernel still runs its
  * generation, applied again if the pins are new (e.g. after mfwd -P). */
 static void restore(struct mfwd *d)
 {
-    char path[PATH_MAX], *text, *reply = NULL;
+    char path[PATH_MAX], err[PATH_MAX + 64], *text, *reply = NULL;
     struct mfw_config cfg = {};
     unsigned gen;
 
     state_path(d, path, sizeof(path), "");
-    text = read_file(path);
-    if (!text)
+    text = sw_file_read(path, MFW_REQUEST_MAX, NULL, err, sizeof(err));
+    if (!text) {
+        if (errno != ENOENT)
+            sw_log_warn("saved policy not restored: %s", err);
         return;
-    if (sscanf(text, "# generation %u", &gen) != 1) {
-        logmsg("%s: no generation line; ignored", path);
+    }
+    if (sscanf(text, "# generation %u", &gen) != 1 || !strchr(text, '\n')) {
+        sw_log_warn("%s: no generation line; ignored", path);
         free(text);
         return;
     }
@@ -495,68 +411,27 @@ static void restore(struct mfwd *d)
     if (cfg.generation == gen) {
         d->policy = strdup(strchr(text, '\n') + 1);
         d->generation = gen;
-        logmsg("policy generation %u is in place", gen);
+        sw_log_info("policy generation %u is in place", gen);
     } else {
-        logmsg("kernel has generation %u, saved policy %u: applying it again",
-               cfg.generation, gen);
+        sw_log_notice("kernel has generation %u, saved policy %u: applying it again",
+                      cfg.generation, gen);
         apply(d, strchr(text, '\n') + 1, &reply);
         if (reply)
-            logmsg("%.*s", (int)strcspn(reply, "\n"), reply);
+            sw_log(strncmp(reply, "OK", 2) ? SW_LOG_WARN : SW_LOG_INFO,
+                   "%.*s", (int)strcspn(reply, "\n"), reply);
         free(reply);
     }
     free(text);
 }
 
-/* Tells systemd the socket is up (Type=notify): with Type=simple a unit
- * ordered after mfwd starts as soon as mfwd's process does, and finds no
- * socket. One datagram to $NOTIFY_SOCKET, so no libsystemd; without it
- * (not under systemd), nothing. */
-static void notify_ready(void)
-{
-    const char *path = getenv("NOTIFY_SOCKET");
-    struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    size_t len;
-    int fd;
-
-    if (!path || (path[0] != '/' && path[0] != '@'))
-        return;
-    len = strlen(path);
-    if (len >= sizeof(addr.sun_path)) {
-        logmsg("NOTIFY_SOCKET too long: systemd not told mfwd is ready");
-        return;
-    }
-    memcpy(addr.sun_path, path, len);
-    if (path[0] == '@')  /* an abstract socket */
-        addr.sun_path[0] = '\0';
-    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0 || sendto(fd, "READY=1", 7, 0, (struct sockaddr *)&addr,
-                         offsetof(struct sockaddr_un, sun_path) + len) < 0)
-        logmsg("tell systemd mfwd is ready: %s", strerror(errno));
-    if (fd >= 0)
-        close(fd);
-}
-
-/* /etc/group read directly: mfwd is static, and getgrnam's NSS would
- * dlopen modules (libnss_systemd) built for a different libc */
-static struct group *find_group(const char *name)
-{
-    FILE *f = fopen("/etc/group", "re");
-    struct group *g;
-
-    if (!f)
-        return NULL;
-    while ((g = fgetgrent(f)) && strcmp(g->gr_name, name))
-        ;
-    fclose(f);
-    return g;
-}
-
 static void usage(FILE *f)
 {
     fprintf(f,
-        "usage: mfwd [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir]\n"
+        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir]\n"
         "       mfwd -P [-p pinroot] [-d statedir]\n"
         "\n"
+        "  -v          debug logging, libbpf's and libxdp's info included\n"
+        "              (SW_BPF_DEBUG=1 adds the verifier's log)\n"
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
@@ -569,39 +444,34 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
-    const char *sock = MFW_SOCKET, *root = MFW_PIN_ROOT;
+    const char *sock = MFW_SOCKET, *root = MFW_PIN_ROOT, *group = NULL;
     struct mfwd d = {};
     struct sigaction sa = { .sa_handler = on_signal };
-    char err[MFW_ERR_LEN], path[PATH_MAX];
+    char err[PATH_MAX + 128], path[PATH_MAX];
     mode_t mode = 0600;
-    gid_t gid = -1;
     int c, fd, purge = 0;
-    char *end;
 
+    sw_log_init("mfwd");
+    sw_bpf_log_init();
+    sw_bpf_libxdp_log_init();
     snprintf(d.state_dir, sizeof(d.state_dir), "%s", MFWD_STATE_DIR);
-    while ((c = getopt(argc, argv, "s:m:g:p:d:PVh")) != -1) {
+    while ((c = getopt(argc, argv, "vs:m:g:p:d:PVh")) != -1) {
         switch (c) {
+        case 'v': sw_log_set_level(SW_LOG_DEBUG); break;
         case 's': sock = optarg; break;
         case 'p': root = optarg; break;
         case 'd': snprintf(d.state_dir, sizeof(d.state_dir), "%s", optarg); break;
         case 'P': purge = 1; break;
         case 'm':
-            mode = strtol(optarg, &end, 8);
-            if (*end || mode > 0777) {
-                fprintf(stderr, "mfwd: bad mode '%s'\n", optarg);
+            if (sw_conf_mode(optarg, &mode)) {
+                sw_log_err("bad mode '%s': octal, at most 0777", optarg);
                 return 2;
             }
             break;
-        case 'g': {
-            struct group *g = find_group(optarg);
-
-            if (!g) {
-                fprintf(stderr, "mfwd: no such group '%s'\n", optarg);
-                return 2;
-            }
-            gid = g->gr_gid;
+        case 'g':
+            /* looked up when the socket is made, in /etc/group */
+            group = optarg;
             break;
-        }
         case 'V':
             printf("mfwd %s, ABI %d\n", MFWD_VERSION, MFW_ABI_VERSION);
             return 0;
@@ -618,23 +488,16 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    /*
-     * the pins of an mfwd from before /sys/fs/bpf/seawall: moved, and
-     * then purged or taken over in place like any others
-     */
-    if (strcmp(root, MFW_PIN_ROOT) == 0) {
-        c = mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err));
-        if (c < 0) {
-            logmsg("%s", err);
+    if (purge) {
+        if (strcmp(root, MFW_PIN_ROOT) == 0
+            && mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err)) < 0) {
+            sw_log_err("%s", err);
             return 1;
         }
-        if (c > 0) {
-            logmsg("moved the pins under %s to %s", MFW_PIN_ROOT_OLD, root);
+        if (mfw_dp_purge(root, err, sizeof(err))) {
+            sw_log_err("%s", err);
+            return 1;
         }
-    }
-
-    if (purge) {
-        mfw_dp_purge(root);
         state_path(&d, path, sizeof(path), "");
         unlink(path);
         rmdir(d.state_dir);
@@ -642,36 +505,57 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (mfw_dp_open(&d.dp, root, err, sizeof(err))) {
-        logmsg("%s", err);
+    /*
+     * The socket first: another mfwd answering on it, or an unknown group,
+     * refuses this one before it touches the pins. A client that connects
+     * while the policy is restored waits for it.
+     */
+    fd = sw_sock_listen(sock, mode, group, err, sizeof(err));
+    if (fd < 0) {
+        sw_log_err("%s", err);
         return 1;
+    }
+
+    /*
+     * the pins of an mfwd from before /sys/fs/bpf/seawall: moved, and
+     * then purged or taken over in place like any others
+     */
+    if (strcmp(root, MFW_PIN_ROOT) == 0) {
+        c = mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err));
+        if (c < 0) {
+            sw_log_err("%s", err);
+            goto failed;
+        }
+        if (c > 0)
+            sw_log_notice("moved the pins under %s to %s", MFW_PIN_ROOT_OLD, root);
+    }
+
+    if (mfw_dp_open(&d.dp, root, err, sizeof(err))) {
+        sw_log_err("%s", err);
+        goto failed;
     }
     restore(&d);
 
-    fd = listen_on(sock, mode, gid);
-    if (fd < 0) {
-        mfw_dp_close(&d.dp);
-        return 1;
-    }
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
+    /* stderr may be a pipe; the socket's sends are MSG_NOSIGNAL */
     signal(SIGPIPE, SIG_IGN);
     /* accept() wakes up every second, so a signal is never missed */
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &(struct timeval){ 1, 0 },
-               sizeof(struct timeval));
-    logmsg("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
-           MFWD_VERSION, MFW_ABI_VERSION, sock, root,
-           d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
-           : d.dp.tcx ? "libxdp's dispatcher, else tcx"
-           : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");
-    notify_ready();
+    sw_sock_timeouts(fd, 1000);
+    sw_log_info("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
+                MFWD_VERSION, MFW_ABI_VERSION, sock, root,
+                d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
+                : d.dp.tcx ? "libxdp's dispatcher, else tcx"
+                : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");
+    if (sw_notify_ready())
+        sw_log_warn("tell systemd mfwd is ready: %s", strerror(errno));
 
     while (!stop) {
         int cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
 
         if (cfd < 0) {
             if (errno != EINTR && errno != EAGAIN && errno != ECONNABORTED)
-                logmsg("accept: %s", strerror(errno));
+                sw_log_warn("accept: %s", strerror(errno));
             continue;
         }
         serve(&d, cfd);
@@ -679,10 +563,15 @@ int main(int argc, char **argv)
     }
 
     /* the pinned links keep filtering after we are gone */
-    logmsg("stopping; interfaces stay protected");
+    sw_log_info("stopping; interfaces stay protected");
     close(fd);
     unlink(sock);
     mfw_dp_close(&d.dp);
     free(d.policy);
     return 0;
+
+failed:
+    close(fd);
+    unlink(sock);
+    return 1;
 }

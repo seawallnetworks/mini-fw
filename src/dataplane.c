@@ -45,32 +45,30 @@
 
 #include <sw_flowd/sw_flowd.h>
 
+#include <sw/bpf.h>
+#include <sw/bpffs.h>
+#include <sw/file.h>
+#include <sw/log.h>
+#include <sw/netif.h>
+
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <dirent.h>
 #include <errno.h>
-#include <linux/magic.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 
 
 static int name_cmp(const void *a, const void *b);
-static int check_bpffs(const char *root, char *err, size_t len);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
 static void upgrade_links(struct mfw_dp *dp);
 static int upgrade_link(struct mfw_dp *dp, const char *ifname);
-static int libbpf_print(enum libbpf_print_level level, const char *fmt,
-    va_list ap);
-static int libxdp_print(enum libxdp_print_level level, const char *fmt,
-    va_list ap);
 static void drop_old_stats(const char *root);
-static void links_detach(const char *root);
+static int links_detach(const char *root, char *err, size_t errlen);
 static void flows_open(struct mfw_dp *dp);
 
 
@@ -101,9 +99,9 @@ mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname)
     enum xdp_attach_mode  mode;
     char                  holder[BPF_OBJ_NAME_LEN];
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = sw_netif_index(ifname, NULL, 0);
 
-    return ifindex != 0
+    return ifindex > 0
            && !mfw_xdp_attached(dp->root, ifname)
            && mfw_dp_attached(dp, ifname)
            && mfw_xdp_state(ifindex, &mode, holder, sizeof(holder))
@@ -156,38 +154,6 @@ mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
     qsort(names, n, IF_NAMESIZE, name_cmp);
 
     return n;
-}
-
-
-static int
-check_bpffs(const char *root, char *err, size_t len)
-{
-    char           *slash;
-    struct statfs   st;
-    char            dir[PATH_MAX];
-
-    /*
-     * the pin root, and directories above it, may not exist yet: check
-     * the nearest that does
-     */
-    snprintf(dir, sizeof(dir), "%s", root);
-
-    while (statfs(dir, &st) != 0 && errno == ENOENT) {
-        slash = strrchr(dir, '/');
-        if (slash == NULL || slash == dir) {
-            break;
-        }
-
-        *slash = '\0';
-    }
-
-    if (statfs(dir, &st) != 0 || st.f_type != BPF_FS_MAGIC) {
-        return mfw_fail(err, len,
-                        "%s is not on bpffs (mount -t bpf bpf /sys/fs/bpf)",
-                        dir);
-    }
-
-    return 0;
 }
 
 
@@ -251,8 +217,7 @@ upgrade_links(struct mfw_dp *dp)
     for (i = 0; i < n; i++) {
         e = upgrade_link(dp, names[i]);
         if (e != 0) {
-            fprintf(stderr, "mfwd: %s: update program: %s\n", names[i],
-                    strerror(e));
+            sw_log_warn("%s: update program: %s", names[i], strerror(e));
         }
     }
 }
@@ -268,7 +233,11 @@ upgrade_link(struct mfw_dp *dp, const char *ifname)
     char                  holder[BPF_OBJ_NAME_LEN];
     char                  path[PATH_MAX];
 
-    ifindex = if_nametoindex(ifname);
+    /* can't tell: left on the old program, which goes on filtering */
+    ifindex = sw_netif_index(ifname, NULL, 0);
+    if (ifindex < 0) {
+        return errno;
+    }
 
     if (mfw_xdp_attached(dp->root, ifname)) {
         mfw_xdp_path(dp->root, ifname, path, sizeof(path));
@@ -298,8 +267,8 @@ upgrade_link(struct mfw_dp *dp, const char *ifname)
            == 0)
     {
         mfw_tc_off(dp->root, ifname);
-        fprintf(stderr, "mfwd: %s: the XDP hook is free: "
-                "moved from TC to XDP\n", ifname);
+        sw_log_notice("%s: the XDP hook is free: moved from TC to XDP",
+                      ifname);
         return 0;
     }
 
@@ -330,36 +299,6 @@ upgrade_link(struct mfw_dp *dp, const char *ifname)
     }
 
     return 0;
-}
-
-
-static int
-libbpf_print(enum libbpf_print_level level, const char *fmt, va_list ap)
-{
-    if (level == LIBBPF_DEBUG && getenv("MFW_DEBUG") == NULL) {
-        return 0;
-    }
-
-    /*
-     * libxdp's own sections, such as .xdp_run_config: libxdp reads them
-     * itself, so libbpf's warning about them is noise
-     */
-    if (strstr(fmt, "skipping unrecognized data section") != NULL) {
-        return 0;
-    }
-
-    return vfprintf(stderr, fmt, ap);
-}
-
-
-static int
-libxdp_print(enum libxdp_print_level level, const char *fmt, va_list ap)
-{
-    if (level == LIBXDP_DEBUG && getenv("MFW_DEBUG") == NULL) {
-        return 0;
-    }
-
-    return vfprintf(stderr, fmt, ap);
 }
 
 
@@ -416,19 +355,19 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
 
     snprintf(dp->root, sizeof(dp->root), "%s", root);
 
-    if (check_bpffs(root, err, errlen) != 0) {
+    /* the pin root may not exist yet: the nearest ancestor that does */
+    if (sw_bpffs_check(root, err, errlen) != 0) {
         return -1;
     }
 
     snprintf(maps, sizeof(maps), "%s/maps", root);
     snprintf(links, sizeof(links), "%s/link", root);
 
-    if (mfw_ensure_dir(maps) != 0 || mfw_ensure_dir(links) != 0) {
+    if (sw_file_mkdir_p(maps, 0700) != 0 || sw_file_mkdir_p(links, 0700) != 0) {
         return mfw_fail(err, errlen, "create %s: %s", root, strerror(errno));
     }
 
     drop_old_stats(dp->root);
-    libbpf_set_print(libbpf_print);
 
     dp->skel = mfw_bpf__open_opts(&opts);
     if (dp->skel == NULL) {
@@ -455,8 +394,8 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     /* reuses the pinned maps, and pins any that don't exist yet */
     if (mfw_bpf__load(dp->skel) != 0) {
         mfw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
-                 "CAP_BPF and CAP_NET_ADMIN needed; MFW_DEBUG=1 for the "
-                 "verifier log)", strerror(errno));
+                 "CAP_BPF and CAP_NET_ADMIN needed; mfwd -v with "
+                 "SW_BPF_DEBUG=1 for the verifier log)", strerror(errno));
         goto failed;
     }
 
@@ -464,9 +403,8 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->rulesets_fd = bpf_map__fd(dp->skel->maps.rulesets);
     dp->config_fd = bpf_map__fd(dp->skel->maps.config);
     dp->stats_fd = bpf_map__fd(dp->skel->maps.stats);
-    dp->tcx = mfw_have_tcx();
+    dp->tcx = sw_bpf_have_tcx();
     dp->no_xdp = getenv("MFW_NO_XDP") != NULL;
-    libxdp_set_print(libxdp_print);
 
     if (init_config(dp, err, errlen) != 0) {
         goto failed;
@@ -504,7 +442,11 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
     int   e, ifindex;
     char  holder[BPF_OBJ_NAME_LEN];
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = sw_netif_index(ifname, err, errlen);
+    if (ifindex < 0) {
+        return -1;
+    }
+
     if (ifindex == 0) {
         return mfw_fail(err, errlen, "%s: no such interface", ifname);
     }
@@ -522,16 +464,15 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
 
         } else if (e == -ENOTSUP) {
             return mfw_fail(err, errlen, "%s: attach XDP: libxdp needs bpffs "
-                            "at /sys/fs/bpf", ifname);
+                            "at %s", ifname, sw_bpffs_libxdp_dir());
 
         } else if (e < 0) {
             return mfw_fail(err, errlen, "%s: attach XDP: %s", ifname,
                             strerror(-e));
         }
 
-        fprintf(stderr, "mfwd: %s: %s holds the XDP hook without libxdp's "
-                "dispatcher: filtering at TC ingress (degraded)\n", ifname,
-                holder);
+        sw_log_warn("%s: %s holds the XDP hook without libxdp's dispatcher: "
+                    "filtering at TC ingress (degraded)", ifname, holder);
     }
 
     if (!dp->tcx) {
@@ -558,11 +499,19 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
 void
 mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
 {
+    int    idx;
     __u32  ifindex;
+    char   err[256];
 
-    ifindex = if_nametoindex(ifname);
+    /* can't tell: unpinning would leave mini-fw there, unknown to mfwd */
+    idx = sw_netif_index(ifname, err, sizeof(err));
+    if (idx < 0) {
+        mfw_netif_unknown(err);
+        return;
+    }
 
-    if (ifindex != 0) {
+    if (idx > 0) {
+        ifindex = (__u32) idx;
         bpf_map_delete_elem(dp->rulesets_fd, &ifindex);
     }
 
@@ -677,9 +626,9 @@ flows_open(struct mfw_dp *dp)
     fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_OUTBOUND);
 
     if (fd < 0) {
-        fprintf(stderr, "mfwd: no sw_flowd flow table under %s: \"reply\" "
-                "ACEs match nothing until mfwd restarts with it (start "
-                "sw_flowd first)\n", SF_PIN_ROOT);
+        sw_log_warn("no sw_flowd flow table under %s: \"reply\" ACEs match "
+                    "nothing until mfwd restarts with it (start sw_flowd "
+                    "first)", SF_PIN_ROOT);
         return;
     }
 
@@ -691,17 +640,15 @@ flows_open(struct mfw_dp *dp)
         || info.key_size != sizeof(struct sf_flow_key)
         || info.value_size != sizeof(struct sf_flow))
     {
-        fprintf(stderr, "mfwd: sw_flowd's flow table under %s is not the "
-                "layout this mfwd reads: \"reply\" ACEs match nothing\n",
-                SF_PIN_ROOT);
+        sw_log_warn("sw_flowd's flow table under %s is not the layout this "
+                    "mfwd reads: \"reply\" ACEs match nothing", SF_PIN_ROOT);
         close(fd);
         return;
     }
 
     dp->flows_fd = fd;
-    fprintf(stderr, "mfwd: reading sw_flowd's flow table (%u flows): "
-            "\"reply\" ACEs match replies to the host's own flows\n",
-            info.max_entries);
+    sw_log_info("reading sw_flowd's flow table (%u flows): \"reply\" ACEs "
+                "match replies to the host's own flows", info.max_entries);
 }
 
 
@@ -743,13 +690,16 @@ mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
 /*
  * Detach what the pins under <root>/link attached. Deleting a tcx link
  * pin detaches the program, but a classic TC filter and a program in a
- * dispatcher stay until removed, so remove those; the pins stay.
+ * dispatcher stay until removed, so remove those; the pins stay. An
+ * interface that can't be looked up stops it, with -1 and the reason in
+ * err: its pins must stay, or mini-fw would run on there, unknown.
  */
-static void
-links_detach(const char *root)
+static int
+links_detach(const char *root, char *err, size_t errlen)
 {
-    int              ifindex;
+    int              ifindex, rc, tc;
     DIR             *d;
+    const char      *ifname;
     struct dirent   *de;
     char             path[PATH_MAX];
 
@@ -757,26 +707,41 @@ links_detach(const char *root)
 
     d = opendir(path);
     if (d == NULL) {
-        return;
+        return 0;
     }
 
-    while ((de = readdir(d)) != NULL) {
+    rc = 0;
+
+    while (rc == 0 && (de = readdir(d)) != NULL) {
         if (strncmp(de->d_name, "tc_", 3) == 0) {
-            ifindex = if_nametoindex(de->d_name + 3);
-            if (ifindex != 0) {
-                mfw_tc_detach(ifindex);
-            }
+            ifname = de->d_name + 3;
+            tc = 1;
 
         } else if (strncmp(de->d_name, "xdp_", 4) == 0) {
-            ifindex = if_nametoindex(de->d_name + 4);
-            if (ifindex != 0) {
-                mfw_xdp_path(root, de->d_name + 4, path, sizeof(path));
-                mfw_xdp_unload(ifindex, mfw_xdp_pinned_id(path));
-            }
+            ifname = de->d_name + 4;
+            tc = 0;
+
+        } else {
+            continue;
+        }
+
+        ifindex = sw_netif_index(ifname, err, errlen);
+
+        if (ifindex < 0) {
+            rc = -1;
+
+        } else if (ifindex > 0 && tc) {
+            mfw_tc_detach(ifindex);
+
+        } else if (ifindex > 0) {
+            mfw_xdp_path(root, ifname, path, sizeof(path));
+            mfw_xdp_unload(ifindex, mfw_xdp_pinned_id(path));
         }
     }
 
     closedir(d);
+
+    return rc;
 }
 
 
@@ -810,7 +775,7 @@ mfw_dp_move_root(const char *old, const char *root, char *err,
     if (slash != NULL && slash != parent) {
         *slash = '\0';
 
-        if (mfw_ensure_dir(parent) != 0) {
+        if (sw_file_mkdir_p(parent, 0700) != 0) {
             return mfw_fail(err, errlen, "create %s: %s", parent,
                             strerror(errno));
         }
@@ -825,22 +790,31 @@ mfw_dp_move_root(const char *old, const char *root, char *err,
 }
 
 
-void
-mfw_dp_purge(const char *root)
+int
+mfw_dp_purge(const char *root, char *err, size_t errlen)
 {
-    char  dir[PATH_MAX];
+    int          i;
+    char         dir[PATH_MAX];
+
+    /* state/ was left by mfw 0.2 */
+    static const char  *dirs[] = { "link", "maps", "state" };
 
     /* links first, so no interface is left running on deleted maps */
-    links_detach(root);
+    if (links_detach(root, err, errlen) != 0) {
+        return -1;
+    }
 
-    snprintf(dir, sizeof(dir), "%s/link", root);
-    mfw_rm_dir(dir);
+    for (i = 0; i < 3; i++) {
+        snprintf(dir, sizeof(dir), "%s/%s", root, dirs[i]);
 
-    snprintf(dir, sizeof(dir), "%s/maps", root);
-    mfw_rm_dir(dir);
+        if (sw_bpffs_unpin_dir(dir, err, errlen) != 0) {
+            return -1;
+        }
+    }
 
-    snprintf(dir, sizeof(dir), "%s/state", root);  /* left by mfw 0.2 */
-    mfw_rm_dir(dir);
+    if (rmdir(root) != 0 && errno != ENOENT) {
+        return mfw_fail(err, errlen, "rmdir %s: %s", root, strerror(errno));
+    }
 
-    rmdir(root);
+    return 0;
 }

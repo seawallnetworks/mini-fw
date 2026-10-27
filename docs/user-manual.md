@@ -674,23 +674,28 @@ kernel error), **2** usage, file or connection error.
 ### 9.2 `mfwd`
 
 ```text
-mfwd [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir] [-x auto|native|generic]
+mfwd [-v] [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir] [-x auto|native|generic]
 mfwd -P [-p pinroot] [-d statedir]
 ```
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `-s socket` | `/run/mfwd.sock` | where to listen |
-| `-m mode` | `0600` | socket permissions |
-| `-g group` | | socket group; with `-m 0660`, that group may use `mfw` without root |
+| `-v` | | debug logging, libbpf's and libxdp's info included |
+| `-s socket` | `/run/mfwd.sock` | where to listen; refused if another mfwd answers there |
+| `-m mode` | `0600` | socket permissions, octal, at most `0777` |
+| `-g group` | | socket group, from `/etc/group`; with `-m 0660`, that group may use `mfw` without root. An unknown group stops mfwd |
 | `-p pinroot` | `/sys/fs/bpf/seawall/mfw` | bpffs directory for maps and links; at the default, pins left under `/sys/fs/bpf/mfw` by mfwd 0.4.0 and before are moved there, filtering on |
 | `-d statedir` | `/run/mfwd` | where the running policy is saved |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |
 
 mfwd logs to stderr, which systemd sends to the journal
-(`journalctl -u mfwd`). Every applied or refused policy is logged with the
-caller's uid.
+(`journalctl -u mfwd`), each line at its priority: `journalctl -u mfwd -p
+warning` shows its warnings and errors alone. Every applied or refused
+policy is logged with the caller's uid.
+
+mfwd makes its socket before it touches the pins: a second mfwd started
+by hand while one runs is refused, and the first goes on serving.
 
 ---
 
@@ -743,7 +748,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw       # detaches the program and removes all 
 | `mfw: cannot reach mfwd: No such file or directory` | mfwd not running | `sudo systemctl start mfwd`; `journalctl -u mfwd` |
 | `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or join the group `mfw` (`sudo usermod -aG mfw $USER`, then log in again); a mfwd started by hand needs `-g mfw -m 0660` |
 | `… is not on bpffs` (mfwd log) | bpffs missing | `sudo mount -t bpf bpf /sys/fs/bpf` |
-| `load BPF object: …` (mfwd log) | kernel too old (< 6.1), no BTF, or missing capabilities | check §1.2; run mfwd with `MFW_DEBUG=1` to see the verifier log |
+| `load BPF object: …` (mfwd log) | kernel too old (< 6.1), no BTF, or missing capabilities | check §1.2; run mfwd with `-v` and `SW_BPF_DEBUG=1` to see the verifier log |
 | `eth0: attach TC ingress: …` | missing capabilities | check §1.2 |
 | `pinned maps under … have ABI N, expected 2` | state left by a different mini-fw version | `sudo mfwd -P`, then start mfwd again |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |

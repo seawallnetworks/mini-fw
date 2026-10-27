@@ -3,15 +3,18 @@
  *
  * One request per connection. mfwd sends its whole reply and closes, so a
  * reply is read up to EOF: "OK [fields]\n", "ERR <code> <message>\n", or
- * for SHOW "OK <n>\n" followed by n lines. */
+ * for SHOW "OK <n>\n" followed by n lines.
+ *
+ * The connection and the sends are libsw's (Seawall proposal 0011): what
+ * links libmfw.a links libsw.a after it. */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/un.h>
 #include <unistd.h>
+
+#include <sw/sock.h>
 
 #include "mfw_client.h"
 
@@ -48,21 +51,6 @@ const char *mfw_strerror(int rc)
     case mfw_err_internal: return "mfwd internal error";
     default:               return "unknown error";
     }
-}
-
-static int send_all(int fd, const char *p, size_t len)
-{
-    while (len > 0) {
-        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
-
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return -1;
-        p += n;
-        len -= n;
-    }
-    return 0;
 }
 
 /* Reads to EOF into a malloc'd, NUL-terminated buffer. */
@@ -136,8 +124,6 @@ int mfw_request(const mfw_client_t *c, const char *request, char **reply,
 {
     const char *path = c && c->socket_path ? c->socket_path : MFW_SOCKET;
     int timeout = c && c->timeout_ms > 0 ? c->timeout_ms : MFW_TIMEOUT_MS;
-    struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    struct timeval tv = { timeout / 1000, (timeout % 1000) * 1000 };
     size_t len = strlen(request);
     int fd, saved;
     char *buf = NULL;
@@ -147,21 +133,13 @@ int mfw_request(const mfw_client_t *c, const char *request, char **reply,
         err[0] = '\0';
     if (len == 0 || len > MFW_REQUEST_MAX || request[len - 1] != '\n')
         return mfw_err_badreq;
-    if (strlen(path) >= sizeof(addr.sun_path)) {
-        errno = ENAMETOOLONG;
-        return mfw_err_io;
-    }
-    strcpy(addr.sun_path, path);
 
-    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    /* the timeout bounds connect() too: an mfwd that never accepts */
+    fd = sw_sock_connect(path, timeout, NULL, 0);
     if (fd < 0)
         return mfw_err_io;
-    /* on Unix sockets the send timeout also bounds connect() */
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
-        send_all(fd, request, len) || shutdown(fd, SHUT_WR) ||
+    if (sw_sock_send_all(fd, request, len) || shutdown(fd, SHUT_WR) ||
         recv_all(fd, &buf)) {
         saved = errno;
         close(fd);

@@ -402,6 +402,12 @@ counters restart on such an upgrade while the rulesets and links stay.
 
 ### 5.1 Start
 
+0. **Listen** on the socket (default `0600`; `-m`, `-g`), with libsw's
+   `sw_sock_listen()` (Seawall proposal 0011 §4), before anything else: a
+   socket another mfwd answers on, a path that isn't a socket, or a group
+   not in `/etc/group` refuses the start before the pins are touched. It
+   binds under `umask(0177)` and sets the group and mode before
+   `listen()`. A client that connects now waits until step 7.
 1. At the default pin root only: if `/sys/fs/bpf/mfw`, the default of
    mfwd 0.4.0 and before, is there, rename it to `/sys/fs/bpf/seawall/mfw`.
    A rename on bpffs moves the directory with everything pinned in it:
@@ -409,7 +415,8 @@ counters restart on such an upgrade while the rulesets and links stay.
    under both refuse the start: a second set of links would attach
    mini-fw twice. `mfwd -P` moves them first too, then removes them.
 2. Check that the pin root, or the nearest directory above it that
-   exists, is on bpffs (`statfs` magic).
+   exists, is on bpffs (`sw_bpffs_check()`: it climbs only past a missing
+   directory).
 3. Create `maps/` and `link/` with mode 0700.
 4. Open sw_flowd's table pin, if there is one of its layout (§4.4).
    Open the embedded skeleton with pin root `maps/`, bind that table to
@@ -425,9 +432,16 @@ counters restart on such an upgrade while the rulesets and links stay.
 6. **Restore** the saved policy, if there is one. If the kernel still runs
    its generation (`config.generation`), it is simply taken over. If not
    (the pins were removed, e.g. by hand), it is applied again.
-7. Listen on the socket (default `0600`; `-m`, `-g`), then tell systemd
-   mfwd is ready (`READY=1` to `$NOTIFY_SOCKET`; `mfwd.service` is
-   `Type=notify`), so sw_configd, ordered after mfwd, finds the socket.
+7. Tell systemd mfwd is ready (`READY=1` to `$NOTIFY_SOCKET`,
+   `sw_notify_ready()`; `mfwd.service` is `Type=notify`), so sw_configd,
+   ordered after mfwd, finds the socket, and serve.
+
+An interface is looked up with libsw's `sw_netif_index()`, which tells one
+that doesn't exist from a lookup that failed (glibc's needs `AF_UNIX`,
+which a unit's `RestrictAddressFamilies=` can refuse). A failed lookup is
+never taken for a gone interface: nothing is detached or unpinned, an
+`APPLY` is refused and the running policy stays, and `mfwd -P` stops
+before it removes a pin. It is logged once.
 
 ### 5.2 Stop
 
@@ -471,7 +485,7 @@ interface at TC ingress, logs it as degraded, and `STATUS` lists it in
 
 A kernel without tcx (before 6.6, such as Amazon Linux 2023's 6.1) refuses
 a `BPF_PROG_QUERY` for `BPF_TCX_INGRESS`; mfwd then attaches with classic
-TC, and its start-up log says so (`MFW_NO_TCX=1` does the same on a newer
+TC, and its start-up log says so (`SW_NO_TCX=1` does the same on a newer
 kernel, for the tests):
 
 - **Attach:** a clsact qdisc if the interface has none, and on its ingress
@@ -524,7 +538,9 @@ and the user manual). mfwd:
 5. Removes every other entry of `maps/rulesets` and **detaches** attached
    interfaces that are no longer bound.
 6. Saves the policy (canonical form, `mfw_policy_format()`) to
-   `<statedir>/policy`, written to a temporary file, fsynced and renamed.
+   `<statedir>/policy` with `sw_file_write_atomic()`: a temporary file,
+   fsynced and renamed, then the directory fsynced, so a crash just after
+   an `APPLY` keeps it.
 
 Nothing in the kernel changes before step 2, so a refused policy leaves
 the running one in place.
@@ -621,8 +637,9 @@ The canonical form (`SHOW`, the saved policy) prints ACEs normalized
 
 `mfw [-s socket] apply|check|show|status|stats|ping|version`. `check`
 parses locally with `libmfw` and sends nothing. Exit status: 0 ok, 1
-refused by mfwd, 2 usage, file or connection error. Set `MFW_DEBUG=1` in
-mfwd's environment for libbpf debug output, including the verifier log.
+refused by mfwd, 2 usage, file or connection error. Run mfwd with `-v`
+for libbpf's and libxdp's info, and with `SW_BPF_DEBUG=1` in its
+environment too for libbpf's debug output, including the verifier log.
 
 ---
 

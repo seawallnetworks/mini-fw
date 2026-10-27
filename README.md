@@ -68,8 +68,11 @@ layout of its table: `make -C ../sw_flowd install-header`, or its `make
 install`, puts it in `/usr/local/seawall/include`; `SW_FLOWD_PREFIX`
 points elsewhere), and libpkt's headers (`<libpkt/parse.h>`, the
 stack's packet parser: `make -C ../libpkt install` puts them in
-`/usr/local/seawall/include`; `LIBPKT_PREFIX` points elsewhere).
-`libmfw.a` alone needs neither. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
+`/usr/local/seawall/include`; `LIBPKT_PREFIX` points elsewhere), and
+libsw (`libsw.a` and `libsw_bpf.a`, the stack's userspace library:
+`make -C ../libsw install` puts them in `/usr/local/seawall/lib`;
+`LIBSW_PREFIX` points elsewhere). `libmfw.a` needs only `libsw.a`, which
+what links it links after it. Amazon Linux 2023 and Ubuntu 24.04 and 26.04 qualify. mfwd
 attaches at XDP, in libxdp's dispatcher; on an interface where a program
 that is not a dispatcher holds the XDP hook, at TC ingress: with tcx on 6.6
 and later, and with classic TC (a cls_bpf filter on clsact) before. The
@@ -211,8 +214,8 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   say so. A pin whose interface was deleted is noticed and replaced. On
   start mfwd puts its new program in each dispatcher before it takes the
   old one out, and moves an interface from TC to XDP once its hook is
-  free. `MFW_NO_XDP=1` attaches at TC only, and `MFW_NO_TCX=1` with
-  classic TC on a newer kernel, for the tests.
+  free. `MFW_NO_XDP=1` attaches at TC only, and `SW_NO_TCX=1`, the
+  stack's switch, with classic TC on a newer kernel, for the tests.
 - **Verifier.** The per-ACE extended match is a global BPF function, so it is
   verified once. Both loops (64 standard + 128 extended ACEs) then verify in
   about 16K of the 1M instruction budget. Global functions with pointer args

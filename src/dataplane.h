@@ -60,8 +60,12 @@ int mfw_dp_get_config(const struct mfw_dp *dp, struct mfw_config *cfg);
 int mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments, __u32 *generation);
 int mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX]);
 
-/* Detach every interface and remove all pins under root. */
-void mfw_dp_purge(const char *root);
+/*
+ * Detach every interface and remove all pins under root. Returns 0, or -1
+ * with a message in err; an interface that can't be looked up stops it
+ * before any pin is removed.
+ */
+int mfw_dp_purge(const char *root, char *err, size_t errlen);
 
 /*
  * Move the pins under old to root, attached programs and all: 1 if it

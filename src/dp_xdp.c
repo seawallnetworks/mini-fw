@@ -9,17 +9,19 @@
 
 #include "dp_link.h"
 #include "mfw.skel.h"
+#include "util.h"
+
+#include <sw/bpffs.h>
+#include <sw/netif.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <limits.h>
-#include <linux/magic.h>
 #include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/vfs.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 
@@ -27,33 +29,10 @@
 #define MFW_XDP_PROG  "mfw_xdp"
 
 
-static int mfw_xdp_bpffs_mounted(void);
-
-
 void
 mfw_xdp_path(const char *root, const char *ifname, char *buf, size_t len)
 {
     snprintf(buf, len, "%s/link/xdp_%.*s", root, IF_NAMESIZE, ifname);
-}
-
-
-/*
- * Is bpffs mounted where libxdp looks for it? libxdp keeps its
- * dispatchers' state there. Without it, libxdp attaches a program alone,
- * without a dispatcher, and no other program can join the hook after it.
- */
-static int
-mfw_xdp_bpffs_mounted(void)
-{
-    const char     *dir;
-    struct statfs   st;
-
-    dir = getenv("LIBXDP_BPFFS");
-    if (dir == NULL) {
-        dir = "/sys/fs/bpf";
-    }
-
-    return statfs(dir, &st) == 0 && st.f_type == BPF_FS_MAGIC;
 }
 
 
@@ -184,7 +163,8 @@ mfw_xdp_pinned_id(const char *path)
 /*
  * Is the program pinned at link/xdp_<ifname> still in ifname's
  * dispatcher? If not (the interface was deleted or re-created, or the
- * program was taken out), the stale pin is deleted and 0 returned.
+ * program was taken out), the stale pin is deleted and 0 returned. If
+ * the interface can't be looked up, the pin stays, and counts.
  */
 int
 mfw_xdp_attached(const char *root, const char *ifname)
@@ -193,7 +173,7 @@ mfw_xdp_attached(const char *root, const char *ifname)
     __u32                  id;
     struct xdp_program    *p;
     struct xdp_multiprog  *mp;
-    char                   path[PATH_MAX];
+    char                   path[PATH_MAX], err[256];
 
     mfw_xdp_path(root, ifname, path, sizeof(path));
 
@@ -202,7 +182,12 @@ mfw_xdp_attached(const char *root, const char *ifname)
         return 0;
     }
 
-    ifindex = if_nametoindex(ifname);
+    ifindex = sw_netif_index(ifname, err, sizeof(err));
+    if (ifindex < 0) {
+        mfw_netif_unknown(err);
+        return 1;
+    }
+
     if (ifindex == 0) {
         goto not_found;  /* the interface is gone */
     }
@@ -330,7 +315,11 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
     int                   e, i, state;
     enum xdp_attach_mode  mode;
 
-    if (!mfw_xdp_bpffs_mounted()) {
+    /*
+     * libxdp keeps its dispatchers' state there: without it, it attaches
+     * a program alone, and nothing can join the hook after it
+     */
+    if (!sw_bpffs_mounted(sw_bpffs_libxdp_dir())) {
         return -ENOTSUP;
     }
 
@@ -375,17 +364,26 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
 }
 
 
-/* Leave ifname's dispatcher, if mini-fw is in it. */
+/*
+ * Leave ifname's dispatcher, if mini-fw is in it. If ifname can't be
+ * looked up, nothing changes: unpinning without the unload would leave
+ * the program in the dispatcher, unknown to mfwd.
+ */
 void
 mfw_xdp_detach(const char *root, const char *ifname)
 {
     int    ifindex;
     __u32  id;
-    char   path[PATH_MAX];
+    char   path[PATH_MAX], err[256];
+
+    ifindex = sw_netif_index(ifname, err, sizeof(err));
+    if (ifindex < 0) {
+        mfw_netif_unknown(err);
+        return;
+    }
 
     mfw_xdp_path(root, ifname, path, sizeof(path));
     id = mfw_xdp_pinned_id(path);
-    ifindex = if_nametoindex(ifname);
 
     if (id != 0 && ifindex != 0) {
         mfw_xdp_unload(ifindex, id);

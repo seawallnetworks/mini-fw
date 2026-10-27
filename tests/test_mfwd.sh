@@ -57,7 +57,7 @@ in_ns() { nsenter --net=/var/run/netns/$NS "$@"; }
 # mini-fw's programs in the interface's XDP dispatcher
 xdp_in() { in_ns xdp-loader status "$1" 2>/dev/null | grep -c ' mfw_xdp '; }
 # ip link doesn't show tcx programs; bpftool does, and classic TC's
-# (MFW_NO_TCX=1, or a kernel before 6.6) as clsact/ingress
+# (SW_NO_TCX=1, or a kernel before 6.6) as clsact/ingress
 tc_on() { in_ns bpftool net show dev "$1" | grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'; }
 # mini-fw filters the interface, at XDP or TC
 on() { [[ -z ${MFW_NO_XDP:-} && $(xdp_in "$1") == 1 ]] || tc_on "$1"; }
@@ -109,6 +109,23 @@ expect ok "ping" mfw ping
 same "socket mode" "$(stat -c %a "$SOCK")" 660
 same "no generation yet" "$(field generation)" none
 same "show: nothing applied" "$(mfw show)" ""
+
+echo "== refused at start, before the pins"
+# libsw's listener: checked before mfwd touches the pins, so the first
+# one, on the same pins, goes on as it was
+ino=$(stat -c %i "$SOCK")
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -p "$PINS" -d "$STATE" 2>&1)
+same "a second mfwd: exit 1" "$?" 1
+[[ $out == *"another process listens on it"* ]] && ok "says why" || bad "says why: $out"
+same "its socket untouched" "$(stat -c %i "$SOCK")" "$ino"
+expect ok "the first one serves on" mfw ping
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$TMP/g.sock" -p "$PINS" -d "$STATE" \
+      -g sw-no-such-group 2>&1)
+same "an unknown group: exit 1" "$?" 1
+[[ $out == *'no group "sw-no-such-group"'* ]] && ok "says why" || bad "says why: $out"
+expect fail "no socket left" test -e "$TMP/g.sock"
+expect fail "-m '': refused" "$MFWD" -m "" -s "$TMP/m.sock" -p "$PINS" -d "$STATE"
+expect fail "-m 1777: refused" "$MFWD" -m 1777 -s "$TMP/m.sock" -p "$PINS" -d "$STATE"
 
 echo "== apply"
 expect ok "apply" mfw apply <(echo "$POLICY")

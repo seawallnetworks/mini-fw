@@ -2,7 +2,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
 
 /*
- * mfwd's helpers: error messages, directories.
+ * mfwd's helpers: error messages.
  */
 
 
@@ -17,10 +17,12 @@
 int mfw_fail(char *err, size_t len, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-/* mkdir -p, mode 0700. Returns 0, or -1 with errno set. */
-int mfw_ensure_dir(const char *path);
-/* Delete dir's entries (not recursively), then dir itself. */
-void mfw_rm_dir(const char *dir);
+/*
+ * Logs, once, that an interface couldn't be looked up (sw_netif_index()
+ * returned -1, with err): glibc's if_nametoindex() needs AF_UNIX, and
+ * every interface fails alike until the unit allows it.
+ */
+void mfw_netif_unknown(const char *err);
 
 
 #endif /* _MFW_UTIL_H_INCLUDED_ */

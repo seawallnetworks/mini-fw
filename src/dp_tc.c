@@ -11,6 +11,8 @@
 #include "dp_link.h"
 #include "util.h"
 
+#include <sw/netif.h>
+
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
@@ -67,24 +69,6 @@ tc_path(const char *root, const char *ifname, char *buf, size_t len)
 
 
 /*
- * Does the kernel have tcx (6.6+)? One without it refuses a tcx query, so
- * query lo's. MFW_NO_TCX=1 says no anyway, to test classic TC on a newer
- * kernel.
- */
-int
-mfw_have_tcx(void)
-{
-    LIBBPF_OPTS(bpf_prog_query_opts, q);
-
-    if (getenv("MFW_NO_TCX") != NULL) {
-        return 0;
-    }
-
-    return bpf_prog_query_opts(1 /* lo */, BPF_TCX_INGRESS, &q) == 0;
-}
-
-
-/*
  * Attach prog_fd as mini-fw's classic TC filter on ifindex's ingress,
  * adding the clsact qdisc if there is none. A mini-fw filter already
  * there is replaced in one netlink request, so the interface is never
@@ -136,7 +120,8 @@ mfw_tc_attached(const char *root, const char *ifname)
     LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS);
     LIBBPF_OPTS(bpf_tc_opts, opts, .handle = MFW_TC_HANDLE,
                 .priority = MFW_TC_PRIORITY);
-    char  path[PATH_MAX];
+    int   ifindex;
+    char  path[PATH_MAX], err[256];
 
     tc_path(root, ifname, path, sizeof(path));
 
@@ -144,7 +129,14 @@ mfw_tc_attached(const char *root, const char *ifname)
         return 0;
     }
 
-    hook.ifindex = if_nametoindex(ifname);
+    /* can't tell: the pin stays, and counts */
+    ifindex = sw_netif_index(ifname, err, sizeof(err));
+    if (ifindex < 0) {
+        mfw_netif_unknown(err);
+        return 1;
+    }
+
+    hook.ifindex = ifindex;
 
     if (hook.ifindex != 0 && bpf_tc_query(&hook, &opts) == 0) {
         return 1;
@@ -198,14 +190,14 @@ tcx_link_ifindex(int fd)
 /*
  * Open the tcx link pinned at link/tcx_<ifname>. Returns its fd if the
  * link is still attached to ifname, else -1; a stale pin (the interface
- * was deleted or re-created) is deleted.
+ * was deleted or re-created) is deleted. If ifname can't be looked up,
+ * the link is taken as still its.
  */
 int
 mfw_tcx_open(const char *root, const char *ifname)
 {
-    int    fd;
-    __u32  now;
-    char   path[PATH_MAX];
+    int    fd, now;
+    char   path[PATH_MAX], err[256];
 
     tcx_path(root, ifname, path, sizeof(path));
 
@@ -214,9 +206,13 @@ mfw_tcx_open(const char *root, const char *ifname)
         return -1;
     }
 
-    now = if_nametoindex(ifname);
+    now = sw_netif_index(ifname, err, sizeof(err));
+    if (now < 0) {
+        mfw_netif_unknown(err);
+        return fd;
+    }
 
-    if (now == 0 || tcx_link_ifindex(fd) != now) {
+    if (now == 0 || tcx_link_ifindex(fd) != (__u32) now) {
         close(fd);
         unlink(path);
         return -1;
@@ -261,20 +257,27 @@ mfw_tcx_attach(const char *root, const char *ifname, int ifindex,
 
 /*
  * Take ifname off TC: delete its tcx link pin, or remove its classic TC
- * filter and pin, whichever it has.
+ * filter and pin, whichever it has. A classic filter on an interface that
+ * can't be looked up keeps its pin: without it, mfwd wouldn't know the
+ * filter is there.
  */
 void
 mfw_tc_off(const char *root, const char *ifname)
 {
     int   ifindex;
-    char  path[PATH_MAX];
+    char  path[PATH_MAX], err[256];
 
     tcx_path(root, ifname, path, sizeof(path));
     /* the pin is the link's last reference: the kernel detaches it */
     unlink(path);
 
+    ifindex = sw_netif_index(ifname, err, sizeof(err));
+    if (ifindex < 0) {
+        mfw_netif_unknown(err);
+        return;
+    }
+
     tc_path(root, ifname, path, sizeof(path));
-    ifindex = if_nametoindex(ifname);
 
     if (unlink(path) == 0 && ifindex != 0) {
         mfw_tc_detach(ifindex);

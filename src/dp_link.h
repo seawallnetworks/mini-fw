@@ -36,7 +36,6 @@ int mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
     int flows_fd, char *holder, size_t len);
 void mfw_xdp_detach(const char *root, const char *ifname);
 
-int mfw_have_tcx(void);
 int mfw_tc_attach(int ifindex, int prog_fd);
 void mfw_tc_detach(int ifindex);
 int mfw_tc_attached(const char *root, const char *ifname);

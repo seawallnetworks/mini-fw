@@ -43,7 +43,7 @@ fi
 in_cli() { ip netns exec "$CLI" "$@"; }
 in_fw()  { ip netns exec "$FW" "$@"; }
 # ip link doesn't show tcx programs; bpftool does, and classic TC's
-# (MFW_NO_TCX=1, or a kernel before 6.6) as clsact/<hook>
+# (SW_NO_TCX=1, or a kernel before 6.6) as clsact/<hook>
 tcx_on() { in_fw bpftool net show dev "$1" | grep -Eq "(tcx|clsact)/${2:-ingress} mfw_tc[ :]"; }
 xdp_on() { in_fw ip link show "$1" | grep -q ' xdp'; }
 # mini-fw in the interface's XDP dispatcher; xdp-loader reads it from the

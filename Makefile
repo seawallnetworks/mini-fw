@@ -1,5 +1,6 @@
 # mini-fw: mfwd (the daemon), mfw (its client) and libmfw.a (for front
-# ends such as sw_configd: policy checks and the mfwd client, no libbpf)
+# ends such as sw_configd: policy checks and the mfwd client, no libbpf;
+# what links it links libsw.a after it)
 CLANG     ?= clang
 BPFTOOL   ?= bpftool
 CC        ?= cc
@@ -17,9 +18,16 @@ SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
 # BPF program needs it.
 LIBPKT_PREFIX ?= $(PREFIX)
 LIBPKT_H := $(LIBPKT_PREFIX)/include/libpkt/parse.h
+# libsw, the stack's userspace library (Seawall proposal 0011): logging,
+# the socket, readiness, files, bpffs and interface lookups in libsw.a;
+# tcx and libbpf's and libxdp's messages in libsw_bpf.a, mfwd's alone.
+# Linked by path, libsw_bpf.a first.
+LIBSW_PREFIX ?= $(PREFIX)
+LIBSW_A     := $(LIBSW_PREFIX)/lib/libsw.a
+LIBSW_BPF_A := $(LIBSW_PREFIX)/lib/libsw_bpf.a
 
 CFLAGS     ?= -O2 -g -Wall -Wextra
-CFLAGS     += -Iinclude -Isrc -MMD -MP
+CFLAGS     += -Iinclude -Isrc -I$(LIBSW_PREFIX)/include -MMD -MP
 BPF_CFLAGS := -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Iinclude \
               -I$(SW_FLOWD_PREFIX)/include -I$(LIBPKT_PREFIX)/include \
               $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH))
@@ -55,10 +63,15 @@ $(LIBPKT_H):
 	    "(make -C ../libpkt install), or set LIBPKT_PREFIX" >&2
 	@exit 1
 
+$(LIBSW_A) $(LIBSW_BPF_A):
+	@echo "$@ missing: install libsw first" \
+	    "(make -C ../libsw install), or set LIBSW_PREFIX" >&2
+	@exit 1
+
 src/mfw.skel.h: build/mfw.bpf.o
 	$(BPFTOOL) gen skeleton $< name mfw_bpf > $@
 
-build/%.o: src/%.c | build
+build/%.o: src/%.c | build $(LIBSW_A)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/dataplane.o: CFLAGS += -I$(SW_FLOWD_PREFIX)/include
@@ -70,20 +83,22 @@ build/dataplane.o build/dp_xdp.o: src/mfw.skel.h
 libmfw.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
-mfwd: $(MFWD_OBJS) libmfw.a
-	$(CC) $(CFLAGS) -o $@ $(MFWD_OBJS) libmfw.a $(LIBBPF)
+mfwd: $(MFWD_OBJS) libmfw.a $(LIBSW_BPF_A) $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ $(MFWD_OBJS) libmfw.a $(LIBSW_BPF_A) $(LIBSW_A) \
+	    $(LIBBPF)
 
-mfw: build/mfw.o libmfw.a
-	$(CC) $(CFLAGS) -o $@ build/mfw.o libmfw.a
+mfw: build/mfw.o libmfw.a $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ build/mfw.o libmfw.a $(LIBSW_A)
 
-tests/test_acl: tests/test_acl.c libmfw.a
-	$(CC) $(CFLAGS) -o $@ $< libmfw.a
+tests/test_acl: tests/test_acl.c libmfw.a $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ $< libmfw.a $(LIBSW_A)
 
-tests/test_policy: tests/test_policy.c libmfw.a
-	$(CC) $(CFLAGS) -o $@ $< libmfw.a
+tests/test_policy: tests/test_policy.c libmfw.a $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ $< libmfw.a $(LIBSW_A)
 
-tests/test_bpf: tests/test_bpf.c src/mfw.skel.h libmfw.a
-	$(CC) $(CFLAGS) -I$(SW_FLOWD_PREFIX)/include -o $@ $< libmfw.a $(LIBBPF)
+tests/test_bpf: tests/test_bpf.c src/mfw.skel.h libmfw.a $(LIBSW_A)
+	$(CC) $(CFLAGS) -I$(SW_FLOWD_PREFIX)/include -o $@ $< libmfw.a \
+	    $(LIBSW_A) $(LIBBPF)
 
 # no privileges needed
 test: tests/test_acl tests/test_policy
@@ -115,7 +130,8 @@ install-runtime: mfwd mfw
 	install -D -m 0755 mfw $(DESTDIR)$(PREFIX)/bin/mfw
 	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service
 
-# the client library and its headers, for linking (sw_configd)
+# the client library and its headers, for linking (sw_configd, which
+# links libsw.a after it)
 install-static-lib: libmfw.a
 	install -D -m 0644 libmfw.a $(DESTDIR)$(PREFIX)/lib/libmfw.a
 	install -D -m 0644 -t $(DESTDIR)$(PREFIX)/include $(HEADERS)
