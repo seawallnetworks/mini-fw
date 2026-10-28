@@ -492,11 +492,14 @@ int
 mfw_xdp(struct xdp_md *ctx)
 {
     int              rc;
+    void            *data, *data_end;
     mfw_verdict_e    v;
     struct pkt_meta  p;
 
-    rc = pkt_parse((void *) (long) ctx->data, (void *) (long) ctx->data_end,
-                   &p);
+    data = (void *) (long) ctx->data;
+    data_end = (void *) (long) ctx->data_end;
+
+    rc = pkt_parse(data, data_end, &p);
 
     v = mfw_judge(rc, &p, ctx->ingress_ifindex);
     if (v == mfw_drop) {
