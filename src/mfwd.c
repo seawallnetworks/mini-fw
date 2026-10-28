@@ -49,7 +49,6 @@
 #include "dataplane.h"
 #include "mfw_client.h"
 #include "mfw_policy.h"
-#include "util.h"
 
 #define MFWD_VERSION      "0.4.0"
 #define MFWD_STATE_DIR    "/run/mfwd"

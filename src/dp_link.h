@@ -45,5 +45,12 @@ int mfw_tcx_attach(const char *root, const char *ifname, int ifindex,
     int prog_fd, char *err, size_t errlen);
 void mfw_tc_off(const char *root, const char *ifname);
 
+/*
+ * Logs, once, that an interface couldn't be looked up (sw_netif_index()
+ * returned -1, with err): glibc's if_nametoindex() needs AF_UNIX, and
+ * every interface fails alike until the unit allows it.
+ */
+void mfw_netif_unknown(const char *err);
+
 
 #endif /* _MFW_DP_LINK_H_INCLUDED_ */

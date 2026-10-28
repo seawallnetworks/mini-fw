@@ -9,8 +9,8 @@
 
 
 #include "dp_link.h"
-#include "util.h"
 
+#include <sw/fail.h>
 #include <sw/netif.h>
 
 #include <bpf/bpf.h>
@@ -236,8 +236,8 @@ mfw_tcx_attach(const char *root, const char *ifname, int ifindex,
 
     fd = bpf_link_create(prog_fd, ifindex, BPF_TCX_INGRESS, NULL);
     if (fd < 0) {
-        return mfw_fail(err, errlen, "%s: attach TC ingress: %s", ifname,
-                        strerror(errno));
+        return sw_fail(err, errlen, "%s: attach TC ingress: %s", ifname,
+                       strerror(errno));
     }
 
     tcx_path(root, ifname, path, sizeof(path));
@@ -245,8 +245,8 @@ mfw_tcx_attach(const char *root, const char *ifname, int ifindex,
     if (bpf_obj_pin(fd, path) != 0) {
         e = errno;
         close(fd);  /* the last reference: the link detaches */
-        return mfw_fail(err, errlen, "%s: pin %s: %s", ifname, path,
-                        strerror(e));
+        return sw_fail(err, errlen, "%s: pin %s: %s", ifname, path,
+                       strerror(e));
     }
 
     close(fd);  /* the pin keeps the link alive */

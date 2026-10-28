@@ -9,7 +9,6 @@
 
 #include "dp_link.h"
 #include "mfw.skel.h"
-#include "util.h"
 
 #include <sw/bpffs.h>
 #include <sw/netif.h>

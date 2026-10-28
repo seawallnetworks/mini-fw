@@ -41,12 +41,12 @@
 #include "dataplane.h"
 #include "dp_link.h"
 #include "mfw.skel.h"
-#include "util.h"
 
 #include <sw_flowd/sw_flowd.h>
 
 #include <sw/bpf.h>
 #include <sw/bpffs.h>
+#include <sw/fail.h>
 #include <sw/file.h>
 #include <sw/log.h>
 #include <sw/netif.h>
@@ -170,7 +170,7 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     k = 0;
 
     if (bpf_map_lookup_elem(dp->config_fd, &k, &cfg) != 0) {
-        return mfw_fail(err, len, "read config: %s", strerror(errno));
+        return sw_fail(err, len, "read config: %s", strerror(errno));
     }
 
     if (cfg.abi_version == MFW_ABI_VERSION) {
@@ -178,9 +178,9 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     }
 
     if (cfg.abi_version != 0) {
-        return mfw_fail(err, len, "pinned maps under %s have ABI %u, "
-                        "expected %u (mfwd -P to remove them)", dp->root,
-                        cfg.abi_version, MFW_ABI_VERSION);
+        return sw_fail(err, len, "pinned maps under %s have ABI %u, "
+                       "expected %u (mfwd -P to remove them)", dp->root,
+                       cfg.abi_version, MFW_ABI_VERSION);
     }
 
     memset(&cfg, 0, sizeof(cfg));
@@ -188,7 +188,7 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     cfg.abi_version = MFW_ABI_VERSION;
 
     if (bpf_map_update_elem(dp->config_fd, &k, &cfg, BPF_ANY) != 0) {
-        return mfw_fail(err, len, "init config: %s", strerror(errno));
+        return sw_fail(err, len, "init config: %s", strerror(errno));
     }
 
     return 0;
@@ -350,7 +350,7 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->flows_fd = -1;
 
     if (strlen(root) >= sizeof(dp->root)) {
-        return mfw_fail(err, errlen, "pin root too long");
+        return sw_fail(err, errlen, "pin root too long");
     }
 
     snprintf(dp->root, sizeof(dp->root), "%s", root);
@@ -364,14 +364,14 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     snprintf(links, sizeof(links), "%s/link", root);
 
     if (sw_file_mkdir_p(maps, 0700) != 0 || sw_file_mkdir_p(links, 0700) != 0) {
-        return mfw_fail(err, errlen, "create %s: %s", root, strerror(errno));
+        return sw_fail(err, errlen, "create %s: %s", root, strerror(errno));
     }
 
     drop_old_stats(dp->root);
 
     dp->skel = mfw_bpf__open_opts(&opts);
     if (dp->skel == NULL) {
-        return mfw_fail(err, errlen, "open BPF object: %s", strerror(errno));
+        return sw_fail(err, errlen, "open BPF object: %s", strerror(errno));
     }
 
     flows_open(dp);
@@ -379,8 +379,8 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     if (dp->flows_fd >= 0
         && bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0)
     {
-        mfw_fail(err, errlen, "bind sw_flowd's flow table: %s",
-                 strerror(errno));
+        sw_fail(err, errlen, "bind sw_flowd's flow table: %s",
+                strerror(errno));
         goto failed;
     }
 
@@ -393,9 +393,9 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
 
     /* reuses the pinned maps, and pins any that don't exist yet */
     if (mfw_bpf__load(dp->skel) != 0) {
-        mfw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
-                 "CAP_BPF and CAP_NET_ADMIN needed; mfwd -v with "
-                 "SW_BPF_DEBUG=1 for the verifier log)", strerror(errno));
+        sw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
+                "CAP_BPF and CAP_NET_ADMIN needed; mfwd -v with "
+                "SW_BPF_DEBUG=1 for the verifier log)", strerror(errno));
         goto failed;
     }
 
@@ -448,7 +448,7 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
     }
 
     if (ifindex == 0) {
-        return mfw_fail(err, errlen, "%s: no such interface", ifname);
+        return sw_fail(err, errlen, "%s: no such interface", ifname);
     }
 
     if (mfw_dp_attached(dp, ifname)) {
@@ -463,12 +463,12 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
             return 0;
 
         } else if (e == -ENOTSUP) {
-            return mfw_fail(err, errlen, "%s: attach XDP: libxdp needs bpffs "
-                            "at %s", ifname, sw_bpffs_libxdp_dir());
+            return sw_fail(err, errlen, "%s: attach XDP: libxdp needs bpffs "
+                           "at %s", ifname, sw_bpffs_libxdp_dir());
 
         } else if (e < 0) {
-            return mfw_fail(err, errlen, "%s: attach XDP: %s", ifname,
-                            strerror(-e));
+            return sw_fail(err, errlen, "%s: attach XDP: %s", ifname,
+                           strerror(-e));
         }
 
         sw_log_warn("%s: %s holds the XDP hook without libxdp's dispatcher: "
@@ -478,14 +478,14 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
     if (!dp->tcx) {
         e = -mfw_tc_attach(ifindex, dp->prog_fd);
         if (e != 0) {
-            return mfw_fail(err, errlen, "%s: attach TC ingress: %s", ifname,
-                            strerror(e));
+            return sw_fail(err, errlen, "%s: attach TC ingress: %s", ifname,
+                           strerror(e));
         }
 
         if (mfw_tc_pin(dp->root, ifname, dp->prog_fd) != 0) {
             e = errno;
             mfw_tc_detach(ifindex);
-            return mfw_fail(err, errlen, "%s: pin: %s", ifname, strerror(e));
+            return sw_fail(err, errlen, "%s: pin: %s", ifname, strerror(e));
         }
 
         return 0;
@@ -530,7 +530,7 @@ mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
     fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "mfw_ruleset", sizeof(__u32),
                         sizeof(*rs), 1, NULL);
     if (fd < 0) {
-        return mfw_fail(err, errlen, "create ruleset map: %s", strerror(errno));
+        return sw_fail(err, errlen, "create ruleset map: %s", strerror(errno));
     }
 
     e = 0;
@@ -545,7 +545,7 @@ mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
     close(fd);  /* the outer map holds the inner map now */
 
     if (e != 0) {
-        return mfw_fail(err, errlen, "install ruleset: %s", strerror(e));
+        return sw_fail(err, errlen, "install ruleset: %s", strerror(e));
     }
 
     return 0;
@@ -765,8 +765,8 @@ mfw_dp_move_root(const char *old, const char *root, char *err,
 
     /* a second set of links would attach mini-fw twice */
     if (stat(root, &st) == 0) {
-        return mfw_fail(err, errlen, "pins under both %s and %s: "
-                        "mfwd -P -p %s removes the old ones", old, root, old);
+        return sw_fail(err, errlen, "pins under both %s and %s: "
+                       "mfwd -P -p %s removes the old ones", old, root, old);
     }
 
     snprintf(parent, sizeof(parent), "%s", root);
@@ -776,14 +776,14 @@ mfw_dp_move_root(const char *old, const char *root, char *err,
         *slash = '\0';
 
         if (sw_file_mkdir_p(parent, 0700) != 0) {
-            return mfw_fail(err, errlen, "create %s: %s", parent,
-                            strerror(errno));
+            return sw_fail(err, errlen, "create %s: %s", parent,
+                           strerror(errno));
         }
     }
 
     if (rename(old, root) != 0) {
-        return mfw_fail(err, errlen, "move %s to %s: %s", old, root,
-                        strerror(errno));
+        return sw_fail(err, errlen, "move %s to %s: %s", old, root,
+                       strerror(errno));
     }
 
     return 1;
@@ -813,8 +813,21 @@ mfw_dp_purge(const char *root, char *err, size_t errlen)
     }
 
     if (rmdir(root) != 0 && errno != ENOENT) {
-        return mfw_fail(err, errlen, "rmdir %s: %s", root, strerror(errno));
+        return sw_fail(err, errlen, "rmdir %s: %s", root, strerror(errno));
     }
 
     return 0;
+}
+
+
+void
+mfw_netif_unknown(const char *err)
+{
+    static int  said;
+
+    if (!said) {
+        sw_log_warn("%s: no interface is attached or detached until it can",
+                    err);
+        said = 1;
+    }
 }

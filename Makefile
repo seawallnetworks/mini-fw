@@ -38,8 +38,7 @@ LIBBPF     := -static $(or $(shell pkg-config --static --libs libxdp 2>/dev/null
               -lxdp -lbpf -lelf -lz -lzstd)
 
 LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
-MFWD_OBJS  := build/mfwd.o build/dataplane.o build/dp_xdp.o build/dp_tc.o \
-              build/util.o
+MFWD_OBJS  := build/mfwd.o build/dataplane.o build/dp_xdp.o build/dp_tc.o
 HEADERS    := include/mfw.h include/mfw_policy.h include/mfw_client.h
 
 .PHONY: all clean test test-bpf test-mfwd smoke install install-runtime \
