@@ -63,20 +63,24 @@ mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder, size_t len)
         return e;
     }
 
-    /* what the hook holds: the dispatcher, or a program on its own */
-    main = xdp_multiprog__main_prog(mp);
-
     if (!xdp_multiprog__is_legacy(mp)) {
         *mode = xdp_multiprog__attach_mode(mp);
         state = mfw_xdp_shared;
 
-    } else if (main != NULL) {
-        snprintf(holder, len, "%s", xdp_program__name(main));
-        state = mfw_xdp_held;
-
     } else {
-        /* only a hardware-offloaded program: the driver hook is free */
-        state = mfw_xdp_free;
+        /*
+         * A program on its own, or none: only a hardware-offloaded one,
+         * and the driver hook is free.
+         */
+        main = xdp_multiprog__main_prog(mp);
+
+        if (main != NULL) {
+            snprintf(holder, len, "%s", xdp_program__name(main));
+            state = mfw_xdp_held;
+
+        } else {
+            state = mfw_xdp_free;
+        }
     }
 
     xdp_multiprog__close(mp);
