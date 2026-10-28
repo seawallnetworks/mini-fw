@@ -102,7 +102,7 @@ mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder, size_t len)
 int
 mfw_xdp_unload(int ifindex, __u32 id)
 {
-    int                    e;
+    int                    rc;
     struct xdp_program    *p;
     struct xdp_multiprog  *mp;
 
@@ -122,19 +122,18 @@ mfw_xdp_unload(int ifindex, __u32 id)
         }
     }
 
-    e = 0;
+    rc = 0;
 
     if (p != NULL) {
-        e = xdp_program__detach(p, ifindex, xdp_multiprog__attach_mode(mp), 0);
+        rc = xdp_program__detach(p, ifindex, xdp_multiprog__attach_mode(mp), 0);
+        if (rc == 0) {
+            rc = 1;     /* taken out */
+        }
     }
 
     xdp_multiprog__close(mp);
 
-    if (e != 0) {
-        return e;
-    }
-
-    return p != NULL;
+    return rc;
 }
 
 
