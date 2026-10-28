@@ -65,19 +65,6 @@ typedef enum {
 } mfw_match_e;
 
 
-/*
- * ifindex → inner map holding that interface's one mfw_ruleset. Sizes,
- * not BTF types: clang emits struct mfw_ruleset only as a forward
- * declaration here, and userspace creates the inner maps without BTF.
- */
-struct ruleset_map {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(struct mfw_ruleset));
-};
-
-
 static __always_inline void stat_inc(__u32 id);
 static __always_inline int cfg_drop_ipv4_fragments(void);
 
@@ -103,6 +90,18 @@ static __always_inline mfw_verdict_e mfw_judge(int rc,
 int mfw_xdp(struct xdp_md *ctx);
 int mfw_tc(struct __sk_buff *ctx);
 
+
+/*
+ * ifindex → inner map holding that interface's one mfw_ruleset. Sizes,
+ * not BTF types: clang emits struct mfw_ruleset only as a forward
+ * declaration here, and userspace creates the inner maps without BTF.
+ */
+struct ruleset_map {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct mfw_ruleset));
+};
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
