@@ -7,7 +7,8 @@
  * closed:
  *
  *   PING                     OK
- *   STATUS                   OK generation=N drop-ipv4-fragments=0|1 attached=a,b missing=c
+ *   STATUS                   OK generation=N drop-ipv4-fragments=0|1
+ *                            attached=a,b missing=c
  *                            degraded=d (at TC: another program holds XDP)
  *                            flows=sw_flowd|none (what "reply" ACEs read)
  *   STATS                    OK xdp_pass=N xdp_drop=N ...
@@ -73,7 +74,8 @@ static void on_signal(int sig)
 
 /* ---- the saved policy ---- */
 
-static void state_path(const struct mfwd *d, char *buf, size_t len, const char *suffix)
+static void state_path(const struct mfwd *d, char *buf, size_t len,
+                       const char *suffix)
 {
     snprintf(buf, len, "%s/policy%s", d->state_dir, suffix);
 }
@@ -128,7 +130,8 @@ static void apply(struct mfwd *d, const char *text, char **reply)
     struct mfw_policy p;
     struct mfw_ruleset *rs;
     char err[MFW_ERR_LEN], missing[1024] = "", *canon;
-    char attached[MFW_MAX_IFACES][IF_NAMESIZE], added[MFW_MAX_IFACES][IF_NAMESIZE];
+    char attached[MFW_MAX_IFACES][IF_NAMESIZE];
+    char added[MFW_MAX_IFACES][IF_NAMESIZE];
     __u32 ifindex[MFW_MAX_IFACES], keep[MFW_MAX_IFACES], gen;
     int n_keep = 0, n_added = 0, n;
 
@@ -203,7 +206,8 @@ static void apply(struct mfwd *d, const char *text, char **reply)
     canon = NULL;
     save_policy(d);
 
-    if (asprintf(reply, "OK %u%s%s\n", gen, *missing ? " missing=" : "", missing) < 0)
+    if (asprintf(reply, "OK %u%s%s\n", gen, *missing ? " missing=" : "",
+                 missing) < 0)
         *reply = NULL;
 out:
     free(canon);
@@ -215,7 +219,8 @@ out:
 
 static void status(struct mfwd *d, char **reply)
 {
-    char names[MFW_MAX_IFACES][IF_NAMESIZE], attached[1024] = "", missing[1024] = "";
+    char names[MFW_MAX_IFACES][IF_NAMESIZE];
+    char attached[1024] = "", missing[1024] = "";
     char degraded[1024] = "";
     struct mfw_config cfg = {};
     struct mfw_policy p;
@@ -235,8 +240,9 @@ static void status(struct mfwd *d, char **reply)
         mfw_policy_free(&p);
     }
     mfw_dp_get_config(&d->dp, &cfg);
-    if (asprintf(reply, "OK generation=%u drop-ipv4-fragments=%u attached=%s missing=%s "
-                 "degraded=%s flows=%s\n", d->policy ? d->generation : 0,
+    if (asprintf(reply, "OK generation=%u drop-ipv4-fragments=%u attached=%s "
+                 "missing=%s degraded=%s flows=%s\n",
+                 d->policy ? d->generation : 0,
                  cfg.drop_ipv4_fragments, attached, missing, degraded,
                  d->dp.flows_fd >= 0 ? "sw_flowd" : "none") < 0)
         *reply = NULL;
@@ -253,8 +259,8 @@ static void stats(struct mfwd *d, char **reply)
         return;
     }
     for (int i = 0; i < MFW_STAT_MAX; i++)
-        off += snprintf(buf + off, sizeof(buf) - off, " %s=%llu", mfw_stat_name(i),
-                        (unsigned long long)c[i]);
+        off += snprintf(buf + off, sizeof(buf) - off, " %s=%llu",
+                        mfw_stat_name(i), (unsigned long long)c[i]);
     if (asprintf(reply, "%s\n", buf) < 0)
         *reply = NULL;
 }
@@ -320,7 +326,9 @@ static char *read_request(int fd, const char **why)
 
             if (apply < 0)
                 apply = len == 5 && !memcmp(buf, "APPLY", 5);
-            if (!apply || (pos > 0 && len == 3 && !memcmp(buf + pos, "END", 3))) {
+            if (!apply
+                || (pos > 0 && len == 3 && !memcmp(buf + pos, "END", 3)))
+            {
                 buf[nl + 1 - buf] = '\0';
                 return buf;
             }
@@ -336,7 +344,8 @@ static char *read_request(int fd, const char **why)
                 *why = "request too long";
                 goto fail;
             }
-            size = size * 2 > MFW_REQUEST_MAX + 1 ? MFW_REQUEST_MAX + 1 : size * 2;
+            size = size * 2 > MFW_REQUEST_MAX + 1 ? MFW_REQUEST_MAX + 1
+                                                  : size * 2;
             p = realloc(buf, size + 1);
             if (!p)
                 goto fail;
@@ -348,7 +357,8 @@ static char *read_request(int fd, const char **why)
         if (n < 0 && errno == EINTR && !stop)
             continue;
         if (n <= 0) {
-            *why = n < 0 ? "request not complete in time" : "request not complete";
+            *why = n < 0 ? "request not complete in time"
+                         : "request not complete";
             goto fail;
         }
         off += n;
@@ -415,7 +425,8 @@ static void usage(FILE *f)
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
-        "  -d dir      where the applied policy is saved (default " MFWD_STATE_DIR ")\n"
+        "  -d dir      where the applied policy is saved\n"
+        "              (default " MFWD_STATE_DIR ")\n"
         "  -P          detach every interface, remove all pins and the saved\n"
         "              policy, then exit\n"
         "  -V          print the version\n");
@@ -438,7 +449,9 @@ int main(int argc, char **argv)
         switch (c) {
         case 'v': sw_log_set_level(SW_LOG_DEBUG); break;
         case 's': sock = optarg; break;
-        case 'd': snprintf(d.state_dir, sizeof(d.state_dir), "%s", optarg); break;
+        case 'd':
+            snprintf(d.state_dir, sizeof(d.state_dir), "%s", optarg);
+            break;
         case 'P': purge = 1; break;
         case 'm':
             if (sw_conf_mode(optarg, &mode)) {
@@ -489,9 +502,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* no live update: start afresh, fail-open until restore() applies the
-     * saved policy */
-    if (mfw_dp_purge(err, sizeof(err)) || mfw_dp_open(&d.dp, err, sizeof(err))) {
+    /*
+     * No live update: start afresh, fail-open until restore() applies the
+     * saved policy.
+     */
+    if (mfw_dp_purge(err, sizeof(err))
+        || mfw_dp_open(&d.dp, err, sizeof(err)))
+    {
         sw_log_err("%s", err);
         goto failed;
     }
@@ -505,9 +522,11 @@ int main(int argc, char **argv)
     sw_sock_timeouts(fd, 1000);
     sw_log_info("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
                 MFWD_VERSION, MFW_ABI_VERSION, sock, MFW_PIN_PATH,
-                d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
+                d.dp.no_xdp
+                ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
                 : d.dp.tcx ? "libxdp's dispatcher, else tcx"
-                : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");
+                : "libxdp's dispatcher, else classic TC (no tcx before "
+                  "kernel 6.6)");
     if (sw_notify_ready())
         sw_log_warn("tell systemd mfwd is ready: %s", strerror(errno));
 
