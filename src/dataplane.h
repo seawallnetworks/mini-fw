@@ -40,7 +40,7 @@ int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname);
  * its XDP hook? */
 int mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname);
 /* Names of the attached interfaces, sorted; returns how many (≤ max). */
-int mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max);
+int mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max);
 /* In libxdp's dispatcher; at TC ingress if a program that is not one holds
  * the XDP hook. */
 int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errlen);

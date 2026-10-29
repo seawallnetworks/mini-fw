@@ -187,7 +187,7 @@ static void apply(struct mfwd *d, const char *text, char **reply)
     }
     mfw_dp_prune(&d->dp, keep, n_keep);
 
-    n = mfw_dp_list(&d->dp, attached, MFW_MAX_IFACES);
+    n = mfw_dp_list_attached(&d->dp, attached, MFW_MAX_IFACES);
     for (int i = 0; i < n; i++) {
         int bound = 0;
 
@@ -220,7 +220,7 @@ static void status(struct mfwd *d, char **reply)
     struct mfw_config cfg = {};
     struct mfw_policy p;
     char err[MFW_ERR_LEN];
-    int n = mfw_dp_list(&d->dp, names, MFW_MAX_IFACES);
+    int n = mfw_dp_list_attached(&d->dp, names, MFW_MAX_IFACES);
 
     for (int i = 0; i < n; i++) {
         append(attached, sizeof(attached), names[i]);

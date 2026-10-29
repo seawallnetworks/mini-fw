@@ -107,7 +107,8 @@ name_cmp(const void *a, const void *b)
 
 
 int
-mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
+mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
+    int max)
 {
     int              n;
     DIR             *d;
