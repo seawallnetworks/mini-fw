@@ -224,8 +224,8 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     snprintf(dp->root, sizeof(dp->root), "%s", root);
 
     /*
-     * on bpffs: the pin root, or while it doesn't exist yet, the nearest
-     * directory above it that does, where sw_file_mkdir_p() below makes it
+     * Before anything is made: otherwise mkdir in sysfs, or pinning
+     * outside bpffs, fails later, and less clearly.
      */
     if (sw_bpffs_check(root, err, errlen) != 0) {
         return -1;
