@@ -18,7 +18,9 @@
 #define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
 /* under the stack's bpffs directory, beside sw_flowd's flows/ */
 #define MFW_PIN_PATH           "/sys/fs/bpf/seawall/mfw"
-#define MFW_ABI_VERSION        2      /* 2: per-interface rulesets */
+/* Layout of the pinned maps; mfwd refuses pins of another version.
+ * 2: per-interface rulesets */
+#define MFW_ABI_VERSION        2
 
 /* Rule action */
 enum mfw_action {
@@ -111,12 +113,17 @@ struct mfw_ruleset {
     struct mfw_rule ext[MFW_MAX_EXT_ACES];
 };
 
+/*
+ * Settings for every interface: the single entry (key 0) of the "config"
+ * array map. mfwd writes it; BPF reads only drop_ipv4_fragments. All
+ * zeros is a new map that mfwd has yet to set up.
+ */
 struct mfw_config {
-    __u8  default_action;      /* ABI: always MFW_ACTION_DENY in v1; BPF ignores */
+    __u8  default_action;      /* always MFW_ACTION_DENY, kept for layout; unused */
     __u8  drop_ipv4_fragments; /* 1 = drop all IPv4 fragments */
-    __u8  abi_version;         /* MFW_ABI_VERSION */
+    __u8  abi_version;         /* MFW_ABI_VERSION; 0 = not set up yet */
     __u8  pad0;
-    __u32 generation;          /* bumped on rule updates */
+    __u32 generation;          /* bumped on every policy apply */
 };
 
 /* Stats: every packet increments exactly one OUTCOME and at most one REASON.
