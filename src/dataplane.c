@@ -66,6 +66,15 @@
 #include <xdp/libxdp.h>
 
 
+/* The kinds of pin in attach/ (see above), in pin_ifname()'s order. */
+typedef enum {
+    mfw_pin_xdp = 0,     /* attach/xdp_<if> */
+    mfw_pin_tcx,         /* attach/tcx_<if> */
+    mfw_pin_tc           /* attach/tc_<if> */
+} mfw_pin_e;
+
+
+static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
 static int attach_detach(const char *root, char *err, size_t errlen);
@@ -98,6 +107,39 @@ mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname)
 }
 
 
+/*
+ * The interface an attach/ pin is for: its name after the kind's prefix,
+ * with the kind in *kind. NULL if the name is not one of mini-fw's pins,
+ * or what follows the prefix is not an interface name.
+ */
+static const char *
+pin_ifname(const char *pin, mfw_pin_e *kind)
+{
+    size_t              len;
+    mfw_pin_e           k;
+    static const char  *prefix[] = { "xdp_", "tcx_", "tc_" };
+
+    for (k = mfw_pin_xdp; k <= mfw_pin_tc; k++) {
+        len = strlen(prefix[k]);
+
+        if (strncmp(pin, prefix[k], len) == 0) {
+            pin += len;
+            len = strlen(pin);
+
+            if (len == 0 || len >= IF_NAMESIZE) {
+                return NULL;
+            }
+
+            *kind = k;
+
+            return pin;
+        }
+    }
+
+    return NULL;
+}
+
+
 /* names are char[IF_NAMESIZE], so a and b are the strings */
 static int
 name_cmp(const void *a, const void *b)
@@ -112,6 +154,7 @@ mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
 {
     int              n;
     DIR             *d;
+    mfw_pin_e        kind;
     const char      *ifname;
     struct dirent   *de;
     char             dir[PATH_MAX];
@@ -126,17 +169,9 @@ mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
     n = 0;
 
     while (n < max && (de = readdir(d)) != NULL) {
-        ifname = strchr(de->d_name, '_');
+        ifname = pin_ifname(de->d_name, &kind);
 
-        if (ifname == NULL || strlen(++ifname) >= IF_NAMESIZE
-            || (strncmp(de->d_name, "tcx_", 4) != 0
-                && strncmp(de->d_name, "tc_", 3) != 0
-                && strncmp(de->d_name, "xdp_", 4) != 0))
-        {
-            continue;
-        }
-
-        if (mfw_dp_attached(dp, ifname)) {
+        if (ifname != NULL && mfw_dp_attached(dp, ifname)) {
             snprintf(names[n++], IF_NAMESIZE, "%s", ifname);
         }
     }
@@ -533,8 +568,9 @@ mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
 static int
 attach_detach(const char *root, char *err, size_t errlen)
 {
-    int              ifindex, rc, tc;
+    int              ifindex, rc;
     DIR             *d;
+    mfw_pin_e        kind;
     const char      *ifname;
     struct dirent   *de;
     char             path[PATH_MAX];
@@ -549,15 +585,10 @@ attach_detach(const char *root, char *err, size_t errlen)
     rc = 0;
 
     while (rc == 0 && (de = readdir(d)) != NULL) {
-        if (strncmp(de->d_name, "tc_", 3) == 0) {
-            ifname = de->d_name + 3;
-            tc = 1;
+        ifname = pin_ifname(de->d_name, &kind);
 
-        } else if (strncmp(de->d_name, "xdp_", 4) == 0) {
-            ifname = de->d_name + 4;
-            tc = 0;
-
-        } else {
+        /* a tcx link detaches when its pin is deleted */
+        if (ifname == NULL || kind == mfw_pin_tcx) {
             continue;
         }
 
@@ -566,7 +597,7 @@ attach_detach(const char *root, char *err, size_t errlen)
         if (ifindex < 0) {
             rc = -1;
 
-        } else if (ifindex > 0 && tc) {
+        } else if (ifindex > 0 && kind == mfw_pin_tc) {
             mfw_tc_detach(ifindex);
 
         } else if (ifindex > 0) {
