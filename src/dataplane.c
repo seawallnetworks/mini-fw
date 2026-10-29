@@ -75,20 +75,9 @@ static void flows_open(struct mfw_dp *dp);
 int
 mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
 {
-    int  fd;
-
-    if (mfw_xdp_attached(dp->root, ifname)) {
-        return 1;
-    }
-
-    fd = mfw_tcx_open(dp->root, ifname);
-    if (fd < 0) {
-        return mfw_tc_attached(dp->root, ifname);
-    }
-
-    close(fd);
-
-    return 1;
+    return mfw_xdp_attached(dp->root, ifname)
+           || mfw_tcx_attached(dp->root, ifname)
+           || mfw_tc_attached(dp->root, ifname);
 }
 
 

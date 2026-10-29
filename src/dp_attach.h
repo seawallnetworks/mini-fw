@@ -38,7 +38,7 @@ int mfw_tc_attach(int ifindex, int prog_fd);
 void mfw_tc_detach(int ifindex);
 int mfw_tc_attached(const char *root, const char *ifname);
 int mfw_tc_pin(const char *root, const char *ifname, int prog_fd);
-int mfw_tcx_open(const char *root, const char *ifname);
+int mfw_tcx_attached(const char *root, const char *ifname);
 int mfw_tcx_attach(const char *root, const char *ifname, int ifindex,
     int prog_fd, char *err, size_t errlen);
 void mfw_tc_off(const char *root, const char *ifname);

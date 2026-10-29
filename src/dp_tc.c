@@ -188,37 +188,41 @@ tcx_link_ifindex(int fd)
 
 
 /*
- * Open the tcx link pinned at attach/tcx_<ifname>. Returns its fd if the
- * link is still attached to ifname, else -1; a stale pin (the interface
- * was deleted or re-created) is deleted. If ifname can't be looked up,
- * the link is taken as still its.
+ * Is ifname attached with a tcx link? If attach/tcx_<ifname> is pinned but
+ * the link is not on ifname (the interface was deleted or re-created), the
+ * stale pin is deleted and 0 returned. If the interface can't be looked
+ * up, the pin stays, and counts.
  */
 int
-mfw_tcx_open(const char *root, const char *ifname)
+mfw_tcx_attached(const char *root, const char *ifname)
 {
-    int    fd, now;
-    char   path[PATH_MAX], err[256];
+    int     fd, ifindex;
+    __u32   on;
+    char    path[PATH_MAX], err[256];
 
     tcx_path(root, ifname, path, sizeof(path));
 
     fd = bpf_obj_get(path);
     if (fd < 0) {
-        return -1;
+        return 0;
     }
 
-    now = sw_netif_index(ifname, err, sizeof(err));
-    if (now < 0) {
+    on = tcx_link_ifindex(fd);
+    close(fd);
+
+    ifindex = sw_netif_index(ifname, err, sizeof(err));
+    if (ifindex < 0) {
         mfw_netif_unknown(err);
-        return fd;
+        return 1;
     }
 
-    if (now == 0 || tcx_link_ifindex(fd) != (__u32) now) {
-        close(fd);
-        unlink(path);
-        return -1;
+    if (ifindex != 0 && on == (__u32) ifindex) {
+        return 1;
     }
 
-    return fd;
+    unlink(path);
+
+    return 0;
 }
 
 
