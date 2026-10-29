@@ -42,7 +42,7 @@ struct mfw_status {
     char  degraded[1024];       /* attached at TC ingress, not XDP: another
                                  * program holds the XDP hook */
     char  flows[16];            /* "sw_flowd": "reply" ACEs read its table;
-                                 * "none" without it; "" from an older mfwd */
+                                 * "none" without it */
 };
 
 const char *mfw_strerror(int rc);

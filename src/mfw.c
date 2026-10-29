@@ -182,7 +182,7 @@ static int cmd_status(const mfw_client_t *c)
     printf("missing              %s\n", *st.missing ? st.missing : "-");
     printf("degraded             %s\n", *st.degraded ? st.degraded : "-");
     printf("drop-ipv4-fragments  %d\n", st.drop_ipv4_fragments);
-    printf("flows                %s\n", *st.flows ? st.flows : "-");
+    printf("flows                %s\n", st.flows);
     return EXIT_OK;
 }
 

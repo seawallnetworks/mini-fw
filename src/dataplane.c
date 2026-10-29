@@ -618,18 +618,17 @@ attach_detach(const char *root, char *err, size_t errlen)
 int
 mfw_dp_purge(const char *root, char *err, size_t errlen)
 {
-    int          i;
+    size_t       i;
     char         dir[PATH_MAX];
 
-    /* state/ was left by mfw 0.2 */
-    static const char  *dirs[] = { "attach", "maps", "state" };
+    static const char  *dirs[] = { "attach", "maps" };
 
     /* detach first, so no interface is left running on deleted maps */
     if (attach_detach(root, err, errlen) != 0) {
         return -1;
     }
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         snprintf(dir, sizeof(dir), "%s/%s", root, dirs[i]);
 
         if (sw_bpffs_unpin_dir(dir, err, errlen) != 0) {
