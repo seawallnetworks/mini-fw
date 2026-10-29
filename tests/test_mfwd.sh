@@ -184,7 +184,7 @@ set reply-idle-tcp 86400
 set reply-idle-udp 180"
 same "mfwd still serves" "$(raw 'PING\n')" "OK"
 
-echo "== restart keeps the policy and the filtering"
+echo "== restart applies the saved policy again"
 expect ok "apply" mfw apply <(echo "$POLICY")
 stop
 expect ok "stays on d0 while mfwd is down" on d0
@@ -204,16 +204,18 @@ for _ in $(seq 50); do [[ -S $TMP/notify ]] && break; sleep 0.1; done
 NOTIFY_SOCKET=$TMP/notify start
 wait "$notifier"
 same "READY=1 once it listens" "$(cat "$TMP/notified" 2>/dev/null)" "READY=1 listening"
-same "generation kept" "$(field generation)" 6
+# new pins: the generation starts again
+same "generation 1" "$(field generation)" 1
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
-grep -q "policy generation 6 is in place" "$LOG" && ok "log: in place" || bad "log: in place"
+same "attached again" "$(field attached)" d0,d1
+grep -q "saved policy applied again: OK 1" "$LOG" && ok "log: applied again" || bad "log: applied again"
 
-echo "== stats map from an older build is replaced"
+echo "== pins from an older build are replaced"
 stop
 rm "$PINS/maps/stats"
 bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
 start
-same "generation kept" "$(field generation)" 6
+same "generation 1" "$(field generation)" 1
 expect ok "stays on d0" on d0
 expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
 
@@ -223,7 +225,6 @@ rm -rf "$PINS"
 start
 same "attached again" "$(field attached)" d0,d1
 expect ok "on d0" on d0
-grep -q "applying it again" "$LOG" && ok "log: applied again" || bad "log: applied again"
 
 echo "== re-created interface"
 ip -n "$NS" link del d0

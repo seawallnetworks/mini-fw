@@ -20,8 +20,10 @@
  * internal. The policy format is described in mfw_policy.h.
  *
  * The applied policy is saved under the state directory (/run/mfwd), so a
- * restarted mfwd knows it; the kernel side is pinned and keeps filtering
- * while mfwd is down. Single-threaded: requests are handled one at a
+ * restarted mfwd applies it again; the kernel side is pinned and keeps
+ * filtering while mfwd is down. There is no live update: a starting mfwd
+ * replaces the pins, and nothing is filtered until the saved policy is
+ * applied again. Single-threaded: requests are handled one at a
  * time. Under systemd (Type=notify) it says it is ready once it serves,
  * so a front end ordered after it, such as sw_configd, finds the socket.
  *
@@ -77,26 +79,20 @@ static void state_path(const struct mfwd *d, char *buf, size_t len, const char *
 }
 
 /*
- * "# generation N\n" then the canonical policy, written atomically, its
- * directory synced too: a crash just after an APPLY keeps it.
+ * The canonical policy, written atomically, its directory synced too: a
+ * crash just after an APPLY keeps it.
  */
 static void save_policy(const struct mfwd *d)
 {
-    char path[PATH_MAX], err[PATH_MAX + 128], *text;
-    int len;
+    char path[PATH_MAX], err[PATH_MAX + 128];
 
-    len = asprintf(&text, "# generation %u\n%s", d->generation, d->policy);
-    if (len < 0) {
-        sw_log_err("cannot save the policy: out of memory");
-        return;
-    }
     state_path(d, path, sizeof(path), "");
     if (sw_file_mkdir_p(d->state_dir, 0700))
         sw_log_err("cannot save the policy: create %s: %s", d->state_dir,
                    strerror(errno));
-    else if (sw_file_write_atomic(path, text, len, 0600, err, sizeof(err)))
+    else if (sw_file_write_atomic(path, d->policy, strlen(d->policy), 0600,
+                                  err, sizeof(err)))
         sw_log_err("cannot save the policy: %s", err);
-    free(text);
 }
 
 /* ---- APPLY ---- */
@@ -386,13 +382,11 @@ static void serve(struct mfwd *d, int fd)
     free(req);
 }
 
-/* A policy saved by an earlier mfwd: kept if the kernel still runs its
- * generation, applied again if the pins are new (e.g. after mfwd -P). */
+/* A policy saved by an earlier mfwd: applied again, to the new pins.
+ * Until it is, every interface passes everything. */
 static void restore(struct mfwd *d)
 {
     char path[PATH_MAX], err[PATH_MAX + 64], *text, *reply = NULL;
-    struct mfw_config cfg = {};
-    unsigned gen;
 
     state_path(d, path, sizeof(path), "");
     text = sw_file_read(path, MFW_REQUEST_MAX, NULL, err, sizeof(err));
@@ -401,26 +395,13 @@ static void restore(struct mfwd *d)
             sw_log_warn("saved policy not restored: %s", err);
         return;
     }
-    if (sscanf(text, "# generation %u", &gen) != 1 || !strchr(text, '\n')) {
-        sw_log_warn("%s: no generation line; ignored", path);
-        free(text);
-        return;
-    }
-    mfw_dp_get_config(&d->dp, &cfg);
-    if (cfg.generation == gen) {
-        d->policy = strdup(strchr(text, '\n') + 1);
-        d->generation = gen;
-        sw_log_info("policy generation %u is in place", gen);
-    } else {
-        sw_log_notice("kernel has generation %u, saved policy %u: applying it again",
-                      cfg.generation, gen);
-        apply(d, strchr(text, '\n') + 1, &reply);
-        if (reply)
-            sw_log(strncmp(reply, "OK", 2) ? SW_LOG_WARN : SW_LOG_INFO,
-                   "%.*s", (int)strcspn(reply, "\n"), reply);
-        free(reply);
-    }
+    apply(d, text, &reply);
+    if (reply)
+        sw_log(strncmp(reply, "OK", 2) ? SW_LOG_WARN : SW_LOG_INFO,
+               "saved policy applied again: %.*s",
+               (int)strcspn(reply, "\n"), reply);
     free(text);
+    free(reply);
 }
 
 static void usage(FILE *f)

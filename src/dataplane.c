@@ -31,8 +31,10 @@
  *                    on the clsact qdisc). A program pin that marks that
  *                    mini-fw put it there
  *
- * Because everything is pinned, filtering goes on while mfwd is stopped
- * or restarting.
+ * Because everything is pinned, filtering goes on while mfwd is stopped.
+ * There is no live update: a starting mfwd detaches what an earlier one
+ * attached and removes its pins, so the interfaces pass everything
+ * (fail-open) until mfwd applies the saved policy again.
  *
  * A ruleset is never changed in place: a new one goes into a new inner
  * map, which one update of the outer map swaps in. A packet sees either
@@ -66,9 +68,6 @@
 
 static int name_cmp(const void *a, const void *b);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
-static void upgrade_ifaces(struct mfw_dp *dp);
-static int upgrade_iface(struct mfw_dp *dp, const char *ifname);
-static void drop_old_stats(const char *root);
 static int attach_detach(const char *root, char *err, size_t errlen);
 static void flows_open(struct mfw_dp *dp);
 
@@ -159,10 +158,7 @@ mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
 }
 
 
-/*
- * Check the config map. A new one (all zeros) gets the defaults; one from
- * another ABI version is refused.
- */
+/* The config map is new (all zeros): give it the defaults. */
 static int
 init_config(struct mfw_dp *dp, char *err, size_t len)
 {
@@ -170,20 +166,6 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     struct mfw_config  cfg;
 
     k = 0;
-
-    if (bpf_map_lookup_elem(dp->config_fd, &k, &cfg) != 0) {
-        return sw_fail(err, len, "read config: %s", strerror(errno));
-    }
-
-    if (cfg.abi_version == MFW_ABI_VERSION) {
-        return 0;
-    }
-
-    if (cfg.abi_version != 0) {
-        return sw_fail(err, len, "pinned maps under %s have ABI %u, "
-                       "expected %u (mfwd -P to remove them)", dp->root,
-                       cfg.abi_version, MFW_ABI_VERSION);
-    }
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.default_action = MFW_ACTION_DENY;
@@ -194,147 +176,6 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     }
 
     return 0;
-}
-
-
-/*
- * Move the interfaces an earlier mfwd attached to the program loaded now:
- *
- * - In a dispatcher: load the new program, then take the old one out.
- *   libxdp can't swap them in one step, so both run for a moment, on the
- *   same maps, and no packet goes unfiltered.
- * - At TC, with the XDP hook free now: move to XDP, again XDP first,
- *   then off TC.
- * - At TC otherwise: point the tcx link, or the classic TC filter, at
- *   the new program.
- */
-static void
-upgrade_ifaces(struct mfw_dp *dp)
-{
-    int   e, i, n;
-    char  names[MFW_MAX_IFACES][IF_NAMESIZE];
-
-    n = mfw_dp_list(dp, names, MFW_MAX_IFACES);
-
-    for (i = 0; i < n; i++) {
-        e = upgrade_iface(dp, names[i]);
-        if (e != 0) {
-            sw_log_warn("%s: update program: %s", names[i], strerror(e));
-        }
-    }
-}
-
-
-/* One interface of upgrade_ifaces(). Returns 0 or an errno. */
-static int
-upgrade_iface(struct mfw_dp *dp, const char *ifname)
-{
-    int                   e, fd, ifindex;
-    __u32                 old;
-    enum xdp_attach_mode  mode;
-    char                  holder[BPF_OBJ_NAME_LEN];
-    char                  path[PATH_MAX];
-
-    /* can't tell: left on the old program, which goes on filtering */
-    ifindex = sw_netif_index(ifname, NULL, 0);
-    if (ifindex < 0) {
-        return errno;
-    }
-
-    if (mfw_xdp_attached(dp->root, ifname)) {
-        mfw_xdp_path(dp->root, ifname, path, sizeof(path));
-        old = mfw_xdp_pinned_id(path);
-
-        mode = XDP_MODE_NATIVE;
-
-        if (mfw_xdp_state(ifindex, &mode, holder, sizeof(holder))
-            != mfw_xdp_shared)
-        {
-            return ENOENT;
-        }
-
-        e = -mfw_xdp_load(dp->root, ifname, ifindex, mode, dp->flows_fd);
-        if (e != 0) {
-            return e;
-        }
-
-        mfw_xdp_unload(ifindex, old);
-
-        return 0;
-    }
-
-    if (!dp->no_xdp
-        && mfw_xdp_attach(dp->root, ifname, ifindex, dp->flows_fd, holder,
-                          sizeof(holder))
-           == 0)
-    {
-        mfw_tc_off(dp->root, ifname);
-        sw_log_notice("%s: the XDP hook is free: moved from TC to XDP",
-                      ifname);
-        return 0;
-    }
-
-    fd = mfw_tcx_open(dp->root, ifname);
-    if (fd >= 0) {
-        e = 0;
-
-        if (bpf_link_update(fd, dp->prog_fd, NULL) != 0) {
-            e = errno;
-        }
-
-        close(fd);
-
-        return e;
-    }
-
-    if (!mfw_tc_attached(dp->root, ifname)) {
-        return 0;
-    }
-
-    e = -mfw_tc_attach(ifindex, dp->prog_fd);
-    if (e != 0) {
-        return e;
-    }
-
-    if (mfw_tc_pin(dp->root, ifname, dp->prog_fd) != 0) {
-        return errno;
-    }
-
-    return 0;
-}
-
-
-/*
- * The stats map has MFW_STAT_MAX entries. A pinned one from a build with
- * a different number can't be reused (libbpf refuses another
- * max_entries), so its pin is deleted and the load pins a new map. The
- * counters restart; the rules and attachments stay. The old program
- * keeps the old map until upgrade_ifaces() replaces the program.
- */
-static void
-drop_old_stats(const char *root)
-{
-    int                   fd;
-    __u32                 len;
-    struct bpf_map_info   info = {};
-    char                  path[PATH_MAX];
-
-    snprintf(path, sizeof(path), "%s/maps/stats", root);
-
-    fd = bpf_obj_get(path);
-    if (fd < 0) {
-        return;
-    }
-
-    len = sizeof(info);
-
-    if (bpf_map_get_info_by_fd(fd, &info, &len) == 0
-        && info.max_entries != MFW_STAT_MAX)
-    {
-        unlink(path);
-    }
-
-    close(fd);
 }
 
 
@@ -362,6 +203,11 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
         return -1;
     }
 
+    /* no live update: start afresh, fail-open until the policy is applied */
+    if (mfw_dp_purge(root, err, errlen) != 0) {
+        return -1;
+    }
+
     snprintf(maps, sizeof(maps), "%s/maps", root);
     snprintf(attach, sizeof(attach), "%s/attach", root);
 
@@ -370,8 +216,6 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     {
         return sw_fail(err, errlen, "create %s: %s", root, strerror(errno));
     }
-
-    drop_old_stats(dp->root);
 
     dp->skel = mfw_bpf__open_opts(&opts);
     if (dp->skel == NULL) {
@@ -391,11 +235,11 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     /*
      * Load only the TC entry here, for the interfaces at TC. libxdp loads
      * the XDP entry itself, from a copy of the object, for each interface
-     * in a dispatcher (see mfw_xdp_load()).
+     * in a dispatcher (see mfw_xdp_attach()).
      */
     bpf_program__set_autoload(dp->skel->progs.mfw_xdp, false);
 
-    /* reuses the pinned maps, and pins any that don't exist yet */
+    /* pins the maps, under maps/ */
     if (mfw_bpf__load(dp->skel) != 0) {
         sw_fail(err, errlen, "load BPF object: %s (kernel 6.1+ with BTF, "
                 "CAP_BPF and CAP_NET_ADMIN needed; mfwd -v with "
@@ -413,8 +257,6 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     if (init_config(dp, err, errlen) != 0) {
         goto failed;
     }
-
-    upgrade_ifaces(dp);
 
     return 0;
 

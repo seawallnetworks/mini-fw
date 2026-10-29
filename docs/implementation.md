@@ -88,7 +88,11 @@ Key properties:
 - **Whole-policy updates.** Every `APPLY` carries the complete desired
   state. mfwd checks all of it before changing anything (§6).
 - **Pinned, so mfwd can stop.** The attachments and maps are pinned; filtering
-  goes on while mfwd is stopped, restarting or upgraded.
+  goes on while mfwd is stopped.
+- **No live update.** A starting mfwd detaches everything and removes the
+  pins, then loads afresh and applies the saved policy again (§5.1). Until
+  it has, the interfaces pass everything: a restart or upgrade is
+  fail-open for a moment, which keeps start-up simple.
 - **One BPF object.** `src/bpf/mfw.bpf.c` is embedded in `mfwd` as a libbpf
   skeleton (`src/mfw.skel.h`, generated), so there is no `.o` to install.
 - **Rulesets are per interface.** Every attached interface runs the same
@@ -321,8 +325,8 @@ Everything one interface enforces, compiled from its bindings:
 |-------|---------|
 | `default_action` | ABI only. Always DENY and ignored by BPF (design K10) |
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
-| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets). mfwd refuses to start on pinned maps with another version |
-| `generation` | bumped after each successful materialization |
+| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets), shown by `mfwd -V`. A start replaces the pins of any version |
+| `generation` | bumped after each successful materialization; starts again at each start of mfwd |
 
 ### 4.4 Maps
 
@@ -383,9 +387,8 @@ Each packet increments **exactly one outcome** and **at most one reason**.
 Packets passed with no list deciding (both unbound, a standard miss with
 extended unbound, or a non-first fragment) get an outcome but no reason. **New ids must be appended
 at the end** so existing ids keep their meaning. A new id still makes the
-map larger, and libbpf will not reuse a pinned map of another size: mfwd
-removes a pinned `stats` map whose size differs before it loads, so the
-counters restart on such an upgrade while the rulesets and attachments stay.
+map larger; that needs no care, since every start pins new maps (§5.1)
+and the counters restart.
 
 ---
 
@@ -398,8 +401,8 @@ counters restart on such an upgrade while the rulesets and attachments stay.
   attach/xdp_<ifname>       one per attached interface, by how (§5.3):
                             a program pin; or attach/tcx_<ifname>, the
                             one bpf_link; or attach/tc_<ifname>, a mark
-<statedir>/policy         default /run/mfwd (mfwd -d): "# generation N", then
-                          the applied policy in canonical form
+<statedir>/policy         default /run/mfwd (mfwd -d): the applied policy in
+                          canonical form
 ```
 
 ### 5.1 Start
@@ -413,31 +416,31 @@ counters restart on such an upgrade while the rulesets and attachments stay.
 1. Check that the pin root, or the nearest directory above it that
    exists, is on bpffs (`sw_bpffs_check()`: it climbs only past a missing
    directory).
-2. Create `maps/` and `attach/` with mode 0700.
-3. Open sw_flowd's table pin, if there is one of its layout (§4.4).
+2. **Start afresh** (no live update): detach every interface an earlier
+   mfwd attached and remove its pins, as `mfwd -P` does (§5.4), but keep
+   the saved policy. From here until step 6, nothing is filtered.
+3. Create `maps/` and `attach/` with mode 0700.
+4. Open sw_flowd's table pin, if there is one of its layout (§4.4).
    Open the embedded skeleton with pin root `maps/`, bind that table to
-   `flows`, and load it. libbpf reuses existing map pins, or creates and
-   pins new ones. Every XDP copy loaded later binds the same table.
-4. Initialize `config` if `abi_version` is 0. If it holds a different ABI
-   version, refuse to start (`mfwd -P` removes the old pins).
-5. **Upgrade attached interfaces:** every live tcx link in `attach/` gets
-   the program just loaded, with `bpf_link_update` (atomic), and every
-   classic TC filter too, replaced in one netlink request. Upgrading mfwd
-   therefore upgrades the BPF code without a gap, and an mfwd started
-   after sw_flowd moves every interface to programs that read its table.
-6. **Restore** the saved policy, if there is one. If the kernel still runs
-   its generation (`config.generation`), it is simply taken over. If not
-   (the pins were removed, e.g. by hand), it is applied again.
+   `flows`, and load it; libbpf creates and pins the maps. Every XDP copy
+   loaded later binds the same table.
+5. Initialize `config`: `default_action` DENY, `abi_version`.
+6. **Restore:** apply the saved policy again, if there is one (§6). Its
+   interfaces are attached to the program just loaded, so an upgrade
+   takes effect here, and an mfwd started after sw_flowd reads its table.
 7. Tell systemd mfwd is ready (`READY=1` to `$NOTIFY_SOCKET`,
    `sw_notify_ready()`; `mfwd.service` is `Type=notify`), so sw_configd,
    ordered after mfwd, finds the socket, and serve.
+
+If a step after 2 fails, mfwd exits and the interfaces stay unfiltered
+until an mfwd starts.
 
 An interface is looked up with libsw's `sw_netif_index()`, which tells one
 that doesn't exist from a lookup that failed (glibc's needs `AF_UNIX`,
 which a unit's `RestrictAddressFamilies=` can refuse). A failed lookup is
 never taken for a gone interface: nothing is detached or unpinned, an
-`APPLY` is refused and the running policy stays, and `mfwd -P` stops
-before it removes a pin. It is logged once.
+`APPLY` is refused and the running policy stays, and `mfwd -P` and a
+start (step 2) stop before they remove a pin. It is logged once.
 
 ### 5.2 Stop
 
@@ -456,9 +459,6 @@ mfwd attaches and detaches as `APPLY` requires (§6). At XDP:
   dispatcher without a pin (lost pins) is taken out first.
 - **Live** when its pin's program is in the interface's dispatcher.
 - **Detach:** take that program out of the dispatcher, then unlink the pin.
-- **Upgrade:** libxdp can't swap one program for another: on start mfwd
-  puts its new program in each dispatcher, then takes the old one out. For
-  a moment both run, on the same maps, and nothing goes unfiltered.
 - libxdp needs bpffs at `/sys/fs/bpf`: without it, it would attach the
   program alone, which takes the hook from every program after it, so
   mfwd refuses.
@@ -751,7 +751,7 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 | ACE parser | `make test` | nothing | wildcard→prefix, field values, normalization, canonical round trips, every rejection rule |
 | Policy | `make test` | nothing | parse and canonical form with comments and CRLF, every refusal with its line number, size limits (64/128 bound, 4096 total, 64 interfaces), compile |
 | Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first: standard list only, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), `reply` with and without a flow table (ports, address, flags, idle limits, the ACE's other fields), stats |
-| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart keeps policy and filtering, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, sw_flowd's table bound only at start (by the TC entry and every XDP copy), and refused for its layout, purge, no daemon |
+| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart applies the saved policy again on new pins, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, sw_flowd's table bound only at start (by the TC entry and every XDP copy), and refused for its layout, purge, no daemon |
 | End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic through mfwd between two network namespaces over two veth pairs: standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, filtering while mfwd is down and after a restart, with sw_flowd (else skipped): its table taken when mfwd starts after it, `reply` for outbound TCP and UDP, an ACK flood dropped, recording through sw_flowd's pinned link while it is stopped, nothing for an mfwd started after `sw_flowd -P`; no TC filters, refused policies, purge |
 
 Notes:

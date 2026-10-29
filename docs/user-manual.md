@@ -617,7 +617,7 @@ tcp_frag_off1      0
 
 The counters cover all interfaces together. `xdp_pass + xdp_drop` is the
 total packet count. Counters are cumulative and are only reset by
-`mfwd -P`, or by an upgrade to a version with new counters. To measure a period, take two readings and subtract.
+a restart of mfwd, or `mfwd -P`. To measure a period, take two readings and subtract.
 
 **Rising `ext_implicit_deny` right after a change** usually means a missing
 reply rule (§3.4).
@@ -703,7 +703,9 @@ by hand while one runs is refused, and the first goes on serving.
 
 The kernel side and the saved policy live in memory (`/sys/fs/bpf`,
 `/run`), so a reboot clears them: **the VM boots unprotected until a
-policy is applied.** Restarting mfwd, on the other hand, keeps the policy.
+policy is applied.** Restarting mfwd, on the other hand, keeps the policy:
+it applies it again, though the interfaces pass everything for the moment
+that takes.
 
 On a system with sw_configd, sw_configd applies its configuration when it
 starts. Standalone, apply your policy file whenever mfwd starts, with a
@@ -809,8 +811,9 @@ Yes. Each interface switches atomically: every packet is judged either by
 the old rules or by the new ones.
 
 **What happens when mfwd stops or crashes?**
-Filtering goes on with the last policy. A restarted mfwd picks up the
-saved policy and serves `show` and `status` as before.
+Filtering goes on with the last policy. A restarted mfwd applies the
+saved policy again and serves `show` and `status` as before; while it
+starts, the interfaces pass everything, and `generation` starts again at 1.
 
 **Does mini-fw protect against SYN floods?**
 It drops SYNs to ports you haven't permitted. For permitted ports, the

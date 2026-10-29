@@ -56,7 +56,9 @@ set reply-idle-udp 180
 mfwd checks all of it first, so a bad line changes nothing. Then it
 attaches every interface that gets a list, swaps in each one's ruleset
 atomically, and detaches interfaces that lost theirs. The kernel side is
-pinned, so filtering continues while mfwd is stopped or restarting.
+pinned, so filtering continues while mfwd is stopped. There is no live
+update: a starting mfwd replaces the pins, so every interface passes
+everything until it has applied the saved policy again.
 
 ## Build and install
 
@@ -161,9 +163,9 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 
 - **A daemon owns the kernel side.** mfwd is the only writer of the BPF maps
   and attachments. It keeps the applied policy in `/run/mfwd/policy`, so a restarted
-  mfwd knows it, and applies it again if the pins are gone. On start it also
-  moves attached interfaces to the program it loaded, so upgrading mfwd
-  upgrades the BPF code without a gap.
+  mfwd applies it again. A start detaches everything and removes the pins
+  first, as `mfwd -P` does: no live update, so a restart or upgrade is
+  fail-open for a moment.
 - **Ingress only, at XDP or TC.** Both lists run in one program with two
   entries over one `mfw_judge()`: `mfw_xdp`, in libxdp's dispatcher at
   priority 20, after a DDoS gate's (voidgate's is 10), and `mfw_tc` at TC

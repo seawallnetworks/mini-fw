@@ -18,8 +18,8 @@
 #define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
 /* under the stack's bpffs directory, beside sw_flowd's flows/ */
 #define MFW_PIN_PATH           "/sys/fs/bpf/seawall/mfw"
-/* Layout of the pinned maps; mfwd refuses pins of another version.
- * 2: per-interface rulesets */
+/* Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
+ * the pins, of any version. 2: per-interface rulesets */
 #define MFW_ABI_VERSION        2
 
 /* Rule action */

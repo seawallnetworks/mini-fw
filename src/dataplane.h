@@ -26,9 +26,9 @@ struct mfw_dp {
 };
 
 /*
- * Load the program and open the pinned maps under root (created on first
- * use), check their ABI, and move already attached interfaces to this
- * program. Returns 0, or -1 with a message in err.
+ * Detach every interface and remove the pins an earlier mfwd left under
+ * root, as mfw_dp_purge() does, then load the program and pin new maps
+ * there. Returns 0, or -1 with a message in err.
  */
 int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);

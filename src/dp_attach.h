@@ -30,8 +30,6 @@ int mfw_xdp_state(int ifindex, enum xdp_attach_mode *mode, char *holder,
 int mfw_xdp_unload(int ifindex, __u32 id);
 __u32 mfw_xdp_pinned_id(const char *path);
 int mfw_xdp_attached(const char *root, const char *ifname);
-int mfw_xdp_load(const char *root, const char *ifname, int ifindex,
-    enum xdp_attach_mode mode, int flows_fd);
 int mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
     int flows_fd, char *holder, size_t len);
 void mfw_xdp_detach(const char *root, const char *ifname);

@@ -28,6 +28,10 @@
 #define MFW_XDP_PROG  "mfw_xdp"
 
 
+static int xdp_load(const char *root, const char *ifname, int ifindex,
+    enum xdp_attach_mode mode, int flows_fd);
+
+
 void
 mfw_xdp_path(const char *root, const char *ifname, char *buf, size_t len)
 {
@@ -228,8 +232,8 @@ not_found:
  * pinned maps, and binds sw_flowd's table, flows_fd, unless that is -1;
  * libxdp loads it as an extension of the dispatcher. Returns 0 or -errno.
  */
-int
-mfw_xdp_load(const char *root, const char *ifname, int ifindex,
+static int
+xdp_load(const char *root, const char *ifname, int ifindex,
     enum xdp_attach_mode mode, int flows_fd)
 {
     char                 maps[PATH_MAX], path[PATH_MAX];
@@ -308,7 +312,7 @@ done:
  *
  * Returns 0 when attached, 1 when the hook is held, or -errno
  * (-ENOTSUP if bpffs is not mounted, which libxdp needs). flows_fd is
- * mfw_xdp_load()'s.
+ * xdp_load()'s.
  */
 int
 mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
@@ -342,7 +346,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
      */
     for (i = 0; i < 10 && mfw_xdp_unload(ifindex, 0) > 0; i++) { /* void */ }
 
-    e = mfw_xdp_load(root, ifname, ifindex, mode, flows_fd);
+    e = xdp_load(root, ifname, ifindex, mode, flows_fd);
 
     /*
      * A new dispatcher was tried in native mode: if the driver refused,
@@ -353,7 +357,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
         && e != -EBUSY
         && e != -EEXIST)
     {
-        e = mfw_xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd);
+        e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd);
     }
 
     /* another program took the hook after mfw_xdp_state() looked */
