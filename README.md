@@ -101,8 +101,8 @@ end such as sw_configd), which can also be run on their own.
 `PATH`; the examples below assume they are (see the
 [user manual](docs/user-manual.md#2-installation)).
 
-The root tests use their own pin root, socket and state directory, so they
-run next to a live mini-fw without touching it.
+The root tests run on a bpffs of their own, with their own socket and
+state directory, so they run next to a live mini-fw without touching it.
 
 ## Usage
 

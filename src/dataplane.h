@@ -9,12 +9,10 @@
 #include <stddef.h>
 #include "mfw.h"
 
-#define MFW_PIN_ROOT  MFW_PIN_PATH   /* default; mfwd -p changes it */
-
 struct mfw_bpf;
 
 struct mfw_dp {
-    char            root[PATH_MAX - 64];  /* pin root: MFW_PIN_ROOT, or -p */
+    char            root[PATH_MAX - 64];  /* pin root: MFW_PIN_PATH */
     struct mfw_bpf *skel;                 /* loaded program, maps from pins */
     int             prog_fd;
     int             rulesets_fd;

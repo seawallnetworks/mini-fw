@@ -395,8 +395,8 @@ and the counters restart.
 ## 5. mfwd: lifecycle and pins
 
 ```text
-<pinroot>/                0700, root only (default /sys/fs/bpf/seawall/mfw,
-                          beside sw_flowd's flows/; mfwd -p)
+<pinroot>/                0700, root only: /sys/fs/bpf/seawall/mfw,
+                          beside sw_flowd's flows/
   maps/{rulesets,config,stats}
   attach/xdp_<ifname>       one per attached interface, by how (§5.3):
                             a program pin; or attach/tcx_<ifname>, the
@@ -764,8 +764,8 @@ Notes:
   (`/sys/fs/bpf/xdp/dispatch-<ifindex>-<id>`) go with the test instead of
   piling up on the host's. They start mfwd with `nsenter --net` rather
   than `ip netns exec`, because the latter remounts `/sys` and hides that
-  bpffs. Both use their own pin root, socket and state directory, so they
-  run next to a live installation.
+  bpffs. On it they use the usual pin root; with their own socket and
+  state directory, they run next to a live installation.
 - To check the verifier budget after changes, load the skeleton with
   pinning disabled (as `test_bpf` does) and read `verified_insns` from
   `bpf_prog_get_info_by_fd()`. `bpftool prog loadall` also works, but it

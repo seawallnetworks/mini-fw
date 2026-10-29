@@ -3,8 +3,8 @@
 
 /*
  * The BPF side of mfwd: loads the program, keeps its maps, attaches it
- * to interfaces. Everything lives in pins under <root> (by default
- * /sys/fs/bpf/seawall/mfw, beside sw_flowd's /sys/fs/bpf/seawall/flows):
+ * to interfaces. Everything lives in pins under <root>
+ * (/sys/fs/bpf/seawall/mfw, beside sw_flowd's /sys/fs/bpf/seawall/flows):
  *
  *   maps/rulesets   hash of maps: ifindex → an inner map holding that
  *                   interface's mfw_ruleset

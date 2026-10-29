@@ -407,15 +407,14 @@ static void restore(struct mfwd *d)
 static void usage(FILE *f)
 {
     fprintf(f,
-        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-p pinroot] [-d statedir]\n"
-        "       mfwd -P [-p pinroot] [-d statedir]\n"
+        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-d statedir]\n"
+        "       mfwd -P [-d statedir]\n"
         "\n"
         "  -v          debug logging, libbpf's and libxdp's info included\n"
         "              (SW_BPF_DEBUG=1 adds the verifier's log)\n"
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
-        "  -p pinroot  bpffs directory for the maps and attachments (default " MFW_PIN_ROOT ")\n"
         "  -d dir      where the applied policy is saved (default " MFWD_STATE_DIR ")\n"
         "  -P          detach every interface, remove all pins and the saved\n"
         "              policy, then exit\n"
@@ -424,7 +423,7 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
-    const char *sock = MFW_SOCKET, *root = MFW_PIN_ROOT, *group = NULL;
+    const char *sock = MFW_SOCKET, *root = MFW_PIN_PATH, *group = NULL;
     struct mfwd d = {};
     struct sigaction sa = { .sa_handler = on_signal };
     char err[PATH_MAX + 128], path[PATH_MAX];
@@ -435,11 +434,10 @@ int main(int argc, char **argv)
     sw_bpf_log_init();
     sw_bpf_libxdp_log_init();
     snprintf(d.state_dir, sizeof(d.state_dir), "%s", MFWD_STATE_DIR);
-    while ((c = getopt(argc, argv, "vs:m:g:p:d:PVh")) != -1) {
+    while ((c = getopt(argc, argv, "vs:m:g:d:PVh")) != -1) {
         switch (c) {
         case 'v': sw_log_set_level(SW_LOG_DEBUG); break;
         case 's': sock = optarg; break;
-        case 'p': root = optarg; break;
         case 'd': snprintf(d.state_dir, sizeof(d.state_dir), "%s", optarg); break;
         case 'P': purge = 1; break;
         case 'm':
