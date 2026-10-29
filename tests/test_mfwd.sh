@@ -329,37 +329,11 @@ expect ok "saved policy removed" test ! -e "$STATE/policy"
 expect fail "not on d0" on d0
 [[ -n ${MFW_NO_XDP:-} ]] || same "nothing in d3's dispatcher" "$(xdp_in d3)" 0
 
-echo "== pins under the old default root"
-# mfwd 0.4.0 pinned under /sys/fs/bpf/mfw: a start at the default root,
-# /sys/fs/bpf/seawall/mfw, moves them there. This bpffs is the test's own.
-OLD=/sys/fs/bpf/mfw NEW=/sys/fs/bpf/seawall/mfw
-# mini-fw's programs on the interface: in its dispatcher, or at TC
-copies() {
-    if [[ -z ${MFW_NO_XDP:-} ]]; then
-        xdp_in "$1"
-    else
-        in_ns bpftool net show dev "$1" | grep -Ec '(tcx|clsact)/ingress mfw_tc[ :]'
-    fi
-}
-start -p "$OLD"
-expect ok "apply, pinned under $OLD" mfw apply <(echo "$POLICY")
-stop
-start -p "$NEW"
-grep -q "moved the pins under $OLD to $NEW" "$LOG" && ok "log: moved" || bad "log: moved"
-expect ok "$OLD is gone" test ! -e "$OLD"
-expect ok "the links are under $NEW" test -e "$NEW/link/$(ls "$NEW/link" | head -1)"
-same "attached d0,d1" "$(field attached)" d0,d1
-same "d0: taken over, not attached twice" "$(copies d0)" 1
-stop
-mkdir "$OLD"
-out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -p "$NEW" -d "$STATE" 2>&1)
-same "pins under both: refused" "$?" 1
-[[ $out == *"pins under both $OLD and $NEW"* ]] && ok "says why" || bad "says why: $out"
-rmdir "$OLD"
-expect ok "mfwd -P" nsenter --net=/var/run/netns/$NS "$MFWD" -P -p "$NEW" -d "$STATE"
-expect ok "$NEW removed" test ! -e "$NEW"
-# with no /sys/fs/bpf/seawall yet: mfwd may start before sw_flowd
-rmdir /sys/fs/bpf/seawall
+echo "== the default root"
+NEW=/sys/fs/bpf/seawall/mfw
+# with no /sys/fs/bpf/seawall yet: mfwd may start before sw_flowd. This
+# bpffs is the test's own.
+[[ ! -e /sys/fs/bpf/seawall ]] || rmdir /sys/fs/bpf/seawall
 start -p "$NEW"
 expect ok "starts without /sys/fs/bpf/seawall" mfw ping
 stop

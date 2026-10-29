@@ -2,12 +2,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
 
 /*
- * mini-fw in libxdp's dispatcher: the normal case, link/xdp_<if>. Each
+ * mini-fw in libxdp's dispatcher: the normal case, attach/xdp_<if>. Each
  * interface gets its own copy of the XDP program, on the pinned maps.
  */
 
 
-#include "dp_link.h"
+#include "dp_attach.h"
 #include "mfw.skel.h"
 
 #include <sw/bpffs.h>
@@ -31,7 +31,7 @@
 void
 mfw_xdp_path(const char *root, const char *ifname, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/link/xdp_%.*s", root, IF_NAMESIZE, ifname);
+    snprintf(buf, len, "%s/attach/xdp_%.*s", root, IF_NAMESIZE, ifname);
 }
 
 
@@ -163,7 +163,7 @@ mfw_xdp_pinned_id(const char *path)
 
 
 /*
- * Is the program pinned at link/xdp_<ifname> still in ifname's
+ * Is the program pinned at attach/xdp_<ifname> still in ifname's
  * dispatcher? If not (the interface was deleted or re-created, or the
  * program was taken out), the stale pin is deleted and 0 returned. If
  * the interface can't be looked up, the pin stays, and counts.
@@ -223,7 +223,7 @@ not_found:
 
 /*
  * Load a new copy of mini-fw's XDP program into ifindex's dispatcher, in
- * this mode, and pin it as link/xdp_<ifname>. libxdp joins the dispatcher
+ * this mode, and pin it as attach/xdp_<ifname>. libxdp joins the dispatcher
  * there, or makes one. The copy is a new BPF object that shares the
  * pinned maps, and binds sw_flowd's table, flows_fd, unless that is -1;
  * libxdp loads it as an extension of the dispatcher. Returns 0 or -errno.

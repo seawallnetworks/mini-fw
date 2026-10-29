@@ -26,8 +26,8 @@ ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
-# Stopping mfwd does not stop filtering: the TC program stays attached
-# through the pinned links. Use "mfwd -P" to remove mini-fw from every interface.
+# Stopping mfwd does not stop filtering: mini-fw stays attached through
+# its pins. Use "mfwd -P" to remove mini-fw from every interface.
 
 [Install]
 WantedBy=multi-user.target

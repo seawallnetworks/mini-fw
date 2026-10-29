@@ -684,7 +684,7 @@ mfwd -P [-p pinroot] [-d statedir]
 | `-s socket` | `/run/mfwd.sock` | where to listen; refused if another mfwd answers there |
 | `-m mode` | `0600` | socket permissions, octal, at most `0777` |
 | `-g group` | | socket group, from `/etc/group`; with `-m 0660`, that group may use `mfw` without root. An unknown group stops mfwd |
-| `-p pinroot` | `/sys/fs/bpf/seawall/mfw` | bpffs directory for maps and links; at the default, pins left under `/sys/fs/bpf/mfw` by mfwd 0.4.0 and before are moved there, filtering on |
+| `-p pinroot` | `/sys/fs/bpf/seawall/mfw` | bpffs directory for the maps and attachments |
 | `-d statedir` | `/run/mfwd` | where the running policy is saved |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |

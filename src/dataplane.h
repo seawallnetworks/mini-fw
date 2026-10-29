@@ -10,8 +10,6 @@
 #include "mfw.h"
 
 #define MFW_PIN_ROOT  MFW_PIN_PATH   /* default; mfwd -p changes it */
-/* the default root of mfwd 0.4.0 and before, moved to MFW_PIN_ROOT */
-#define MFW_PIN_ROOT_OLD  "/sys/fs/bpf/mfw"
 
 struct mfw_bpf;
 
@@ -66,12 +64,5 @@ int mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX]);
  * before any pin is removed.
  */
 int mfw_dp_purge(const char *root, char *err, size_t errlen);
-
-/*
- * Move the pins under old to root, attached programs and all: 1 if it
- * moved them, 0 if there was nothing to move, -1 with a message in err.
- */
-int mfw_dp_move_root(const char *old, const char *root, char *err,
-                     size_t errlen);
 
 #endif /* MFW_DATAPLANE_H */

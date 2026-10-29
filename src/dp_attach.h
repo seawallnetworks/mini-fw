@@ -7,8 +7,8 @@
  */
 
 
-#ifndef _MFW_DP_LINK_H_INCLUDED_
-#define _MFW_DP_LINK_H_INCLUDED_
+#ifndef _MFW_DP_ATTACH_H_INCLUDED_
+#define _MFW_DP_ATTACH_H_INCLUDED_
 
 
 #include <linux/types.h>
@@ -53,4 +53,4 @@ void mfw_tc_off(const char *root, const char *ifname);
 void mfw_netif_unknown(const char *err);
 
 
-#endif /* _MFW_DP_LINK_H_INCLUDED_ */
+#endif /* _MFW_DP_ATTACH_H_INCLUDED_ */

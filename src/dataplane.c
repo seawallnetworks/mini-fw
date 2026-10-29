@@ -16,18 +16,20 @@
  * sw_flowd starts first. Without it, a program gets an empty map of its
  * own, and keeps it until an mfwd started with the table replaces it.
  *
- * Each attached interface has one of three link pins:
+ * Each attached interface has one pin in attach/, by how it is attached:
  *
- *   link/xdp_<if>   the normal case: mini-fw's XDP program in the
- *                   interface's libxdp dispatcher, at priority 20 (after
- *                   voidgate's 10)
- *   link/tcx_<if>   degraded: a program that is not a dispatcher holds
- *                   the XDP hook, and mini-fw never replaces it, so the
- *                   TC ingress program is attached with a tcx link
- *   link/tc_<if>    degraded, on a kernel without tcx (before 6.6): the
- *                   TC ingress program is a classic TC filter (cls_bpf on
- *                   the clsact qdisc); the pin marks that mini-fw put it
- *                   there
+ *   attach/xdp_<if>  the normal case: mini-fw's XDP program in the
+ *                    interface's libxdp dispatcher, at priority 20 (after
+ *                    voidgate's 10). A program pin: the dispatcher's own
+ *                    pins keep it there, this one says which copy is ours
+ *   attach/tcx_<if>  degraded: a program that is not a dispatcher holds
+ *                    the XDP hook, and mini-fw never replaces it, so the
+ *                    TC ingress program is attached with a tcx link. The
+ *                    one bpf_link: the pin keeps it attached
+ *   attach/tc_<if>   degraded, on a kernel without tcx (before 6.6): the
+ *                    TC ingress program is a classic TC filter (cls_bpf
+ *                    on the clsact qdisc). A program pin that marks that
+ *                    mini-fw put it there
  *
  * Because everything is pinned, filtering goes on while mfwd is stopped
  * or restarting.
@@ -39,7 +41,7 @@
 
 
 #include "dataplane.h"
-#include "dp_link.h"
+#include "dp_attach.h"
 #include "mfw.skel.h"
 
 #include <sw_flowd/sw_flowd.h>
@@ -58,17 +60,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 
 
 static int name_cmp(const void *a, const void *b);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
-static void upgrade_links(struct mfw_dp *dp);
-static int upgrade_link(struct mfw_dp *dp, const char *ifname);
+static void upgrade_ifaces(struct mfw_dp *dp);
+static int upgrade_iface(struct mfw_dp *dp, const char *ifname);
 static void drop_old_stats(const char *root);
-static int links_detach(const char *root, char *err, size_t errlen);
+static int attach_detach(const char *root, char *err, size_t errlen);
 static void flows_open(struct mfw_dp *dp);
 
 
@@ -126,7 +127,7 @@ mfw_dp_list(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max)
     struct dirent   *de;
     char             dir[PATH_MAX];
 
-    snprintf(dir, sizeof(dir), "%s/link", dp->root);
+    snprintf(dir, sizeof(dir), "%s/attach", dp->root);
 
     d = opendir(dir);
     if (d == NULL) {
@@ -208,7 +209,7 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
  *   the new program.
  */
 static void
-upgrade_links(struct mfw_dp *dp)
+upgrade_ifaces(struct mfw_dp *dp)
 {
     int   e, i, n;
     char  names[MFW_MAX_IFACES][IF_NAMESIZE];
@@ -216,7 +217,7 @@ upgrade_links(struct mfw_dp *dp)
     n = mfw_dp_list(dp, names, MFW_MAX_IFACES);
 
     for (i = 0; i < n; i++) {
-        e = upgrade_link(dp, names[i]);
+        e = upgrade_iface(dp, names[i]);
         if (e != 0) {
             sw_log_warn("%s: update program: %s", names[i], strerror(e));
         }
@@ -224,9 +225,9 @@ upgrade_links(struct mfw_dp *dp)
 }
 
 
-/* One interface of upgrade_links(). Returns 0 or an errno. */
+/* One interface of upgrade_ifaces(). Returns 0 or an errno. */
 static int
-upgrade_link(struct mfw_dp *dp, const char *ifname)
+upgrade_iface(struct mfw_dp *dp, const char *ifname)
 {
     int                   e, fd, ifindex;
     __u32                 old;
@@ -307,8 +308,8 @@ upgrade_link(struct mfw_dp *dp, const char *ifname)
  * The stats map has MFW_STAT_MAX entries. A pinned one from a build with
  * a different number can't be reused (libbpf refuses another
  * max_entries), so its pin is deleted and the load pins a new map. The
- * counters restart; the rules and links stay. The old program keeps the
- * old map until upgrade_links() replaces the program.
+ * counters restart; the rules and attachments stay. The old program
+ * keeps the old map until upgrade_ifaces() replaces the program.
  */
 static void
 drop_old_stats(const char *root)
@@ -340,7 +341,7 @@ drop_old_stats(const char *root)
 int
 mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
 {
-    char  maps[PATH_MAX], links[PATH_MAX];
+    char  maps[PATH_MAX], attach[PATH_MAX];
     LIBBPF_OPTS(bpf_object_open_opts, opts, .pin_root_path = maps);
 
     memset(dp, 0, sizeof(*dp));
@@ -362,9 +363,11 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     }
 
     snprintf(maps, sizeof(maps), "%s/maps", root);
-    snprintf(links, sizeof(links), "%s/link", root);
+    snprintf(attach, sizeof(attach), "%s/attach", root);
 
-    if (sw_file_mkdir_p(maps, 0700) != 0 || sw_file_mkdir_p(links, 0700) != 0) {
+    if (sw_file_mkdir_p(maps, 0700) != 0
+        || sw_file_mkdir_p(attach, 0700) != 0)
+    {
         return sw_fail(err, errlen, "create %s: %s", root, strerror(errno));
     }
 
@@ -411,7 +414,7 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
         goto failed;
     }
 
-    upgrade_links(dp);
+    upgrade_ifaces(dp);
 
     return 0;
 
@@ -426,7 +429,7 @@ failed:
 void
 mfw_dp_close(struct mfw_dp *dp)
 {
-    mfw_bpf__destroy(dp->skel);  /* the pins keep maps and links alive */
+    mfw_bpf__destroy(dp->skel);  /* the pins keep maps and attachments */
     dp->skel = NULL;
 
     if (dp->flows_fd >= 0) {
@@ -689,14 +692,14 @@ mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
 
 
 /*
- * Detach what the pins under <root>/link attached. Deleting a tcx link
+ * Detach what the pins under <root>/attach attached. Deleting a tcx link
  * pin detaches the program, but a classic TC filter and a program in a
  * dispatcher stay until removed, so remove those; the pins stay. An
  * interface that can't be looked up stops it, with -1 and the reason in
  * err: its pins must stay, or mini-fw would run on there, unknown.
  */
 static int
-links_detach(const char *root, char *err, size_t errlen)
+attach_detach(const char *root, char *err, size_t errlen)
 {
     int              ifindex, rc, tc;
     DIR             *d;
@@ -704,7 +707,7 @@ links_detach(const char *root, char *err, size_t errlen)
     struct dirent   *de;
     char             path[PATH_MAX];
 
-    snprintf(path, sizeof(path), "%s/link", root);
+    snprintf(path, sizeof(path), "%s/attach", root);
 
     d = opendir(path);
     if (d == NULL) {
@@ -746,51 +749,6 @@ links_detach(const char *root, char *err, size_t errlen)
 }
 
 
-/*
- * rename(2) on bpffs moves a directory with everything pinned in it:
- * the links stay attached, the maps keep their contents, and the next
- * mfw_dp_open() takes them over in place. Both are on the one bpffs, or
- * the rename fails.
- */
-int
-mfw_dp_move_root(const char *old, const char *root, char *err,
-    size_t errlen)
-{
-    char         *slash;
-    struct stat   st;
-    char          parent[PATH_MAX];
-
-    if (stat(old, &st) != 0) {
-        return 0;
-    }
-
-    /* a second set of links would attach mini-fw twice */
-    if (stat(root, &st) == 0) {
-        return sw_fail(err, errlen, "pins under both %s and %s: "
-                       "mfwd -P -p %s removes the old ones", old, root, old);
-    }
-
-    snprintf(parent, sizeof(parent), "%s", root);
-
-    slash = strrchr(parent, '/');
-    if (slash != NULL && slash != parent) {
-        *slash = '\0';
-
-        if (sw_file_mkdir_p(parent, 0700) != 0) {
-            return sw_fail(err, errlen, "create %s: %s", parent,
-                           strerror(errno));
-        }
-    }
-
-    if (rename(old, root) != 0) {
-        return sw_fail(err, errlen, "move %s to %s: %s", old, root,
-                       strerror(errno));
-    }
-
-    return 1;
-}
-
-
 int
 mfw_dp_purge(const char *root, char *err, size_t errlen)
 {
@@ -798,10 +756,10 @@ mfw_dp_purge(const char *root, char *err, size_t errlen)
     char         dir[PATH_MAX];
 
     /* state/ was left by mfw 0.2 */
-    static const char  *dirs[] = { "link", "maps", "state" };
+    static const char  *dirs[] = { "attach", "maps", "state" };
 
-    /* links first, so no interface is left running on deleted maps */
-    if (links_detach(root, err, errlen) != 0) {
+    /* detach first, so no interface is left running on deleted maps */
+    if (attach_detach(root, err, errlen) != 0) {
         return -1;
     }
 

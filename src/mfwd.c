@@ -434,7 +434,7 @@ static void usage(FILE *f)
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
-        "  -p pinroot  bpffs directory for maps and links (default " MFW_PIN_ROOT ")\n"
+        "  -p pinroot  bpffs directory for the maps and attachments (default " MFW_PIN_ROOT ")\n"
         "  -d dir      where the applied policy is saved (default " MFWD_STATE_DIR ")\n"
         "  -P          detach every interface, remove all pins and the saved\n"
         "              policy, then exit\n"
@@ -488,11 +488,6 @@ int main(int argc, char **argv)
     }
 
     if (purge) {
-        if (strcmp(root, MFW_PIN_ROOT) == 0
-            && mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err)) < 0) {
-            sw_log_err("%s", err);
-            return 1;
-        }
         if (mfw_dp_purge(root, err, sizeof(err))) {
             sw_log_err("%s", err);
             return 1;
@@ -513,20 +508,6 @@ int main(int argc, char **argv)
     if (fd < 0) {
         sw_log_err("%s", err);
         return 1;
-    }
-
-    /*
-     * the pins of an mfwd from before /sys/fs/bpf/seawall: moved, and
-     * then purged or taken over in place like any others
-     */
-    if (strcmp(root, MFW_PIN_ROOT) == 0) {
-        c = mfw_dp_move_root(MFW_PIN_ROOT_OLD, root, err, sizeof(err));
-        if (c < 0) {
-            sw_log_err("%s", err);
-            goto failed;
-        }
-        if (c > 0)
-            sw_log_notice("moved the pins under %s to %s", MFW_PIN_ROOT_OLD, root);
     }
 
     if (mfw_dp_open(&d.dp, root, err, sizeof(err))) {
@@ -561,7 +542,7 @@ int main(int argc, char **argv)
         close(cfd);
     }
 
-    /* the pinned links keep filtering after we are gone */
+    /* the pins keep filtering after we are gone */
     sw_log_info("stopping; interfaces stay protected");
     close(fd);
     unlink(sock);

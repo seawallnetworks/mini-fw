@@ -160,7 +160,7 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 ## Implementation notes (vs `design.md`)
 
 - **A daemon owns the kernel side.** mfwd is the only writer of the BPF maps
-  and links. It keeps the applied policy in `/run/mfwd/policy`, so a restarted
+  and attachments. It keeps the applied policy in `/run/mfwd/policy`, so a restarted
   mfwd knows it, and applies it again if the pins are gone. On start it also
   moves attached interfaces to the program it loaded, so upgrading mfwd
   upgrades the BPF code without a gap.
@@ -206,11 +206,11 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 - **Attach.** The XDP entry in the interface's libxdp dispatcher, made or
   joined, in its mode (native, else skb, for a new one), loaded by libxdp
   from an object of its own on the pinned maps; mini-fw pins it as
-  `link/xdp_<if>`, and the dispatcher's own pins keep it there. On an
+  `attach/xdp_<if>`, and the dispatcher's own pins keep it there. On an
   interface whose XDP hook is held by another program, a pinned tcx
-  `bpf_link` (`link/tcx_<if>`). A kernel without tcx (before 6.6) gets a
+  `bpf_link` (`attach/tcx_<if>`). A kernel without tcx (before 6.6) gets a
   classic TC filter instead, handle `0x4d46` at priority `0xc000` on the
-  interface's clsact ingress, and the program pinned as `link/tc_<if>` to
+  interface's clsact ingress, and the program pinned as `attach/tc_<if>` to
   say so. A pin whose interface was deleted is noticed and replaced. On
   start mfwd puts its new program in each dispatcher before it takes the
   old one out, and moves an interface from TC to XDP once its hook is

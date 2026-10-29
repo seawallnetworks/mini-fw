@@ -3,12 +3,12 @@
 
 /*
  * mini-fw at TC ingress, when a program that is not a dispatcher holds
- * the XDP hook (degraded): a tcx link, link/tcx_<if>, or on a kernel
- * before 6.6 a classic TC filter, marked by link/tc_<if>.
+ * the XDP hook (degraded): a tcx link, attach/tcx_<if>, or on a kernel
+ * before 6.6 a classic TC filter, marked by attach/tc_<if>.
  */
 
 
-#include "dp_link.h"
+#include "dp_attach.h"
 
 #include <sw/fail.h>
 #include <sw/netif.h>
@@ -57,14 +57,14 @@ static __u32 tcx_link_ifindex(int fd);
 static void
 tcx_path(const char *root, const char *ifname, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/link/tcx_%.*s", root, IF_NAMESIZE, ifname);
+    snprintf(buf, len, "%s/attach/tcx_%.*s", root, IF_NAMESIZE, ifname);
 }
 
 
 static void
 tc_path(const char *root, const char *ifname, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/link/tc_%.*s", root, IF_NAMESIZE, ifname);
+    snprintf(buf, len, "%s/attach/tc_%.*s", root, IF_NAMESIZE, ifname);
 }
 
 
@@ -110,7 +110,7 @@ mfw_tc_detach(int ifindex)
 
 
 /*
- * Is ifname attached with classic TC? If link/tc_<ifname> is pinned but
+ * Is ifname attached with classic TC? If attach/tc_<ifname> is pinned but
  * the filter is gone (the interface was deleted or re-created, or the
  * filter removed), the stale pin is deleted and 0 returned.
  */
@@ -149,7 +149,7 @@ mfw_tc_attached(const char *root, const char *ifname)
 
 
 /*
- * Pin prog_fd as link/tc_<ifname>, replacing any pin there. The pin only
+ * Pin prog_fd as attach/tc_<ifname>, replacing any pin there. The pin only
  * marks that mini-fw attached ifname with classic TC: the filter itself
  * stays in the qdisc whether pinned or not.
  */
@@ -188,7 +188,7 @@ tcx_link_ifindex(int fd)
 
 
 /*
- * Open the tcx link pinned at link/tcx_<ifname>. Returns its fd if the
+ * Open the tcx link pinned at attach/tcx_<ifname>. Returns its fd if the
  * link is still attached to ifname, else -1; a stale pin (the interface
  * was deleted or re-created) is deleted. If ifname can't be looked up,
  * the link is taken as still its.
@@ -224,7 +224,7 @@ mfw_tcx_open(const char *root, const char *ifname)
 
 /*
  * Attach prog_fd to ifindex's TC ingress with a tcx link, pinned as
- * link/tcx_<ifname>. The link goes after the interface's other tcx
+ * attach/tcx_<ifname>. The link goes after the interface's other tcx
  * programs, so those run first. Returns 0, or -1 with a message in err.
  */
 int
