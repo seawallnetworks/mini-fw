@@ -485,44 +485,42 @@ mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
 
 
 /*
- * sw_flowd's table, for every program this mfwd loads to bind. The table
- * is not versioned: one of another layout is a sw_flowd built from
- * another sw_flowd.h than mini-fw was, and is not bound. Either way "reply"
- * ACEs match nothing until mfwd restarts with the right one.
+ * sw_flowd's table, for every program this mfwd loads to bind.
+ * sf_outbound_open() refuses one of another layout, a sw_flowd built from
+ * another sw_flowd.h than mini-fw was. Without it, "reply" ACEs match
+ * nothing until mfwd restarts with the right one.
  */
 static void
 flows_open(struct mfw_dp *dp)
 {
-    int                  fd;
-    __u32                len;
-    struct bpf_map_info  info;
+    int    fd;
+    __u32  size;
 
-    fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_OUTBOUND);
+    size = 0;
+    fd = sf_outbound_open(&size);
 
-    if (fd < 0) {
+    if (fd == -ENOENT) {
         sw_log_warn("no sw_flowd flow table under %s: \"reply\" ACEs match "
                     "nothing until mfwd restarts with it (start sw_flowd "
                     "first)", SF_PIN_ROOT);
         return;
     }
 
-    memset(&info, 0, sizeof(info));
-    len = sizeof(info);
-
-    if (bpf_map_get_info_by_fd(fd, &info, &len) != 0
-        || info.type != BPF_MAP_TYPE_LRU_HASH
-        || info.key_size != sizeof(struct sf_flow_key)
-        || info.value_size != sizeof(struct sf_flow))
-    {
+    if (fd == -EPROTO) {
         sw_log_warn("sw_flowd's flow table under %s is not the layout this "
                     "mfwd reads: \"reply\" ACEs match nothing", SF_PIN_ROOT);
-        close(fd);
+        return;
+    }
+
+    if (fd < 0) {
+        sw_log_warn("sw_flowd's flow table under %s: %s: \"reply\" ACEs "
+                    "match nothing", SF_PIN_ROOT, strerror(-fd));
         return;
     }
 
     dp->flows_fd = fd;
     sw_log_info("reading sw_flowd's flow table (%u flows): \"reply\" ACEs "
-                "match replies to the host's own flows", info.max_entries);
+                "match replies to the host's own flows", size);
 }
 
 
