@@ -109,6 +109,7 @@ mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname)
 }
 
 
+/* names are char[IF_NAMESIZE], so a and b are the strings */
 static int
 name_cmp(const void *a, const void *b)
 {
