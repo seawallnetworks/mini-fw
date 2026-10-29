@@ -423,7 +423,7 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
-    const char *sock = MFW_SOCKET, *root = MFW_PIN_PATH, *group = NULL;
+    const char *sock = MFW_SOCKET, *group = NULL;
     struct mfwd d = {};
     struct sigaction sa = { .sa_handler = on_signal };
     char err[PATH_MAX + 128], path[PATH_MAX];
@@ -467,14 +467,14 @@ int main(int argc, char **argv)
     }
 
     if (purge) {
-        if (mfw_dp_purge(root, err, sizeof(err))) {
+        if (mfw_dp_purge(err, sizeof(err))) {
             sw_log_err("%s", err);
             return 1;
         }
         state_path(&d, path, sizeof(path), "");
         unlink(path);
         rmdir(d.state_dir);
-        printf("mfwd: removed %s and the saved policy\n", root);
+        printf("mfwd: removed %s and the saved policy\n", MFW_PIN_PATH);
         return 0;
     }
 
@@ -489,7 +489,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (mfw_dp_open(&d.dp, root, err, sizeof(err))) {
+    if (mfw_dp_open(&d.dp, err, sizeof(err))) {
         sw_log_err("%s", err);
         goto failed;
     }
@@ -502,7 +502,7 @@ int main(int argc, char **argv)
     /* accept() wakes up every second, so a signal is never missed */
     sw_sock_timeouts(fd, 1000);
     sw_log_info("%s, ABI %d: listening on %s, pins under %s, attaching with %s",
-                MFWD_VERSION, MFW_ABI_VERSION, sock, root,
+                MFWD_VERSION, MFW_ABI_VERSION, sock, MFW_PIN_PATH,
                 d.dp.no_xdp ? (d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)")
                 : d.dp.tcx ? "libxdp's dispatcher, else tcx"
                 : "libxdp's dispatcher, else classic TC (no tcx before kernel 6.6)");

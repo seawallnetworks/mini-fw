@@ -205,7 +205,7 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
 
 
 int
-mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
+mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen)
 {
     char  maps[PATH_MAX], attach[PATH_MAX];
     LIBBPF_OPTS(bpf_object_open_opts, opts, .pin_root_path = maps);
@@ -217,32 +217,29 @@ mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen)
     dp->stats_fd = -1;
     dp->flows_fd = -1;
 
-    if (strlen(root) >= sizeof(dp->root)) {
-        return sw_fail(err, errlen, "pin root too long");
-    }
-
-    snprintf(dp->root, sizeof(dp->root), "%s", root);
+    dp->root = MFW_PIN_PATH;
 
     /*
      * Before anything is made: otherwise mkdir in sysfs, or pinning
      * outside bpffs, fails later, and less clearly.
      */
-    if (sw_bpffs_check(root, err, errlen) != 0) {
+    if (sw_bpffs_check(dp->root, err, errlen) != 0) {
         return -1;
     }
 
     /* no live update: start afresh, fail-open until the policy is applied */
-    if (mfw_dp_purge(root, err, errlen) != 0) {
+    if (mfw_dp_purge(err, errlen) != 0) {
         return -1;
     }
 
-    snprintf(maps, sizeof(maps), "%s/maps", root);
-    snprintf(attach, sizeof(attach), "%s/attach", root);
+    snprintf(maps, sizeof(maps), "%s/maps", dp->root);
+    snprintf(attach, sizeof(attach), "%s/attach", dp->root);
 
     if (sw_file_mkdir_p(maps, 0700) != 0
         || sw_file_mkdir_p(attach, 0700) != 0)
     {
-        return sw_fail(err, errlen, "create %s: %s", root, strerror(errno));
+        return sw_fail(err, errlen, "create %s: %s", dp->root,
+                       strerror(errno));
     }
 
     dp->skel = mfw_bpf__open_opts(&opts);
@@ -614,7 +611,7 @@ detach_pinned(const char *root, char *err, size_t errlen)
 
 
 int
-mfw_dp_purge(const char *root, char *err, size_t errlen)
+mfw_dp_purge(char *err, size_t errlen)
 {
     size_t       i;
     char         dir[PATH_MAX];
@@ -622,20 +619,21 @@ mfw_dp_purge(const char *root, char *err, size_t errlen)
     static const char  *dirs[] = { "attach", "maps" };
 
     /* detach first, so no interface is left running on deleted maps */
-    if (detach_pinned(root, err, errlen) != 0) {
+    if (detach_pinned(MFW_PIN_PATH, err, errlen) != 0) {
         return -1;
     }
 
     for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        snprintf(dir, sizeof(dir), "%s/%s", root, dirs[i]);
+        snprintf(dir, sizeof(dir), "%s/%s", MFW_PIN_PATH, dirs[i]);
 
         if (sw_bpffs_unpin_dir(dir, err, errlen) != 0) {
             return -1;
         }
     }
 
-    if (rmdir(root) != 0 && errno != ENOENT) {
-        return sw_fail(err, errlen, "rmdir %s: %s", root, strerror(errno));
+    if (rmdir(MFW_PIN_PATH) != 0 && errno != ENOENT) {
+        return sw_fail(err, errlen, "rmdir %s: %s", MFW_PIN_PATH,
+                       strerror(errno));
     }
 
     return 0;

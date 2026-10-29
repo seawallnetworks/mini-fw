@@ -12,7 +12,7 @@
 struct mfw_bpf;
 
 struct mfw_dp {
-    char            root[PATH_MAX - 64];  /* pin root: MFW_PIN_PATH */
+    const char     *root;                 /* pin root: MFW_PIN_PATH */
     struct mfw_bpf *skel;                 /* loaded program, maps from pins */
     int             prog_fd;
     int             rulesets_fd;
@@ -25,10 +25,10 @@ struct mfw_dp {
 
 /*
  * Detach every interface and remove the pins an earlier mfwd left under
- * root, as mfw_dp_purge() does, then load the program and pin new maps
- * there. Returns 0, or -1 with a message in err.
+ * MFW_PIN_PATH, as mfw_dp_purge() does, then load the program and pin new
+ * maps there. Returns 0, or -1 with a message in err.
  */
-int mfw_dp_open(struct mfw_dp *dp, const char *root, char *err, size_t errlen);
+int mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);
 
 /* Is ifname attached, by a program, link or filter still alive on that
@@ -57,10 +57,10 @@ int mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments, __u32 *generat
 int mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX]);
 
 /*
- * Detach every interface and remove all pins under root. Returns 0, or -1
- * with a message in err; an interface that can't be looked up stops it
- * before any pin is removed.
+ * Detach every interface and remove all pins under MFW_PIN_PATH. Returns
+ * 0, or -1 with a message in err; an interface that can't be looked up
+ * stops it before any pin is removed.
  */
-int mfw_dp_purge(const char *root, char *err, size_t errlen);
+int mfw_dp_purge(char *err, size_t errlen);
 
 #endif /* MFW_DATAPLANE_H */
