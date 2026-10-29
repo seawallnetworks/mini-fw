@@ -413,12 +413,13 @@ and the counters restart.
    not in `/etc/group` refuses the start before the pins are touched. It
    binds under `umask(0177)` and sets the group and mode before
    `listen()`. A client that connects now waits until step 7.
-1. Check that the pin root, or the nearest directory above it that
+1. **Start afresh** (no live update): detach every interface an earlier
+   mfwd attached and remove its pins with `mfw_dp_purge()`, as `mfwd -P`
+   does (§5.4), but keep the saved policy. From here until step 6, nothing
+   is filtered. Then `mfw_dp_open()` does steps 2 to 5.
+2. Check that the pin root, or the nearest directory above it that
    exists, is on bpffs (`sw_bpffs_check()`: it climbs only past a missing
    directory).
-2. **Start afresh** (no live update): detach every interface an earlier
-   mfwd attached and remove its pins, as `mfwd -P` does (§5.4), but keep
-   the saved policy. From here until step 6, nothing is filtered.
 3. Create `maps/` and `attach/` with mode 0700.
 4. Open sw_flowd's table pin, if there is one of its layout (§4.4).
    Open the embedded skeleton with pin root `maps/`, bind that table to
@@ -432,7 +433,7 @@ and the counters restart.
    `sw_notify_ready()`; `mfwd.service` is `Type=notify`), so sw_configd,
    ordered after mfwd, finds the socket, and serve.
 
-If a step after 2 fails, mfwd exits and the interfaces stay unfiltered
+If a step after 1 fails, mfwd exits and the interfaces stay unfiltered
 until an mfwd starts.
 
 An interface is looked up with libsw's `sw_netif_index()`, which tells one
@@ -440,7 +441,7 @@ that doesn't exist from a lookup that failed (glibc's needs `AF_UNIX`,
 which a unit's `RestrictAddressFamilies=` can refuse). A failed lookup is
 never taken for a gone interface: nothing is detached or unpinned, an
 `APPLY` is refused and the running policy stays, and `mfwd -P` and a
-start (step 2) stop before they remove a pin. It is logged once.
+start (step 1) stop before they remove a pin. It is logged once.
 
 ### 5.2 Stop
 

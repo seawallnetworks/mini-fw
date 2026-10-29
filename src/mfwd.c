@@ -489,7 +489,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (mfw_dp_open(&d.dp, err, sizeof(err))) {
+    /* no live update: start afresh, fail-open until restore() applies the
+     * saved policy */
+    if (mfw_dp_purge(err, sizeof(err)) || mfw_dp_open(&d.dp, err, sizeof(err))) {
         sw_log_err("%s", err);
         goto failed;
     }

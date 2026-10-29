@@ -227,11 +227,6 @@ mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen)
         return -1;
     }
 
-    /* no live update: start afresh, fail-open until the policy is applied */
-    if (mfw_dp_purge(err, errlen) != 0) {
-        return -1;
-    }
-
     snprintf(maps, sizeof(maps), "%s/maps", dp->root);
     snprintf(attach, sizeof(attach), "%s/attach", dp->root);
 

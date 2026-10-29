@@ -24,9 +24,9 @@ struct mfw_dp {
 };
 
 /*
- * Detach every interface and remove the pins an earlier mfwd left under
- * MFW_PIN_PATH, as mfw_dp_purge() does, then load the program and pin new
- * maps there. Returns 0, or -1 with a message in err.
+ * Load the TC program and pin its maps under MFW_PIN_PATH, attaching
+ * nothing. mfwd purges first, so the maps are new. Returns 0, or -1 with
+ * a message in err.
  */
 int mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen);
 void mfw_dp_close(struct mfw_dp *dp);
