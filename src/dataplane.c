@@ -77,7 +77,7 @@ typedef enum {
 static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
 static int init_config(struct mfw_dp *dp, char *err, size_t len);
-static int attach_detach(const char *root, char *err, size_t errlen);
+static int detach_pinned(const char *root, char *err, size_t errlen);
 static void flows_open(struct mfw_dp *dp);
 
 
@@ -569,7 +569,7 @@ mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
  * err: its pins must stay, or mini-fw would run on there, unknown.
  */
 static int
-attach_detach(const char *root, char *err, size_t errlen)
+detach_pinned(const char *root, char *err, size_t errlen)
 {
     int              ifindex, rc;
     DIR             *d;
@@ -624,7 +624,7 @@ mfw_dp_purge(const char *root, char *err, size_t errlen)
     static const char  *dirs[] = { "attach", "maps" };
 
     /* detach first, so no interface is left running on deleted maps */
-    if (attach_detach(root, err, errlen) != 0) {
+    if (detach_pinned(root, err, errlen) != 0) {
         return -1;
     }
 
