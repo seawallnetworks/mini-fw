@@ -177,7 +177,7 @@ static int cmd_status(const mfw_client_t *c)
     if (st.generation)
         printf("generation           %u\n", st.generation);
     else
-        printf("generation           none (no policy applied since boot)\n");
+        printf("generation           none (none applied since mfwd started)\n");
     printf("attached             %s\n", *st.attached ? st.attached : "-");
     printf("missing              %s\n", *st.missing ? st.missing : "-");
     printf("degraded             %s\n", *st.degraded ? st.degraded : "-");

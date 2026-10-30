@@ -120,7 +120,8 @@ sudo mfwd -P                   # remove mini-fw completely (pins, saved policy)
 Run `mfw help` for the grammar. Wildcards must be contiguous (`0.0.0.255`), and
 CIDR (`10.0.0.0/8`) is also accepted. Ports: `eq N`, `range LO HI`, `gt N`, `lt N`.
 
-`mfw` exit status: 0 ok, 1 refused by mfwd, 2 usage or connection error.
+`mfw` exit status: 0 ok, 1 refused by mfwd, 2 usage, file or connection
+error.
 
 ## mfwd protocol
 
@@ -213,10 +214,9 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   `bpf_link` (`attach/tcx_<if>`). A kernel without tcx (before 6.6) gets a
   classic TC filter instead, handle `0x4d46` at priority `0xc000` on the
   interface's clsact ingress, and the program pinned as `attach/tc_<if>` to
-  say so. A pin whose interface was deleted is noticed and replaced. On
-  start mfwd puts its new program in each dispatcher before it takes the
-  old one out, and moves an interface from TC to XDP once its hook is
-  free. `MFW_NO_XDP=1` attaches at TC only, and `SW_NO_TCX=1`, the
+  say so. A pin whose interface was deleted is noticed and replaced. A
+  start purges first and attaches afresh, so an interface moves from TC to
+  XDP at the next start after its hook is free. `MFW_NO_XDP=1` attaches at TC only, and `SW_NO_TCX=1`, the
   stack's switch, with classic TC on a newer kernel, for the tests.
 - **Verifier.** The per-ACE extended match is a global BPF function, so it is
   verified once. Both loops (64 standard + 128 extended ACEs) then verify in

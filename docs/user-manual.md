@@ -1,9 +1,10 @@
 # mini-fw User Manual
 
 mini-fw is a small inbound firewall for a Linux VM. It filters IPv4 traffic
-at TC ingress, before the kernel's IP stack and netfilter, using
-Cisco IOS-style numbered access lists. XDP, which comes earlier, is left
-to a DDoS gate such as voidgate.
+at XDP, before the kernel's IP stack and netfilter, using Cisco IOS-style
+numbered access lists. It shares the XDP hook through libxdp's
+dispatcher, after a DDoS gate such as voidgate, and filters at TC ingress
+instead on an interface where another program holds the hook (§2).
 
 It has two programs:
 
@@ -187,13 +188,13 @@ bind eth0 in 100
 - Lists left out of the file are gone.
 - The file is checked completely first. If anything is wrong, **nothing
   changes** and the error names the line.
+- Each interface switches to its new rules in one step: no packet ever sees
+  half of an update.
 
 In the Seawall stack, don't: sw_configd owns the policy, notices any other
 apply within 5 seconds and sends its own back. Change the lists in its CLI
 (`telnet 127.0.0.1 2323`, `access-list` and `ip access-group`) or the web
 UI, and use `mfw` for `show`, `status` and `stats`.
-- Each interface switches to its new rules in one step: no packet ever sees
-  half of an update.
 
 Each interface can have **one standard and one extended list** bound, and
 different interfaces can have different lists.
@@ -270,6 +271,7 @@ applied, generation 1
 generation           1
 attached             eth0
 missing              -
+degraded             -
 drop-ipv4-fragments  0
 flows                none
 ```
@@ -633,15 +635,19 @@ sudo mfw status
 generation           4
 attached             eth0,eth1
 missing              eth2
+degraded             -
 drop-ipv4-fragments  0
 flows                sw_flowd
 ```
 
-- **generation** counts applied policies ("none" before the first since
-  boot).
+- **generation** counts applied policies since mfwd started, the saved
+  one it applies at start included ("none" if there was none).
 - **attached**: the interfaces mini-fw runs on.
 - **missing**: interfaces the policy binds lists to that don't exist. Apply
   the policy again once they do.
+- **degraded**: interfaces filtered at TC ingress, because a program that
+  isn't libxdp's dispatcher holds their XDP hook (§2). They are filtered
+  the same, at a higher cost per dropped packet.
 - **flows**: `sw_flowd` while `reply` rules read sw_flowd's table, `none`
   without it (they match nothing then).
 
@@ -660,7 +666,7 @@ mfw [-s socket] <command>
 | `mfw apply [file]` | Replace the whole policy with the file (stdin if no file or `-`). Attaches and detaches interfaces to match. |
 | `mfw check [file]` | Check a policy without sending it. Uses the same rules as mfwd and needs no access to mfwd. |
 | `mfw show` | Print the running policy. |
-| `mfw status` | Generation, attached and missing interfaces, fragment setting. |
+| `mfw status` | Generation, attached, missing and degraded interfaces, fragment setting, whether `reply` reads sw_flowd's table. |
 | `mfw stats [--json]` | Print counters. |
 | `mfw ping` | Check that mfwd answers. |
 | `mfw version` | Print version. |
@@ -734,10 +740,19 @@ sudo make uninstall                  # in the source tree, with the same PREFIX
 
 Stopping mfwd alone does **not** stop the filtering.
 
-If the `mfwd` binary is gone but the firewall is still active:
+If the `mfwd` binary is gone but the firewall is still active, on each
+interface:
 
 ```bash
-sudo rm -r /sys/fs/bpf/seawall/mfw       # detaches the program and removes all state
+sudo xdp-loader status eth0              # mfw_xdp's id in the dispatcher
+sudo xdp-loader unload -i <id> eth0      # take it out
+sudo tc filter del dev eth0 ingress pref 49152 handle 0x4d46 bpf   # classic TC only
+```
+
+then remove the pins, which detaches a tcx link and removes all state:
+
+```bash
+sudo rm -r /sys/fs/bpf/seawall/mfw
 ```
 
 ---
@@ -750,8 +765,9 @@ sudo rm -r /sys/fs/bpf/seawall/mfw       # detaches the program and removes all 
 | `mfw: cannot reach mfwd: Permission denied` | no access to the socket | use `sudo`, or join the group `mfw` (`sudo usermod -aG mfw $USER`, then log in again); a mfwd started by hand needs `-g mfw -m 0660` |
 | `… is not on bpffs` (mfwd log) | bpffs missing | `sudo mount -t bpf bpf /sys/fs/bpf` |
 | `load BPF object: …` (mfwd log) | kernel too old (< 6.1), no BTF, or missing capabilities | check §1.2; run mfwd with `-v` and `SW_BPF_DEBUG=1` to see the verifier log |
+| `eth0: attach XDP: …` | the driver refused XDP in both modes, or missing capabilities | check §1.2; `sudo xdp-loader status eth0` |
 | `eth0: attach TC ingress: …` | missing capabilities | check §1.2 |
-| `pinned maps under … have ABI N, expected 2` | state left by a different mini-fw version | `sudo mfwd -P`, then start mfwd again |
+| an interface listed as `degraded` | a program that isn't libxdp's dispatcher holds its XDP hook (mfwd log: `holds the XDP hook`) | none needed: it is filtered at TC; to move it to XDP, load that program through libxdp, then restart mfwd |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
 | DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
@@ -781,9 +797,10 @@ sudo bpftool map dump id <inner map id>                       # that interface's
 ## 13. FAQ
 
 **Does mini-fw replace iptables or nftables?**
-No. They can run side by side. mini-fw decides first (at TC ingress);
-packets it accepts then go through netfilter as usual. An XDP program,
-such as voidgate's, runs before mini-fw.
+No. They can run side by side. mini-fw decides first (at XDP, or at TC
+ingress on a degraded interface); packets it accepts then go through
+netfilter as usual. A DDoS gate in the same dispatcher, such as
+voidgate, runs before mini-fw.
 
 **Can I filter outgoing traffic?**
 No. mini-fw only filters inbound traffic.

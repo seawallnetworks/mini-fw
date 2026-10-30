@@ -5,7 +5,7 @@
 | **Document** | Implementation description — what is actually built |
 | **Scope** | Step 1: stateless, ingress-only ACL at XDP in libxdp's dispatcher, or at TC ingress (tcx, or classic TC before 6.6) where another program holds the XDP hook, for a local VM, per-interface lists, driven by the mfwd daemon |
 | **Version** | mfwd / mfw 0.4.0, ABI 2 |
-| **Date** | 2026-10-12 |
+| **Date** | 2026-10-29 |
 | **Target** | Linux ≥ 6.1 with BTF (tcx from 6.6), libbpf ≥ 1.3, libxdp, clang |
 | **Related** | [`design.md`](design.md) (full v1 design, Rev 18), [`../README.md`](../README.md) (operator quick start) |
 
@@ -111,7 +111,10 @@ src/acl_parse.c        libmfw: Cisco ACE parser and formatter
 src/policy.c           libmfw: whole policies
 src/client.c           libmfw: socket client
 src/mfwd.c             the daemon: socket, requests, saved policy
-src/dataplane.c/.h     mfwd's BPF side: load, pins, attach/detach, rulesets, counters
+src/dataplane.c/.h     mfwd's BPF side: load, pins, purge, attach/detach, rulesets, counters
+src/dp_attach.h        the hooks, for dataplane.c: XDP (dp_xdp.c) and TC (dp_tc.c)
+src/dp_xdp.c           attach at XDP, in libxdp's dispatcher
+src/dp_tc.c            attach at TC ingress: tcx, or classic TC before 6.6
 src/mfw.c              the command-line client
 mfwd.service           systemd unit
 tests/test_acl.c       ACE parser tests (no kernel)
@@ -252,11 +255,12 @@ map lookups per packet, however many ACEs there are. Without a ruleset,
 both lists count as unbound.
 
 **Bound detection:** `std_acl` / `ext_acl` in the ruleset name the bound
-lists; 0 means unbound (`MATCH_UNBOUND`). The scans stop at `n_std` /
-`n_ext`. If a scan runs out without a match, the result is `MATCH_MISS`.
+lists; 0 means unbound (`mfw_match_unbound`). The scans stop at `n_std` /
+`n_ext`. If a scan runs out without a match, the result is
+`mfw_match_miss`.
 
 **Implicit deny:** running off the end of a bound extended list
-(`ext_acl != 0`) returns `MATCH_MISS`, which the program drops and counts as
+(`ext_acl != 0`) returns `mfw_match_miss`, which the program drops and counts as
 `ext_implicit_deny`, separately from explicit `deny` ACEs. A bound list with
 no ACEs (`n_ext = 0`) therefore drops all IPv4.
 
@@ -351,13 +355,12 @@ of mfwd picks up. mini-fw only looks the table up. Its layout comes from
 sw_flowd's installed header, `<sw_flowd/sw_flowd.h>`, which mfwd and the
 BPF program build against (`SW_FLOWD_PREFIX`); libmfw does not need it.
 `reply` adds no map of mini-fw's own: its idle limits are in the ACEs
-(§4.1), so the pins of an mfwd from before `reply` are reused as they
-are.
+(§4.1).
 
-The maps are created by libbpf when mfwd first starts
-(`LIBBPF_PIN_BY_NAME` with pin root `<pinroot>/maps`) and reused by every
-later start. There is no userspace-only state in bpffs any more: the
-policy itself lives in mfwd and in `/run/mfwd/policy` (§5).
+The maps are created by libbpf at every start of mfwd
+(`LIBBPF_PIN_BY_NAME` with pin root `<pinroot>/maps`), after the purge
+has removed the previous ones (§5.1). There is no userspace-only state in
+bpffs: the policy itself lives in mfwd and in `/run/mfwd/policy` (§5).
 
 An inner map is kept alive only by the outer map's reference: mfwd
 creates it, fills it, stores its fd in `maps/rulesets` and closes it. It
@@ -501,12 +504,17 @@ kernel, for the tests):
 
 `mfwd -P` takes each of its programs out of its dispatcher, unlinks every
 attach pin (detaching a tcx link), and deletes each classic TC filter of
-its network namespace; then it removes the maps, the pin root and the saved policy. Without mfwd:
+its network namespace; then it removes the maps, the pin root and the
+saved policy. Without mfwd, per interface:
 
 ```bash
-rm -r /sys/fs/bpf/seawall/mfw          # detaches everything, removes all state
-# classic TC (before 6.6): its filters stay until deleted, per interface
+# XDP: the dispatcher's pins hold mfw_xdp, so take it out first
+xdp-loader status eth0                 # mfw_xdp's id
+xdp-loader unload -i <id> eth0
+# classic TC (before 6.6): the filter stays until deleted
 tc filter del dev eth0 ingress pref 49152 handle 0x4d46 bpf
+# then the pins: detaches tcx links, removes the maps
+rm -r /sys/fs/bpf/seawall/mfw
 ```
 
 ---
@@ -579,8 +587,8 @@ Errors are one line, `ERR <code> <message>`:
 | `kernel` | an attach, a map update or a counter read failed |
 | `internal` | out of memory |
 
-`generation` in `STATUS` is 0 before the first `APPLY` since the pins were
-created. Lists in `attached` / `missing` are comma-separated and empty when
+`generation` in `STATUS` is 0 until a policy is applied since mfwd
+started (the saved one, applied at start, counts). Lists in `attached` / `missing` are comma-separated and empty when
 there are none.
 
 mfwd handles one request at a time. A client that is slow to send holds
@@ -700,12 +708,12 @@ so the parent's lists apply to it, and in-band tags are peeled before
 matching.
 
 If an interface is deleted and re-created, it gets a new ifindex and loses
-its TC program. Its binding stays, but is not installed until the
+its attachment. Its binding stays, but is not installed until the
 interface is attached again.
 
 ### 8.4 Updates
 
-Each interface switches atomically to its new ruleset (§6.3). An update
+Each interface switches atomically to its new ruleset (§6). An update
 that touches several interfaces switches them one after another.
 
 ### 8.5 Performance

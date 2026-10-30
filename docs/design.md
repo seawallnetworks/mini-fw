@@ -10,9 +10,10 @@
 | **Audience** | Senior engineers implementing the dataplane and control plane |
 | **Target OS** | Linux 5.10+ (BTF + libbpf ≥ 0.7 preferred) |
 
-> **Implementation status (2026-10-06):** step 1 implements a much smaller
-> subset of this design: a stateless, ingress-only ACL in a single XDP
-> program (both standard and extended lists), with no TC hooks, egress
+> **Implementation status (2026-10-29):** step 1 implements a much smaller
+> subset of this design: a stateless, ingress-only ACL (both standard and
+> extended lists) in one program, at XDP in libxdp's dispatcher, or at TC
+> ingress where another program holds the XDP hook, with no egress
 > filtering, conntrack or fragment tracking. See
 > [`implementation.md`](implementation.md) for what the code actually does
 > and §10 there for every deviation from this document.
