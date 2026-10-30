@@ -120,6 +120,94 @@ static void append(char *buf, size_t len, const char *name)
 }
 
 /*
+ * Look up every bound interface, putting its index in ifindex (0 if it
+ * doesn't exist, and its name in missing), and attach those that exist and
+ * aren't attached yet. On failure, the ones attached here are detached
+ * again: the old policy runs as it did.
+ */
+static int attach_bound(struct mfwd *d, const struct mfw_policy *p,
+                        __u32 *ifindex, char *missing, size_t mlen,
+                        char *err, size_t errlen)
+{
+    char added[MFW_MAX_IFACES][IF_NAMESIZE];
+    int n_added = 0;
+
+    for (int i = 0; i < p->n_binds; i++) {
+        const char *ifname = p->binds[i].ifname;
+        int idx = sw_netif_index(ifname, err, errlen);
+
+        /* can't tell whether it exists: the old policy stays */
+        if (idx < 0)
+            goto undo;
+        ifindex[i] = idx;
+        if (!idx) {
+            append(missing, mlen, ifname);
+            continue;
+        }
+        if (mfw_dp_attached(&d->dp, ifname))
+            continue;
+        if (mfw_dp_attach(&d->dp, ifname, err, errlen))
+            goto undo;
+        snprintf(added[n_added++], IF_NAMESIZE, "%s", ifname);
+    }
+    return 0;
+
+undo:
+    for (int i = 0; i < n_added; i++)
+        mfw_dp_detach(&d->dp, added[i]);
+    return -1;
+}
+
+/*
+ * Swap in the policy's config, then each existing bound interface's
+ * ruleset, compiled into rs and stamped with the new generation, put in
+ * *gen. The rulesets of interfaces no longer bound are removed.
+ */
+static int install(struct mfwd *d, const struct mfw_policy *p,
+                   const __u32 *ifindex, struct mfw_ruleset *rs, __u32 *gen,
+                   char *err, size_t errlen)
+{
+    char msg[MFW_ERR_LEN - IF_NAMESIZE - 2];   /* "<ifname>: " goes first */
+    __u32 keep[MFW_MAX_IFACES];
+    int n_keep = 0;
+
+    if (mfw_dp_set_config(&d->dp, p->drop_ipv4_fragments, gen)) {
+        snprintf(err, errlen, "update config: %s", strerror(errno));
+        return -1;
+    }
+    for (int i = 0; i < p->n_binds; i++) {
+        if (!ifindex[i])
+            continue;
+        mfw_policy_compile(p, i, rs);
+        rs->generation = *gen;
+        if (mfw_dp_install(&d->dp, ifindex[i], rs, msg, sizeof(msg))) {
+            snprintf(err, errlen, "%s: %s", p->binds[i].ifname, msg);
+            return -1;
+        }
+        keep[n_keep++] = ifindex[i];
+    }
+    mfw_dp_prune(&d->dp, keep, n_keep);
+    return 0;
+}
+
+/* Detach the interfaces mini-fw is on that are not bound, or not there. */
+static void detach_unbound(struct mfwd *d, const struct mfw_policy *p,
+                           const __u32 *ifindex)
+{
+    char attached[MFW_MAX_IFACES][IF_NAMESIZE];
+    int n = mfw_dp_list_attached(&d->dp, attached, MFW_MAX_IFACES);
+
+    for (int i = 0; i < n; i++) {
+        int bound = 0;
+
+        for (int j = 0; j < p->n_binds; j++)
+            bound |= ifindex[j] && !strcmp(p->binds[j].ifname, attached[i]);
+        if (!bound)
+            mfw_dp_detach(&d->dp, attached[i]);
+    }
+}
+
+/*
  * Make the kernel enforce the policy: attach every bound interface that
  * exists, swap in its ruleset, then remove rulesets and detach interfaces
  * that are no longer bound. Validation and new attaches come first, so a
@@ -130,10 +218,7 @@ static void apply(struct mfwd *d, const char *text, char **reply)
     struct mfw_policy p;
     struct mfw_ruleset *rs;
     char err[MFW_ERR_LEN], missing[1024] = "", *canon;
-    char attached[MFW_MAX_IFACES][IF_NAMESIZE];
-    char added[MFW_MAX_IFACES][IF_NAMESIZE];
-    __u32 ifindex[MFW_MAX_IFACES], keep[MFW_MAX_IFACES], gen;
-    int n_keep = 0, n_added = 0, n;
+    __u32 ifindex[MFW_MAX_IFACES], gen;
 
     if (mfw_policy_parse(text, &p, err, sizeof(err))) {
         error_reply(reply, "invalid", "%s", err);
@@ -146,59 +231,14 @@ static void apply(struct mfwd *d, const char *text, char **reply)
         goto out;
     }
 
-    for (int i = 0; i < p.n_binds; i++) {
-        const char *ifname = p.binds[i].ifname;
-        int idx = sw_netif_index(ifname, err, sizeof(err));
-
-        /* can't tell whether it exists: the old policy stays */
-        if (idx < 0) {
-            for (int j = 0; j < n_added; j++)
-                mfw_dp_detach(&d->dp, added[j]);
-            error_reply(reply, "kernel", "%s", err);
-            goto out;
-        }
-        ifindex[i] = idx;
-        if (!ifindex[i]) {
-            append(missing, sizeof(missing), ifname);
-            continue;
-        }
-        if (mfw_dp_attached(&d->dp, ifname))
-            continue;
-        if (mfw_dp_attach(&d->dp, ifname, err, sizeof(err))) {
-            for (int j = 0; j < n_added; j++)  /* back to how it was */
-                mfw_dp_detach(&d->dp, added[j]);
-            error_reply(reply, "kernel", "%s", err);
-            goto out;
-        }
-        snprintf(added[n_added++], IF_NAMESIZE, "%s", ifname);
-    }
-
-    if (mfw_dp_set_config(&d->dp, p.drop_ipv4_fragments, &gen)) {
-        error_reply(reply, "kernel", "update config: %s", strerror(errno));
+    if (attach_bound(d, &p, ifindex, missing, sizeof(missing), err,
+                     sizeof(err))
+        || install(d, &p, ifindex, rs, &gen, err, sizeof(err)))
+    {
+        error_reply(reply, "kernel", "%s", err);
         goto out;
     }
-    for (int i = 0; i < p.n_binds; i++) {
-        if (!ifindex[i])
-            continue;
-        mfw_policy_compile(&p, i, rs);
-        rs->generation = gen;
-        if (mfw_dp_install(&d->dp, ifindex[i], rs, err, sizeof(err))) {
-            error_reply(reply, "kernel", "%s: %s", p.binds[i].ifname, err);
-            goto out;
-        }
-        keep[n_keep++] = ifindex[i];
-    }
-    mfw_dp_prune(&d->dp, keep, n_keep);
-
-    n = mfw_dp_list_attached(&d->dp, attached, MFW_MAX_IFACES);
-    for (int i = 0; i < n; i++) {
-        int bound = 0;
-
-        for (int j = 0; j < p.n_binds; j++)
-            bound |= ifindex[j] && !strcmp(p.binds[j].ifname, attached[i]);
-        if (!bound)
-            mfw_dp_detach(&d->dp, attached[i]);
-    }
+    detach_unbound(d, &p, ifindex);
 
     free(d->policy);
     d->policy = canon;
@@ -512,6 +552,7 @@ int main(int argc, char **argv)
         sw_log_err("%s", err);
         goto failed;
     }
+
     restore(&d);
 
     sigaction(SIGTERM, &sa, NULL);
