@@ -76,7 +76,7 @@ typedef enum {
 
 static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
-static int init_config(struct mfw_dp *dp, char *err, size_t len);
+static int init_config(int config_fd, char *err, size_t len);
 static int detach_pinned(const char *root, char *err, size_t errlen);
 static void flows_open(struct mfw_dp *dp);
 
@@ -183,9 +183,9 @@ mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
 }
 
 
-/* The config map is new (all zeros): give it the defaults. */
+/* The config map, config_fd, is new (all zeros): give it the defaults. */
 static int
-init_config(struct mfw_dp *dp, char *err, size_t len)
+init_config(int config_fd, char *err, size_t len)
 {
     __u32              k;
     struct mfw_config  cfg;
@@ -196,7 +196,7 @@ init_config(struct mfw_dp *dp, char *err, size_t len)
     cfg.default_action = MFW_ACTION_DENY;
     cfg.abi_version = MFW_ABI_VERSION;
 
-    if (bpf_map_update_elem(dp->config_fd, &k, &cfg, BPF_ANY) != 0) {
+    if (bpf_map_update_elem(config_fd, &k, &cfg, BPF_ANY) != 0) {
         return sw_fail(err, len, "init config: %s", strerror(errno));
     }
 
@@ -274,7 +274,7 @@ mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen)
     dp->tcx = sw_bpf_have_tcx();
     dp->no_xdp = getenv("MFW_NO_XDP") != NULL;
 
-    if (init_config(dp, err, errlen) != 0) {
+    if (init_config(dp->config_fd, err, errlen) != 0) {
         goto failed;
     }
 
