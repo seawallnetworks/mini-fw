@@ -78,7 +78,7 @@ static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
 static int init_config(int config_fd, char *err, size_t len);
 static int detach_pinned(const char *root, char *err, size_t errlen);
-static void flows_open(struct mfw_dp *dp);
+static int flows_open(void);
 
 
 int
@@ -242,7 +242,7 @@ mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen)
         return sw_fail(err, errlen, "open BPF object: %s", strerror(errno));
     }
 
-    flows_open(dp);
+    dp->flows_fd = flows_open();
 
     if (dp->flows_fd >= 0
         && bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0)
@@ -480,10 +480,11 @@ mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
  * sw_flowd's table, for every program this mfwd loads to bind.
  * sf_outbound_open() refuses one of another layout, a sw_flowd built from
  * another sw_flowd.h than mini-fw was. Without it, "reply" ACEs match
- * nothing until mfwd restarts with the right one.
+ * nothing until mfwd restarts with the right one. Returns its fd, or
+ * -errno (the reason logged).
  */
-static void
-flows_open(struct mfw_dp *dp)
+static int
+flows_open(void)
 {
     int    fd;
     __u32  size;
@@ -495,24 +496,21 @@ flows_open(struct mfw_dp *dp)
         sw_log_warn("no sw_flowd flow table under %s: \"reply\" ACEs match "
                     "nothing until mfwd restarts with it (start sw_flowd "
                     "first)", SF_PIN_ROOT);
-        return;
-    }
 
-    if (fd == -EPROTO) {
+    } else if (fd == -EPROTO) {
         sw_log_warn("sw_flowd's flow table under %s is not the layout this "
                     "mfwd reads: \"reply\" ACEs match nothing", SF_PIN_ROOT);
-        return;
-    }
 
-    if (fd < 0) {
+    } else if (fd < 0) {
         sw_log_warn("sw_flowd's flow table under %s: %s: \"reply\" ACEs "
                     "match nothing", SF_PIN_ROOT, strerror(-fd));
-        return;
+
+    } else {
+        sw_log_info("reading sw_flowd's flow table (%u flows): \"reply\" "
+                    "ACEs match replies to the host's own flows", size);
     }
 
-    dp->flows_fd = fd;
-    sw_log_info("reading sw_flowd's flow table (%u flows): \"reply\" ACEs "
-                "match replies to the host's own flows", size);
+    return fd;
 }
 
 
