@@ -6,7 +6,7 @@
 # xdp-filter) and clang; MFW_NO_XDP=1 attaches at TC only, and needs
 # neither.
 #
-# Uses its own bpffs (below), socket and state directory, so it runs next
+# Uses its own bpffs (below), socket and run directory, so it runs next
 # to a live mini-fw without touching it.
 set -u
 
@@ -15,7 +15,7 @@ MFWD=$ROOT/mfwd MFW=$ROOT/mfw
 NS=mfwt-$$
 PINS=/sys/fs/bpf/seawall/mfw  # the default, on the test's own bpffs
 TMP=$(mktemp -d)
-SOCK=$TMP/sock STATE=$TMP/state LOG=$TMP/log
+SOCK=$TMP/sock RUN=$TMP/run LOG=$TMP/log
 PASS=0 FAIL=0 PID=
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
@@ -35,7 +35,7 @@ fi
 
 cleanup() {
     [[ -n $PID ]] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null
-    "$MFWD" -P -d "$STATE" >/dev/null 2>&1
+    "$MFWD" -P -d "$RUN" >/dev/null 2>&1
     ip netns del "$NS" 2>/dev/null
     rm -rf "$TMP"
 }
@@ -65,7 +65,7 @@ field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
 
 start() {
     # nsenter execs mfwd, so $! is mfwd itself
-    nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$STATE" "$@" \
+    nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$RUN" "$@" \
         >>"$LOG" 2>&1 &
     PID=$!
     for _ in $(seq 50); do [[ -S $SOCK ]] && mfw ping >/dev/null 2>&1 && return; sleep 0.1; done
@@ -114,18 +114,18 @@ echo "== refused at start, before the pins"
 # libsw's listener: checked before mfwd touches the pins, so the first
 # one, on the same pins, goes on as it was
 ino=$(stat -c %i "$SOCK")
-out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$STATE" 2>&1)
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$RUN" 2>&1)
 same "a second mfwd: exit 1" "$?" 1
 [[ $out == *"another process listens on it"* ]] && ok "says why" || bad "says why: $out"
 same "its socket untouched" "$(stat -c %i "$SOCK")" "$ino"
 expect ok "the first one serves on" mfw ping
-out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$TMP/g.sock" -d "$STATE" \
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$TMP/g.sock" -d "$RUN" \
       -g sw-no-such-group 2>&1)
 same "an unknown group: exit 1" "$?" 1
 [[ $out == *'no group "sw-no-such-group"'* ]] && ok "says why" || bad "says why: $out"
 expect fail "no socket left" test -e "$TMP/g.sock"
-expect fail "-m '': refused" "$MFWD" -m "" -s "$TMP/m.sock" -d "$STATE"
-expect fail "-m 1777: refused" "$MFWD" -m 1777 -s "$TMP/m.sock" -d "$STATE"
+expect fail "-m '': refused" "$MFWD" -m "" -s "$TMP/m.sock" -d "$RUN"
+expect fail "-m 1777: refused" "$MFWD" -m 1777 -s "$TMP/m.sock" -d "$RUN"
 
 echo "== apply"
 expect ok "apply" mfw apply <(echo "$POLICY")
@@ -324,9 +324,9 @@ rm -rf "$FLOWS"
 echo "== purge"
 stop
 # in the interfaces' namespace: a classic TC filter is removed there
-expect ok "mfwd -P" nsenter --net=/var/run/netns/$NS "$MFWD" -P -d "$STATE"
+expect ok "mfwd -P" nsenter --net=/var/run/netns/$NS "$MFWD" -P -d "$RUN"
 expect ok "pins removed" test ! -e "$PINS"
-expect ok "saved policy removed" test ! -e "$STATE/policy"
+expect ok "saved policy removed" test ! -e "$RUN/policy"
 expect fail "not on d0" on d0
 [[ -n ${MFW_NO_XDP:-} ]] || same "nothing in d3's dispatcher" "$(xdp_in d3)" 0
 
@@ -336,7 +336,7 @@ echo "== no /sys/fs/bpf/seawall yet"
 start
 expect ok "starts without /sys/fs/bpf/seawall" mfw ping
 stop
-"$MFWD" -P -d "$STATE" >/dev/null
+"$MFWD" -P -d "$RUN" >/dev/null
 
 echo "== without mfwd"
 out=$(mfw ping 2>&1)

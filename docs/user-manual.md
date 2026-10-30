@@ -674,8 +674,8 @@ kernel error), **2** usage, file or connection error.
 ### 9.2 `mfwd`
 
 ```text
-mfwd [-v] [-s socket] [-m mode] [-g group] [-d statedir]
-mfwd -P [-d statedir]
+mfwd [-v] [-s socket] [-m mode] [-g group] [-d rundir]
+mfwd -P [-d rundir]
 ```
 
 | Option | Default | Meaning |
@@ -684,7 +684,7 @@ mfwd -P [-d statedir]
 | `-s socket` | `/run/mfwd.sock` | where to listen; refused if another mfwd answers there |
 | `-m mode` | `0600` | socket permissions, octal, at most `0777` |
 | `-g group` | | socket group, from `/etc/group`; with `-m 0660`, that group may use `mfw` without root. An unknown group stops mfwd |
-| `-d statedir` | `/run/mfwd` | where the running policy is saved |
+| `-d rundir` | `/run/mfwd` | where the running policy is saved |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |
 

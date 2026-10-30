@@ -401,7 +401,7 @@ and the counters restart.
   attach/xdp_<ifname>       one per attached interface, by how (§5.3):
                             a program pin; or attach/tcx_<ifname>, the
                             one bpf_link; or attach/tc_<ifname>, a mark
-<statedir>/policy         default /run/mfwd (mfwd -d): the applied policy in
+<rundir>/policy           default /run/mfwd (mfwd -d): the applied policy in
                           canonical form
 ```
 
@@ -535,7 +535,7 @@ and the user manual). mfwd:
 5. Removes every other entry of `maps/rulesets` and **detaches** attached
    interfaces that are no longer bound.
 6. Saves the policy (canonical form, `mfw_policy_format()`) to
-   `<statedir>/policy` with `sw_file_write_atomic()`: a temporary file,
+   `<rundir>/policy` with `sw_file_write_atomic()`: a temporary file,
    fsynced and renamed, then the directory fsynced, so a crash just after
    an `APPLY` keeps it.
 
@@ -766,7 +766,7 @@ Notes:
   piling up on the host's. They start mfwd with `nsenter --net` rather
   than `ip netns exec`, because the latter remounts `/sys` and hides that
   bpffs. On it they use the usual pin root; with their own socket and
-  state directory, they run next to a live installation.
+  run directory, they run next to a live installation.
 - To check the verifier budget after changes, load the skeleton with
   pinning disabled (as `test_bpf` does) and read `verified_insns` from
   `bpf_prog_get_info_by_fd()`. `bpftool prog loadall` also works, but it

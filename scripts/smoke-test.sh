@@ -6,7 +6,7 @@
 #   [mfw-cli 10.200.0.1] --veth-- [mfw-fw 10.200.0.2  veth-fw ]
 #   [mfw-cli 10.201.0.1] --veth-- [mfw-fw 10.201.0.2  veth-fw2]
 #
-# mfwd runs in mfw-fw with its own bpffs (below), socket and state
+# mfwd runs in mfw-fw with its own bpffs (below), socket and run
 # directory, so this runs next to a live mini-fw without touching it. The second veth
 # pair checks that each interface enforces only its own lists. Needs root
 # and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only, and needs no
@@ -56,7 +56,7 @@ mfw()    { "$MFW" -s "$SOCK" "$@"; }
 
 start_mfwd() {
     # nsenter (not ip netns exec, which hides the test's bpffs) execs mfwd
-    nsenter --net=/var/run/netns/$FW "$MFWD" -s "$SOCK" -d "$TMP/state" \
+    nsenter --net=/var/run/netns/$FW "$MFWD" -s "$SOCK" -d "$TMP/run" \
         >>"$TMP/log" 2>&1 &
     PID=$!
     for _ in $(seq 50); do mfw ping >/dev/null 2>&1 && return; sleep 0.1; done
@@ -77,7 +77,7 @@ cleanup() {
     [[ -n $PID ]] && stop_mfwd
     [[ -n $FLOWD_PID ]] && stop_flowd
     [[ -x $FLOWD ]] && nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
-    "$MFWD" -P -d "$TMP/state" >/dev/null 2>&1
+    "$MFWD" -P -d "$TMP/run" >/dev/null 2>&1
     for ns in "$CLI" "$FW"; do
         ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
         ip netns del "$ns" 2>/dev/null
@@ -261,7 +261,7 @@ expect ok "stats json" bash -c "$MFW -s $SOCK stats --json | python3 -m json.too
 
 echo "== purge"
 stop_mfwd
-expect ok "mfwd -P" "$MFWD" -P -d "$TMP/state"
+expect ok "mfwd -P" "$MFWD" -P -d "$TMP/run"
 expect ok "pins removed" test ! -e "$PINS"
 expect ok "ping after purge" ping_fw
 expect ok "tcp 8081 after purge" tcp_to_fw 8081

@@ -23,7 +23,7 @@
  * Errors: ERR <code> <message>, code one of badreq, invalid, kernel,
  * internal. The policy format is described in mfw_policy.h.
  *
- * The applied policy is saved under the state directory (/run/mfwd), so a
+ * The applied policy is saved under the run directory (/run/mfwd), so a
  * restarted mfwd applies it again; the kernel side is pinned and keeps
  * filtering while mfwd is down. There is no live update: a starting mfwd
  * replaces the pins, and nothing is filtered until the saved policy is
@@ -62,21 +62,20 @@
 
 
 #define MFWD_VERSION    "0.4.0"
-#define MFWD_STATE_DIR  "/run/mfwd"
+#define MFWD_RUN_DIR    "/run/mfwd"
 #define MFWD_READ_SECS  3      /* a client must send its request in time */
 
 
 typedef struct {
     struct mfw_dp   dp;
-    char            state_dir[PATH_MAX - 32];
+    char            run_dir[PATH_MAX - 32];
     char           *policy;       /* applied, canonical; NULL: none yet */
     __u32           generation;   /* of that policy */
 } mfwd_t;
 
 
 static void on_signal(int sig);
-static void state_path(const mfwd_t *d, char *buf, size_t len,
-    const char *suffix);
+static void policy_path(const mfwd_t *d, char *buf, size_t len);
 static void save_policy(const mfwd_t *d);
 static void error_reply(char **reply, const char *code, const char *fmt,
     ...);
@@ -115,9 +114,9 @@ on_signal(int sig)
 
 
 static void
-state_path(const mfwd_t *d, char *buf, size_t len, const char *suffix)
+policy_path(const mfwd_t *d, char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/policy%s", d->state_dir, suffix);
+    snprintf(buf, len, "%s/policy", d->run_dir);
 }
 
 
@@ -132,10 +131,10 @@ save_policy(const mfwd_t *d)
     size_t  len;
     char    path[PATH_MAX], err[PATH_MAX + 128];
 
-    state_path(d, path, sizeof(path), "");
+    policy_path(d, path, sizeof(path));
 
-    if (sw_file_mkdir_p(d->state_dir, 0700) != 0) {
-        sw_log_err("cannot save the policy: create %s: %s", d->state_dir,
+    if (sw_file_mkdir_p(d->run_dir, 0700) != 0) {
+        sw_log_err("cannot save the policy: create %s: %s", d->run_dir,
                    strerror(errno));
         return;
     }
@@ -645,7 +644,7 @@ restore(mfwd_t *d)
     char  *reply, *text;
     char   path[PATH_MAX], err[PATH_MAX + 64];
 
-    state_path(d, path, sizeof(path), "");
+    policy_path(d, path, sizeof(path));
 
     text = sw_file_read(path, MFW_REQUEST_MAX, NULL, err, sizeof(err));
     if (text == NULL) {
@@ -674,16 +673,16 @@ static void
 usage(FILE *f)
 {
     fprintf(f,
-        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-d statedir]\n"
-        "       mfwd -P [-d statedir]\n"
+        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-d rundir]\n"
+        "       mfwd -P [-d rundir]\n"
         "\n"
         "  -v          debug logging, libbpf's and libxdp's info included\n"
         "              (SW_BPF_DEBUG=1 adds the verifier's log)\n"
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
-        "  -d dir      where the applied policy is saved\n"
-        "              (default " MFWD_STATE_DIR ")\n"
+        "  -d rundir   where the applied policy is saved\n"
+        "              (default " MFWD_RUN_DIR ")\n"
         "  -P          detach every interface, remove all pins and the saved\n"
         "              policy, then exit\n"
         "  -V          print the version\n");
@@ -709,7 +708,7 @@ main(int argc, char **argv)
     sw_bpf_log_init();
     sw_bpf_libxdp_log_init();
 
-    snprintf(d.state_dir, sizeof(d.state_dir), "%s", MFWD_STATE_DIR);
+    snprintf(d.run_dir, sizeof(d.run_dir), "%s", MFWD_RUN_DIR);
 
     while ((c = getopt(argc, argv, "vs:m:g:d:PVh")) != -1) {
         switch (c) {
@@ -735,7 +734,7 @@ main(int argc, char **argv)
             break;
 
         case 'd':
-            snprintf(d.state_dir, sizeof(d.state_dir), "%s", optarg);
+            snprintf(d.run_dir, sizeof(d.run_dir), "%s", optarg);
             break;
 
         case 'P':
@@ -767,9 +766,9 @@ main(int argc, char **argv)
             return 1;
         }
 
-        state_path(&d, path, sizeof(path), "");
+        policy_path(&d, path, sizeof(path));
         unlink(path);
-        rmdir(d.state_dir);
+        rmdir(d.run_dir);
 
         printf("mfwd: removed %s and the saved policy\n", MFW_PIN_PATH);
         return 0;
