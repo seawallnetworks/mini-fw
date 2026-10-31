@@ -1,23 +1,43 @@
-// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
-/* mfw — command-line client for mfwd. Sends policies, prints what mfwd
- * enforces. Needs no privileges beyond access to mfwd's socket. */
+
+/* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
+
+/*
+ * mfw — command-line client for mfwd. Sends policies, prints what mfwd
+ * enforces. Needs no privileges beyond access to mfwd's socket.
+ */
+
+
+#include "mfw_client.h"
+#include "mfw_policy.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "mfw_client.h"
-#include "mfw_policy.h"
 
-#define MFW_VERSION "0.4.0"
+#define MFW_VERSION  "0.4.0"
 
 /* exit status, as sw_authctl */
-#define EXIT_OK       0
-#define EXIT_REFUSED  1   /* mfwd said no */
-#define EXIT_ERROR    2   /* usage, file or connection error */
+#define MFW_EXIT_OK       0
+#define MFW_EXIT_REFUSED  1   /* mfwd said no */
+#define MFW_EXIT_ERROR    2   /* usage, file or connection error */
 
-static void usage(FILE *f)
+
+static void usage(FILE *f);
+static char *read_all(FILE *f);
+static char *read_policy(int argc, char **argv);
+static int failed(int rc, const char *err);
+static int cmd_check(int argc, char **argv);
+static int cmd_apply(const mfw_client_t *c, int argc, char **argv);
+static int cmd_show(const mfw_client_t *c);
+static int cmd_status(const mfw_client_t *c);
+static int cmd_stats(const mfw_client_t *c, int argc, char **argv);
+
+
+static void
+usage(FILE *f)
 {
     fprintf(f,
         "usage: mfw [-s socket] <command>\n"
@@ -59,213 +79,335 @@ static void usage(FILE *f)
         "show, status and stats.\n");
 }
 
-static char *read_all(FILE *f)
+
+static char *
+read_all(FILE *f)
 {
-    size_t size = 4096, off = 0;
-    char *buf = malloc(size + 1), *p;
+    char    *buf, *p;
+    size_t   n, off, size;
 
-    while (buf) {
-        size_t n = fread(buf + off, 1, size - off, f);
+    size = 4096;
+    off = 0;
 
+    buf = malloc(size + 1);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    for ( ;; ) {
+        n = fread(buf + off, 1, size - off, f);
         off += n;
-        if (n == 0)
+
+        if (n == 0) {
             break;
+        }
+
         if (off == size) {
             if (size > MFW_REQUEST_MAX) {
                 errno = EFBIG;
                 free(buf);
                 return NULL;
             }
+
             size *= 2;
+
             p = realloc(buf, size + 1);
-            if (!p) {
+            if (p == NULL) {
                 free(buf);
                 return NULL;
             }
+
             buf = p;
         }
     }
-    if (!buf || ferror(f)) {
+
+    if (ferror(f)) {
         free(buf);
         return NULL;
     }
+
     buf[off] = '\0';
+
     return buf;
 }
 
-/* The policy text from argv[0] (a file, or '-' / nothing for stdin). */
-static char *read_policy(int argc, char **argv)
-{
-    const char *path = argc ? argv[0] : "-";
-    FILE *f = strcmp(path, "-") ? fopen(path, "r") : stdin;
-    char *text;
 
-    if (!f) {
+/* The policy text from argv[0] (a file, or '-' / nothing for stdin). */
+static char *
+read_policy(int argc, char **argv)
+{
+    FILE        *f;
+    char        *text;
+    const char  *path;
+
+    path = argc > 0 ? argv[0] : "-";
+    f = strcmp(path, "-") != 0 ? fopen(path, "r") : stdin;
+
+    if (f == NULL) {
         fprintf(stderr, "mfw: %s: %s\n", path, strerror(errno));
         return NULL;
     }
+
     text = read_all(f);
-    if (!text)
+
+    if (text == NULL) {
         fprintf(stderr, "mfw: read %s: %s\n", path, strerror(errno));
-    if (f != stdin)
+    }
+
+    if (f != stdin) {
         fclose(f);
+    }
+
     return text;
 }
 
+
 /* Reports a failed call; returns the exit status. */
-static int failed(int rc, const char *err)
+static int
+failed(int rc, const char *err)
 {
-    if (rc == mfw_err_io)
+    if (rc == mfw_err_io) {
         fprintf(stderr, "mfw: %s: %s\n", mfw_strerror(rc), strerror(errno));
-    else if (err && *err)
+
+    } else if (err != NULL && *err != '\0') {
         fprintf(stderr, "mfw: %s\n", err);
-    else
+
+    } else {
         fprintf(stderr, "mfw: %s\n", mfw_strerror(rc));
-    return rc == mfw_err_io || rc == mfw_err_reply ? EXIT_ERROR : EXIT_REFUSED;
+    }
+
+    return rc == mfw_err_io || rc == mfw_err_reply ? MFW_EXIT_ERROR
+                                                   : MFW_EXIT_REFUSED;
 }
 
-static int cmd_check(int argc, char **argv)
-{
-    struct mfw_policy p;
-    char err[MFW_ERR_LEN], *text = read_policy(argc, argv);
 
-    if (!text)
-        return EXIT_ERROR;
-    if (mfw_policy_parse(text, &p, err, sizeof(err))) {
+static int
+cmd_check(int argc, char **argv)
+{
+    char               *text;
+    struct mfw_policy   p;
+    char                err[MFW_ERR_LEN];
+
+    text = read_policy(argc, argv);
+    if (text == NULL) {
+        return MFW_EXIT_ERROR;
+    }
+
+    if (mfw_policy_parse(text, &p, err, sizeof(err)) != 0) {
         fprintf(stderr, "mfw: %s\n", err);
         free(text);
-        return EXIT_REFUSED;
+        return MFW_EXIT_REFUSED;
     }
+
     printf("ok: %d ACEs, %d interfaces\n", p.n_rules, p.n_binds);
+
     mfw_policy_free(&p);
     free(text);
-    return EXIT_OK;
+
+    return MFW_EXIT_OK;
 }
 
-static int cmd_apply(const mfw_client_t *c, int argc, char **argv)
-{
-    char err[MFW_ERR_LEN], missing[1024], *text = read_policy(argc, argv);
-    __u32 gen;
-    int rc;
 
-    if (!text)
-        return EXIT_ERROR;
+static int
+cmd_apply(const mfw_client_t *c, int argc, char **argv)
+{
+    int     rc;
+    char   *text;
+    __u32   gen;
+    char    err[MFW_ERR_LEN], missing[1024];
+
+    text = read_policy(argc, argv);
+    if (text == NULL) {
+        return MFW_EXIT_ERROR;
+    }
+
     rc = mfw_apply(c, text, &gen, missing, sizeof(missing), err, sizeof(err));
     free(text);
-    if (rc)
+
+    if (rc != 0) {
         return failed(rc, err);
+    }
+
     printf("applied, generation %u\n", gen);
-    if (*missing)
+
+    if (missing[0] != '\0') {
         printf("not present, so not attached: %s\n", missing);
-    return EXIT_OK;
+    }
+
+    return MFW_EXIT_OK;
 }
 
-static int cmd_show(const mfw_client_t *c)
-{
-    char *policy;
-    int rc = mfw_show(c, &policy);
 
-    if (rc)
+static int
+cmd_show(const mfw_client_t *c)
+{
+    int    rc;
+    char  *policy;
+
+    rc = mfw_show(c, &policy);
+    if (rc != 0) {
         return failed(rc, NULL);
+    }
+
     fputs(policy, stdout);
     free(policy);
-    return EXIT_OK;
+
+    return MFW_EXIT_OK;
 }
 
-static int cmd_status(const mfw_client_t *c)
-{
-    struct mfw_status st;
-    int rc = mfw_status(c, &st);
 
-    if (rc)
+static int
+cmd_status(const mfw_client_t *c)
+{
+    int                 rc;
+    struct mfw_status   st;
+
+    rc = mfw_status(c, &st);
+    if (rc != 0) {
         return failed(rc, NULL);
-    if (st.generation)
+    }
+
+    if (st.generation != 0) {
         printf("generation           %u\n", st.generation);
-    else
-        printf("generation           none (none applied since mfwd started)\n");
-    printf("attached             %s\n", *st.attached ? st.attached : "-");
-    printf("missing              %s\n", *st.missing ? st.missing : "-");
-    printf("degraded             %s\n", *st.degraded ? st.degraded : "-");
+
+    } else {
+        printf("generation           none (none applied since mfwd "
+               "started)\n");
+    }
+
+    printf("attached             %s\n",
+           st.attached[0] != '\0' ? st.attached : "-");
+    printf("missing              %s\n",
+           st.missing[0] != '\0' ? st.missing : "-");
+    printf("degraded             %s\n",
+           st.degraded[0] != '\0' ? st.degraded : "-");
     printf("drop-ipv4-fragments  %d\n", st.drop_ipv4_fragments);
     printf("flows                %s\n", st.flows);
-    return EXIT_OK;
+
+    return MFW_EXIT_OK;
 }
 
-static int cmd_stats(const mfw_client_t *c, int argc, char **argv)
+
+static int
+cmd_stats(const mfw_client_t *c, int argc, char **argv)
 {
-    int json = argc == 1 && !strcmp(argv[0], "--json");
-    __u64 v[MFW_STAT_MAX];
-    int rc;
+    int    i, json, rc;
+    __u64  v[MFW_STAT_MAX];
+
+    json = argc == 1 && strcmp(argv[0], "--json") == 0;
 
     if (argc > 1 || (argc == 1 && !json)) {
         usage(stderr);
-        return EXIT_ERROR;
+        return MFW_EXIT_ERROR;
     }
+
     rc = mfw_stats(c, v);
-    if (rc)
+    if (rc != 0) {
         return failed(rc, NULL);
-    for (int i = 0; i < MFW_STAT_MAX; i++) {
-        if (json)
-            printf("%s\"%s\":%llu", i ? "," : "{", mfw_stat_name(i),
-                   (unsigned long long)v[i]);
-        else
-            printf("%-18s %llu\n", mfw_stat_name(i), (unsigned long long)v[i]);
     }
-    if (json)
-        printf("}\n");
-    return EXIT_OK;
-}
 
-int main(int argc, char **argv)
-{
-    mfw_client_t c = { .socket_path = getenv("MFW_SOCKET") };
-    int opt, rc;
+    for (i = 0; i < MFW_STAT_MAX; i++) {
+        if (json) {
+            printf("%s\"%s\":%llu", i > 0 ? "," : "{", mfw_stat_name(i),
+                   (unsigned long long) v[i]);
 
-    if (c.socket_path && !*c.socket_path)
-        c.socket_path = NULL;
-    while ((opt = getopt(argc, argv, "+s:h")) != -1) {
-        switch (opt) {
-        case 's': c.socket_path = optarg; break;
-        case 'h': usage(stdout); return EXIT_OK;
-        default:  usage(stderr); return EXIT_ERROR;
+        } else {
+            printf("%-18s %llu\n", mfw_stat_name(i),
+                   (unsigned long long) v[i]);
         }
     }
+
+    if (json) {
+        printf("}\n");
+    }
+
+    return MFW_EXIT_OK;
+}
+
+
+int
+main(int argc, char **argv)
+{
+    int            n, opt, rc;
+    char         **rest;
+    const char    *cmd;
+    mfw_client_t   c = {};
+
+    c.socket_path = getenv("MFW_SOCKET");
+
+    if (c.socket_path != NULL && *c.socket_path == '\0') {
+        c.socket_path = NULL;
+    }
+
+    while ((opt = getopt(argc, argv, "+s:h")) != -1) {
+        switch (opt) {
+        case 's':
+            c.socket_path = optarg;
+            break;
+
+        case 'h':
+            usage(stdout);
+            return MFW_EXIT_OK;
+
+        default:
+            usage(stderr);
+            return MFW_EXIT_ERROR;
+        }
+    }
+
     argc -= optind;
     argv += optind;
+
     if (argc < 1) {
         usage(stderr);
-        return EXIT_ERROR;
+        return MFW_EXIT_ERROR;
     }
 
-    const char *cmd = argv[0];
-    int n = argc - 1;
-    char **rest = argv + 1;
+    cmd = argv[0];
+    n = argc - 1;
+    rest = argv + 1;
 
-    if (!strcmp(cmd, "apply") && n <= 1)
+    if (strcmp(cmd, "apply") == 0 && n <= 1) {
         return cmd_apply(&c, n, rest);
-    if (!strcmp(cmd, "check") && n <= 1)
+    }
+
+    if (strcmp(cmd, "check") == 0 && n <= 1) {
         return cmd_check(n, rest);
-    if (!strcmp(cmd, "show") && n == 0)
+    }
+
+    if (strcmp(cmd, "show") == 0 && n == 0) {
         return cmd_show(&c);
-    if (!strcmp(cmd, "status") && n == 0)
+    }
+
+    if (strcmp(cmd, "status") == 0 && n == 0) {
         return cmd_status(&c);
-    if (!strcmp(cmd, "stats"))
+    }
+
+    if (strcmp(cmd, "stats") == 0) {
         return cmd_stats(&c, n, rest);
-    if (!strcmp(cmd, "ping") && n == 0) {
+    }
+
+    if (strcmp(cmd, "ping") == 0 && n == 0) {
         rc = mfw_ping(&c);
-        if (rc)
+        if (rc != 0) {
             return failed(rc, NULL);
+        }
+
         printf("mfwd is running\n");
-        return EXIT_OK;
+        return MFW_EXIT_OK;
     }
-    if (!strcmp(cmd, "version") && n == 0) {
+
+    if (strcmp(cmd, "version") == 0 && n == 0) {
         printf("mfw %s, ABI %d\n", MFW_VERSION, MFW_ABI_VERSION);
-        return EXIT_OK;
+        return MFW_EXIT_OK;
     }
-    if (!strcmp(cmd, "help")) {
+
+    if (strcmp(cmd, "help") == 0) {
         usage(stdout);
-        return EXIT_OK;
+        return MFW_EXIT_OK;
     }
+
     usage(stderr);
-    return EXIT_ERROR;
+
+    return MFW_EXIT_ERROR;
 }
