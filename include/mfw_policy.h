@@ -21,9 +21,9 @@
  * that ends in "reply" matches only replies to flows the host opened, as
  * sw_flowd recorded them, that last left within reply-idle-tcp or
  * reply-idle-udp seconds (default 86400 and 180); without sw_flowd it
- * matches nothing. '#' starts a
- * comment, to the end of the line; blank lines are ignored. Lists that are
- * not bound are kept but enforce nothing.
+ * matches nothing. '#' starts a comment, to the end of the line; blank
+ * lines are ignored. Lists that are not bound are kept but enforce
+ * nothing.
  */
 #ifndef MFW_POLICY_H
 #define MFW_POLICY_H
@@ -101,7 +101,7 @@ void mfw_policy_compile(const struct mfw_policy *p, int i,
 
 /*
  * The policy in canonical form, as mfwd stores and SHOW prints it: acl
- * lines by (list, seq), then bind lines by interface, then the set line.
+ * lines by (list, seq), then bind lines by interface, then the set lines.
  * Parsing it gives the same policy. malloc'd; NULL without memory.
  */
 char *mfw_policy_format(const struct mfw_policy *p);

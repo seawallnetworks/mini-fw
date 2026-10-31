@@ -2,7 +2,8 @@
 /* mfw.h — shared between BPF and userspace (fixed width, no padding holes).
  *
  * Step 1 (stateless, ingress only): standard and extended ACLs both run in
- * one TC ingress program. Egress is not filtered (local-VM protection only).
+ * one program, at XDP in libxdp's dispatcher or at TC ingress. Egress is
+ * not filtered (local-VM protection only).
  * Each interface has its own ruleset (struct mfw_ruleset), found by the
  * ifindex the packet arrived on. "reply" ACEs look the packet up in
  * sw_flowd's table of the flows the host opened (Seawall proposal 0009);
@@ -13,8 +14,8 @@
 
 #include <linux/types.h>
 
-#define MFW_MAX_STD_ACES       64     /* standard ACL map */
-#define MFW_MAX_EXT_ACES       128    /* extended ACL map */
+#define MFW_MAX_STD_ACES       64     /* a ruleset's std[] */
+#define MFW_MAX_EXT_ACES       128    /* a ruleset's ext[] */
 #define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
 /* under the stack's bpffs directory, beside sw_flowd's flows/ */
 #define MFW_PIN_PATH           "/sys/fs/bpf/seawall/mfw"
@@ -61,7 +62,7 @@ enum mfw_acl_kind {
 
 struct mfw_cidr {
     __be32 addr;   /* IPv4 network address, big-endian wire order ONLY */
-    __u8   prefix; /* 0..32; BPF skips rule if >32 */
+    __u8   prefix; /* 0..32; a larger one never matches */
     __u8   pad[3];
 };
 
@@ -90,7 +91,7 @@ struct mfw_rule {
     struct mfw_cidr dst;           /* any for standard */
     struct mfw_port_range sport;   /* any for standard */
     struct mfw_port_range dport;
-    __u32 rule_id;      /* stable id for delete */
+    __u32 rule_id;      /* (acl_id << 16) | seq; nothing reads it */
     __u32 reply_idle;   /* "reply": the policy's reply-idle-tcp or -udp, in
                            seconds; set by mfw_policy_compile() */
 };
@@ -126,11 +127,13 @@ struct mfw_config {
     __u32 generation;          /* bumped on every policy apply */
 };
 
-/* Stats: every packet increments exactly one OUTCOME and at most one REASON.
- * Append new ids at the end so the pinned stats layout stays stable. */
+/*
+ * Stats: every packet increments exactly one OUTCOME and at most one
+ * REASON. Append new ids at the end, so each id keeps its meaning for
+ * STATS and libmfw's callers.
+ */
 enum mfw_stat_id {
-    /* Outcomes; named xdp_pass and xdp_drop in STATS, from when mini-fw
-     * ran at XDP */
+    /* Outcomes; named xdp_pass and xdp_drop in STATS, whichever the hook */
     MFW_STAT_PASS = 0,
     MFW_STAT_DROP,
     /* Reasons */
@@ -139,7 +142,7 @@ enum mfw_stat_id {
     MFW_STAT_EXT_PERMIT,        /* extended list: explicit permit */
     MFW_STAT_EXT_DENY,          /* extended list: explicit deny */
     MFW_STAT_EXT_IMPLICIT_DENY, /* extended list: no ACE matched */
-    MFW_STAT_PARSE_ERR,         /* corrupt IPv4 */
+    MFW_STAT_PARSE_ERR,         /* a header cut short or malformed */
     MFW_STAT_FRAG_DROP,         /* drop_ipv4_fragments=1 */
     MFW_STAT_NON_IPV4,          /* passed untouched */
     MFW_STAT_TCP_FRAG_OFF1,     /* TCP fragment at offset 1 (RFC 1858) */

@@ -304,7 +304,8 @@ detach_unbound(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex)
  * Make the kernel enforce the policy: attach every bound interface that
  * exists, swap in its ruleset, then remove rulesets and detach interfaces
  * that are no longer bound. Validation and new attaches come first, so a
- * refused policy leaves the old one running.
+ * policy refused by them leaves the old one running; a map update that
+ * fails after them leaves what was installed so far.
  */
 static void
 apply(mfwd_t *d, const char *text, char **reply)

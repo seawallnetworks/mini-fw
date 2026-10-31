@@ -187,7 +187,7 @@ build(const mfw_pkt_spec_t *s, __u8 *buf)
 }
 
 
-/* The packet as if it arrived on ifindex; MFW_RUN_ERR if it couldn't run. */
+/* prog's return value on the frame, with ctx; MFW_RUN_ERR if it can't run */
 static int
 run_prog(struct bpf_program *prog, void *ctx, __u32 ctx_size, __u8 *buf,
     int len)
@@ -306,7 +306,10 @@ add(const char *line)
 
     r.direction = MFW_DIR_INGRESS;
 
-    /* as mfw_policy_compile() sets it: an hour for TCP, a minute for UDP */
+    /*
+     * set as mfw_policy_compile() does; the test's limits: an hour for
+     * TCP, a minute for UDP
+     */
     if (r.flags & MFW_RULE_F_REPLY) {
         r.reply_idle = r.proto == MFW_PROTO_TCP ? 3600 : 60;
     }

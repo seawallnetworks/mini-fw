@@ -7,11 +7,11 @@
 #   [mfw-cli 10.201.0.1] --veth-- [mfw-fw 10.201.0.2  veth-fw2]
 #
 # mfwd runs in mfw-fw with its own bpffs (below), socket and run
-# directory, so this runs next to a live mini-fw without touching it. The second veth
-# pair checks that each interface enforces only its own lists. Needs root
-# and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only, and needs no
-# xdp-tools. "reply" ACEs are tested with sw_flowd recording fw's flows
-# (SW_FLOWD, or ../sw_flowd/sw_flowd), and skipped without it.
+# directory, so this runs next to a live mini-fw without touching it. The
+# second veth pair checks that each interface enforces only its own lists.
+# Needs root and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only,
+# and needs no xdp-tools. "reply" ACEs are tested with sw_flowd recording
+# fw's flows (SW_FLOWD, or ../sw_flowd/sw_flowd), and skipped without it.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

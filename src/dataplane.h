@@ -13,7 +13,7 @@ struct mfw_bpf;
 
 struct mfw_dp {
     const char     *root;                 /* pin root: MFW_PIN_PATH */
-    struct mfw_bpf *skel;                 /* loaded program, maps from pins */
+    struct mfw_bpf *skel;                 /* the TC program, its maps pinned */
     int             prog_fd;
     int             rulesets_fd;
     int             config_fd;
@@ -54,7 +54,10 @@ int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex,
 void mfw_dp_prune(struct mfw_dp *dp, const __u32 *keep, int n);
 
 int mfw_dp_get_config(const struct mfw_dp *dp, struct mfw_config *cfg);
-/* Set the fragment policy and bump the generation; returns the new one. */
+/*
+ * Set the fragment policy and bump the generation, putting the new one in
+ * *generation. Returns 0, or -1 with errno.
+ */
 int mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
     __u32 *generation);
 int mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX]);

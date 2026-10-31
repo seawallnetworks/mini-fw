@@ -35,7 +35,8 @@ typedef struct {
 } mfw_client_t;
 
 struct mfw_status {
-    __u32 generation;           /* of the last APPLY; 0 = none since boot */
+    __u32 generation;           /* of the last APPLY; 0: none since mfwd
+                                 * started */
     int   drop_ipv4_fragments;
     char  attached[1024];       /* "eth0,eth1"; "" if none */
     char  missing[1024];        /* bound interfaces that do not exist */

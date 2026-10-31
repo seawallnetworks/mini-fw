@@ -145,8 +145,7 @@ struct {
 
 /*
  * libxdp's dispatcher runs mini-fw after voidgate (priority 10), and only
- * a pass goes on to the next program. Frags: the headers are in the first
- * buffer, so a jumbo-MTU interface keeps the dispatcher.
+ * a pass goes on to the next program.
  */
 struct {
     __uint(priority, 20);
@@ -487,6 +486,10 @@ drop:
 }
 
 
+/*
+ * xdp.frags: the headers are in the first buffer, the only one read here,
+ * so mini-fw runs on an interface with a jumbo MTU too.
+ */
 SEC("xdp.frags")
 int
 mfw_xdp(struct xdp_md *ctx)
