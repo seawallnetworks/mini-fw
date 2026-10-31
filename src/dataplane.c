@@ -82,7 +82,7 @@ static int flows_open(void);
 
 
 int
-mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
+mfw_dp_attached(const mfw_dp_t *dp, const char *ifname)
 {
     return mfw_xdp_attached(dp->root, ifname)
            || mfw_tcx_attached(dp->root, ifname)
@@ -91,7 +91,7 @@ mfw_dp_attached(const struct mfw_dp *dp, const char *ifname)
 
 
 int
-mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname)
+mfw_dp_degraded(const mfw_dp_t *dp, const char *ifname)
 {
     int                   ifindex;
     enum xdp_attach_mode  mode;
@@ -149,7 +149,7 @@ name_cmp(const void *a, const void *b)
 
 
 int
-mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
+mfw_dp_list_attached(const mfw_dp_t *dp, char names[][IF_NAMESIZE],
     int max)
 {
     int              n;
@@ -205,7 +205,7 @@ init_config(int config_fd, char *err, size_t len)
 
 
 int
-mfw_dp_open(struct mfw_dp *dp, char *err, size_t errlen)
+mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
 {
     char  maps[PATH_MAX], attach[PATH_MAX];
     LIBBPF_OPTS(bpf_object_open_opts, opts, .pin_root_path = maps);
@@ -289,7 +289,7 @@ failed:
 
 
 void
-mfw_dp_close(struct mfw_dp *dp)
+mfw_dp_close(mfw_dp_t *dp)
 {
     mfw_bpf__destroy(dp->skel);  /* the pins keep maps and attachments */
     dp->skel = NULL;
@@ -302,7 +302,7 @@ mfw_dp_close(struct mfw_dp *dp)
 
 
 int
-mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
+mfw_dp_attach(mfw_dp_t *dp, const char *ifname, char *err,
     size_t errlen)
 {
     int   e, ifindex;
@@ -363,7 +363,7 @@ mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
 
 
 void
-mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
+mfw_dp_detach(mfw_dp_t *dp, const char *ifname)
 {
     int    idx;
     __u32  ifindex;
@@ -387,7 +387,7 @@ mfw_dp_detach(struct mfw_dp *dp, const char *ifname)
 
 
 int
-mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
+mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, const struct mfw_ruleset *rs,
     char *err, size_t errlen)
 {
     int    e, fd;
@@ -419,7 +419,7 @@ mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
 
 
 void
-mfw_dp_prune(struct mfw_dp *dp, const __u32 *keep, int n)
+mfw_dp_prune(mfw_dp_t *dp, const __u32 *keep, int n)
 {
     int    i, kept, wanted;
     __u32  last, next;
@@ -446,7 +446,7 @@ mfw_dp_prune(struct mfw_dp *dp, const __u32 *keep, int n)
 
 
 int
-mfw_dp_get_config(const struct mfw_dp *dp, struct mfw_config *cfg)
+mfw_dp_get_config(const mfw_dp_t *dp, struct mfw_config *cfg)
 {
     __u32  k;
 
@@ -457,7 +457,7 @@ mfw_dp_get_config(const struct mfw_dp *dp, struct mfw_config *cfg)
 
 
 int
-mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
+mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments,
     __u32 *generation)
 {
     __u32              k;
@@ -515,7 +515,7 @@ flows_open(void)
 
 
 int
-mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX])
+mfw_dp_stats(const mfw_dp_t *dp, __u64 out[MFW_STAT_MAX])
 {
     int                     c, ncpu;
     __u32                   id;

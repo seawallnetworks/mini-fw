@@ -1,27 +1,51 @@
+
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
-/* mfw.h — shared between BPF and userspace (fixed width, no padding holes).
+
+/*
+ * mfw.h — shared between BPF and userspace (fixed width, no padding holes).
  *
  * Step 1 (stateless, ingress only): standard and extended ACLs both run in
  * one program, at XDP in libxdp's dispatcher or at TC ingress. Egress is
- * not filtered (local-VM protection only).
- * Each interface has its own ruleset (struct mfw_ruleset), found by the
- * ifindex the packet arrived on. "reply" ACEs look the packet up in
- * sw_flowd's table of the flows the host opened (Seawall proposal 0009);
- * mfw.h itself doesn't need sw_flowd.h, so front ends build without it.
+ * not filtered (local-VM protection only). Each interface has its own
+ * ruleset (struct mfw_ruleset), found by the ifindex the packet arrived
+ * on. "reply" ACEs look the packet up in sw_flowd's table of the flows the
+ * host opened (Seawall proposal 0009); mfw.h itself doesn't need
+ * sw_flowd.h, so front ends build without it.
  */
-#ifndef MFW_H
-#define MFW_H
+
+
+#ifndef _MFW_H_INCLUDED_
+#define _MFW_H_INCLUDED_
+
 
 #include <linux/types.h>
 
-#define MFW_MAX_STD_ACES       64     /* a ruleset's std[] */
-#define MFW_MAX_EXT_ACES       128    /* a ruleset's ext[] */
-#define MFW_MAX_IFACES         64     /* interfaces with a ruleset */
+
+#define MFW_MAX_STD_ACES  64     /* a ruleset's std[] */
+#define MFW_MAX_EXT_ACES  128    /* a ruleset's ext[] */
+#define MFW_MAX_IFACES    64     /* interfaces with a ruleset */
+
 /* under the stack's bpffs directory, beside sw_flowd's flows/ */
-#define MFW_PIN_PATH           "/sys/fs/bpf/seawall/mfw"
-/* Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
- * the pins, of any version. 2: per-interface rulesets */
-#define MFW_ABI_VERSION        2
+#define MFW_PIN_PATH  "/sys/fs/bpf/seawall/mfw"
+
+/*
+ * Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
+ * the pins, of any version. 2: per-interface rulesets
+ */
+#define MFW_ABI_VERSION  2
+
+/* mfw_rule.flags */
+#define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
+#define MFW_RULE_F_REPLY        (1 << 1)  /* reply to a flow the host opened */
+
+/*
+ * "reply" ACEs' idle limits, in seconds: how long after a flow last left
+ * its replies still match ("set reply-idle-tcp|reply-idle-udp N")
+ */
+#define MFW_REPLY_IDLE_TCP  86400
+#define MFW_REPLY_IDLE_UDP  180
+#define MFW_REPLY_IDLE_MAX  31536000  /* a year */
+
 
 /* Rule action */
 enum mfw_action {
@@ -29,12 +53,14 @@ enum mfw_action {
     MFW_ACTION_PERMIT = 1,
 };
 
+
 /* Direction flags (bitmask). Step 1 binds ingress only; kept for ABI. */
 enum mfw_dir {
     MFW_DIR_INGRESS = 1 << 0,  /* in  */
     MFW_DIR_EGRESS  = 1 << 1,  /* out */
     MFW_DIR_BOTH    = MFW_DIR_INGRESS | MFW_DIR_EGRESS,
 };
+
 
 /* L4 proto filter: 0 = any */
 enum mfw_proto {
@@ -44,88 +70,92 @@ enum mfw_proto {
     MFW_PROTO_UDP  = 17,
 };
 
+
 /* ACL list kind (userspace validates range; BPF only sees compiled ACEs) */
 enum mfw_acl_kind {
     MFW_ACL_STANDARD = 1,  /* lists 1–99: source only; dst/proto/ports unused */
     MFW_ACL_EXTENDED = 2,  /* lists 100–199: full L4 match */
 };
 
-/* mfw_rule.flags */
-#define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
-#define MFW_RULE_F_REPLY        (1 << 1)  /* reply to a flow the host opened */
-
-/* "reply" ACEs' idle limits, in seconds: how long after a flow last left
- * its replies still match ("set reply-idle-tcp|reply-idle-udp N") */
-#define MFW_REPLY_IDLE_TCP      86400
-#define MFW_REPLY_IDLE_UDP      180
-#define MFW_REPLY_IDLE_MAX      31536000  /* a year */
 
 struct mfw_cidr {
-    __be32 addr;   /* IPv4 network address, big-endian wire order ONLY */
-    __u8   prefix; /* 0..32; a larger one never matches */
-    __u8   pad[3];
+    __be32                 addr;      /* IPv4 address, network order */
+    __u8                   prefix;    /* 0..32; a larger never matches */
+    __u8                   pad[3];
 };
 
+
+/* An inclusive range, host byte order; (0,0) is any, so port 0 can't be one. */
 struct mfw_port_range {
-    __u16 min;    /* host byte order */
-    __u16 max;    /* inclusive; (0,0) = any; cannot match real port 0 */
+    __u16                  min;
+    __u16                  max;
 };
+
 
 /*
- * One ACE — Cisco "access-list N …" line.
- * Same layout for standard and extended; standard match ignores
- * dst/proto/ports. A ruleset holds them packed from index 0; its n_std /
- * n_ext say how many are in use.
+ * One ACE — Cisco "access-list N …" line. Same layout for standard and
+ * extended; standard match ignores dst/proto/ports. A ruleset holds them
+ * packed from index 0; its n_std / n_ext say how many are in use.
  */
 struct mfw_rule {
-    __u16 acl_id;       /* 1–99 standard, 100–199 extended */
-    __u16 seq;          /* line order; lower first */
-    __u8  action;       /* MFW_ACTION_PERMIT / DENY */
-    __u8  proto;        /* 0=any/ip; ignored for standard */
-    __u8  direction;    /* MFW_DIR_*; always MFW_DIR_INGRESS in step 1 */
-    __u8  enabled;      /* set by the parser; BPF scans by count */
-    __u8  kind;         /* MFW_ACL_STANDARD | MFW_ACL_EXTENDED */
-    __u8  flags;        /* MFW_RULE_F_* */
-    __u8  pad0[2];
-    struct mfw_cidr src;
-    struct mfw_cidr dst;           /* any for standard */
-    struct mfw_port_range sport;   /* any for standard */
-    struct mfw_port_range dport;
-    __u32 rule_id;      /* (acl_id << 16) | seq; nothing reads it */
-    __u32 reply_idle;   /* "reply": the policy's reply-idle-tcp or -udp, in
-                           seconds; set by mfw_policy_compile() */
+    __u16                  acl_id;    /* 1–99 standard, 100–199 extended */
+    __u16                  seq;       /* line order; lower first */
+    __u8                   action;    /* MFW_ACTION_PERMIT / DENY */
+    __u8                   proto;     /* 0=any/ip; ignored for standard */
+    __u8                   direction; /* always MFW_DIR_INGRESS in step 1 */
+    __u8                   enabled;   /* set by the parser; BPF counts */
+    __u8                   kind;      /* MFW_ACL_STANDARD | _EXTENDED */
+    __u8                   flags;     /* MFW_RULE_F_* */
+    __u8                   pad0[2];
+    struct mfw_cidr        src;
+    struct mfw_cidr        dst;       /* any for standard */
+    struct mfw_port_range  sport;     /* any for standard */
+    struct mfw_port_range  dport;
+    /* (acl_id << 16) | seq; nothing reads it */
+    __u32                  rule_id;
+    /*
+     * "reply" ACEs: the policy's reply-idle-tcp or -udp, in seconds, set
+     * by mfw_policy_compile()
+     */
+    __u32                  reply_idle;
 };
+
 
 /*
  * Everything one interface enforces: its bound standard and extended
  * lists, compiled. The value of the single entry of an inner map in the
  * "rulesets" map-in-map. Userspace never changes an installed one: it
  * fills a new inner map and swaps it in, so a packet sees either the old
- * ruleset or the new one, never a mix.
+ * ruleset or the new one, never a mix. A packet no ACE of a bound
+ * extended list matches is dropped (implicit deny); with none bound, it
+ * passes.
  */
 struct mfw_ruleset {
-    __u16 std_acl;      /* bound standard list, 0 = none (std pass) */
-    __u16 ext_acl;      /* bound extended list, 0 = none (fail-open) */
-    __u16 n_std;        /* std[0 .. n_std) in use */
-    __u16 n_ext;        /* ext[0 .. n_ext) in use; a miss: implicit deny */
-    __u32 generation;   /* mfw_config.generation when it was built */
-    __u32 pad;
-    struct mfw_rule std[MFW_MAX_STD_ACES];
-    struct mfw_rule ext[MFW_MAX_EXT_ACES];
+    __u16                  std_acl;   /* bound standard list, 0 = none */
+    __u16                  ext_acl;   /* bound extended list, 0 = none */
+    __u16                  n_std;     /* std[0 .. n_std) in use */
+    __u16                  n_ext;     /* ext[0 .. n_ext) in use */
+    __u32                  generation;  /* mfw_config's, when built */
+    __u32                  pad;
+    struct mfw_rule        std[MFW_MAX_STD_ACES];
+    struct mfw_rule        ext[MFW_MAX_EXT_ACES];
 };
+
 
 /*
  * Settings for every interface: the single entry (key 0) of the "config"
  * array map. mfwd writes it; BPF reads only drop_ipv4_fragments. All
- * zeros is a new map that mfwd has yet to set up.
+ * zeros is a new map that mfwd has yet to set up: abi_version is 0.
+ * default_action is always MFW_ACTION_DENY, unused, kept for the layout.
  */
 struct mfw_config {
-    __u8  default_action;      /* MFW_ACTION_DENY; unused, kept for layout */
-    __u8  drop_ipv4_fragments; /* 1 = drop all IPv4 fragments */
-    __u8  abi_version;         /* MFW_ABI_VERSION; 0 = not set up yet */
-    __u8  pad0;
-    __u32 generation;          /* bumped on every policy apply */
+    __u8                   default_action;
+    __u8                   drop_ipv4_fragments;  /* 1: drop all fragments */
+    __u8                   abi_version;          /* MFW_ABI_VERSION */
+    __u8                   pad0;
+    __u32                  generation;           /* bumped on every apply */
 };
+
 
 /*
  * Stats: every packet increments exactly one OUTCOME and at most one
@@ -149,8 +179,10 @@ enum mfw_stat_id {
     MFW_STAT_MAX,
 };
 
+
 struct mfw_stat_value {
-    __u64 count;
+    __u64                  count;
 };
 
-#endif /* MFW_H */
+
+#endif /* _MFW_H_INCLUDED_ */

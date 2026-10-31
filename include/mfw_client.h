@@ -1,4 +1,6 @@
+
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
+
 /*
  * mfw_client.h — talk to mfwd over its Unix socket. Part of libmfw.a, no
  * privileges needed beyond access to the socket.
@@ -7,15 +9,21 @@
  * There is no global state, so calls may come from several threads. The
  * library never raises SIGPIPE.
  */
-#ifndef MFW_CLIENT_H
-#define MFW_CLIENT_H
 
-#include <stddef.h>
+
+#ifndef _MFW_CLIENT_H_INCLUDED_
+#define _MFW_CLIENT_H_INCLUDED_
+
+
 #include "mfw.h"
 
-#define MFW_SOCKET          "/run/mfwd.sock"
-#define MFW_TIMEOUT_MS      5000
-#define MFW_REQUEST_MAX     (1024 * 1024)   /* bytes, APPLY block included */
+#include <stddef.h>
+
+
+#define MFW_SOCKET       "/run/mfwd.sock"
+#define MFW_TIMEOUT_MS   5000
+#define MFW_REQUEST_MAX  (1024 * 1024)   /* bytes, APPLY block included */
+
 
 /* Every call returns mfw_ok or one of these; mfw_strerror() names it. */
 enum mfw_rc {
@@ -28,23 +36,32 @@ enum mfw_rc {
     mfw_err_internal = -6,   /* ERR internal */
 };
 
-/* NULL means the defaults: MFW_SOCKET, MFW_TIMEOUT_MS. */
+
+/*
+ * NULL means the defaults: MFW_SOCKET, MFW_TIMEOUT_MS. timeout_ms bounds
+ * each of connect, send and receive; 0 is the default.
+ */
 typedef struct {
-    const char *socket_path;
-    int         timeout_ms;    /* each of connect, send, receive; 0 = default */
+    const char       *socket_path;
+    int               timeout_ms;
 } mfw_client_t;
 
+
+/*
+ * STATUS. generation is the last APPLY's, 0 if none since mfwd started.
+ * degraded lists interfaces attached at TC ingress, not XDP, because
+ * another program holds their XDP hook. flows is "sw_flowd" when "reply"
+ * ACEs read its table, "none" without it.
+ */
 struct mfw_status {
-    __u32 generation;           /* of the last APPLY; 0: none since mfwd
-                                 * started */
-    int   drop_ipv4_fragments;
-    char  attached[1024];       /* "eth0,eth1"; "" if none */
-    char  missing[1024];        /* bound interfaces that do not exist */
-    char  degraded[1024];       /* attached at TC ingress, not XDP: another
-                                 * program holds the XDP hook */
-    char  flows[16];            /* "sw_flowd": "reply" ACEs read its table;
-                                 * "none" without it */
+    __u32             generation;
+    int               drop_ipv4_fragments;
+    char              attached[1024];   /* "eth0,eth1"; "" if none */
+    char              missing[1024];    /* bound interfaces not there */
+    char              degraded[1024];
+    char              flows[16];
 };
+
 
 const char *mfw_strerror(int rc);
 
@@ -57,7 +74,7 @@ int mfw_ping(const mfw_client_t *c);
  * e.g. "line 3: ...".
  */
 int mfw_apply(const mfw_client_t *c, const char *policy, __u32 *generation,
-              char *missing, size_t missing_len, char *err, size_t errlen);
+    char *missing, size_t missing_len, char *err, size_t errlen);
 
 int mfw_status(const mfw_client_t *c, struct mfw_status *st);
 
@@ -74,6 +91,7 @@ int mfw_show(const mfw_client_t *c, char **policy);
  * return the whole reply, malloc'd. err gets the message of an ERR reply.
  */
 int mfw_request(const mfw_client_t *c, const char *request, char **reply,
-                char *err, size_t errlen);
+    char *err, size_t errlen);
 
-#endif /* MFW_CLIENT_H */
+
+#endif /* _MFW_CLIENT_H_INCLUDED_ */

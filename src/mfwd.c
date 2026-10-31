@@ -67,7 +67,7 @@
 
 
 typedef struct {
-    struct mfw_dp   dp;
+    mfw_dp_t        dp;
     char            run_dir[PATH_MAX - 32];
     char           *policy;       /* applied, canonical; NULL: none yet */
     __u32           generation;   /* of that policy */

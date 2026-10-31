@@ -171,9 +171,10 @@ stat_inc(__u32 id)
 static __always_inline int
 cfg_drop_ipv4_fragments(void)
 {
-    __u32               k = 0;
+    __u32               k;
     struct mfw_config  *cfg;
 
+    k = 0;
     cfg = bpf_map_lookup_elem(&config, &k);
 
     return cfg != NULL && cfg->drop_ipv4_fragments;
@@ -367,7 +368,9 @@ static __always_inline const struct mfw_ruleset *
 ruleset_of(__u32 ifindex)
 {
     void   *inner;
-    __u32   zero = 0;
+    __u32   zero;
+
+    zero = 0;
 
     inner = bpf_map_lookup_elem(&rulesets, &ifindex);
     if (inner == NULL) {
