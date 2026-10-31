@@ -22,7 +22,8 @@ static void usage(FILE *f)
     fprintf(f,
         "usage: mfw [-s socket] <command>\n"
         "\n"
-        "  apply [file]       replace the whole policy (stdin if no file or '-')\n"
+        "  apply [file]       replace the whole policy, from stdin if no\n"
+        "                     file or '-'\n"
         "  check [file]       check a policy here, without sending it\n"
         "  show               the policy mfwd enforces\n"
         "  status             generation, attached, missing and degraded\n"
@@ -34,12 +35,14 @@ static void usage(FILE *f)
         "\n"
         "A policy has one item per line:\n"
         "  acl <list> <seq> permit|deny ...   an ACE, Cisco syntax\n"
-        "  bind <ifname> in <list>            one standard + one extended list per interface\n"
+        "  bind <ifname> in <list>            at most one standard and one\n"
+        "                                     extended list per interface\n"
         "  set drop-ipv4-fragments 0|1\n"
         "  set reply-idle-tcp|reply-idle-udp <seconds>   default 86400, 180\n"
         "\n"
         "  standard ACE (1-99):    permit|deny <addr>\n"
-        "  extended ACE (100-199): permit|deny <proto> <addr> [<port>] <addr> [<port>] [established|reply]\n"
+        "  extended ACE (100-199): permit|deny <proto> <addr> [<port>]\n"
+        "                          <addr> [<port>] [established|reply]\n"
         "    <addr>:  any | host A.B.C.D | A.B.C.D <wildcard> | A.B.C.D/len\n"
         "    <proto>: ip | tcp | udp | icmp | 0-255\n"
         "    <port>:  eq N | range LO HI | gt N | lt N   (tcp/udp only)\n"
@@ -47,11 +50,13 @@ static void usage(FILE *f)
         "mfwd attaches every bound interface and detaches the others. Only\n"
         "inbound traffic is filtered. Socket: -s, else $MFW_SOCKET, else "
         MFW_SOCKET ".\n"
-        "Exit status: 0 ok, 1 refused by mfwd, 2 usage or connection error.\n"
+        "Exit status: 0 ok, 1 refused by mfwd, 2 usage, file or connection\n"
+        "error.\n"
         "\n"
-        "In the Seawall stack sw_configd owns the policy and sends its own back\n"
-        "within 5 s of any other apply: change it there (telnet 127.0.0.1 2323,\n"
-        "access-list / ip access-group), and use mfw for show, status and stats.\n");
+        "In the Seawall stack sw_configd owns the policy and sends its own\n"
+        "back within 5 s of any other apply: change it there (telnet\n"
+        "127.0.0.1 2323, access-list / ip access-group), and use mfw for\n"
+        "show, status and stats.\n");
 }
 
 static char *read_all(FILE *f)

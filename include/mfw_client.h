@@ -20,9 +20,9 @@
 /* Every call returns mfw_ok or one of these; mfw_strerror() names it. */
 enum mfw_rc {
     mfw_ok           = 0,
-    mfw_err_io       = -1,   /* cannot reach mfwd, or no answer in time; see errno */
+    mfw_err_io       = -1,   /* can't reach mfwd, or no reply in time; errno */
     mfw_err_reply    = -2,   /* a reply mfwd should never send */
-    mfw_err_badreq   = -3,   /* ERR badreq: mfwd did not understand the request */
+    mfw_err_badreq   = -3,   /* ERR badreq: mfwd couldn't parse the request */
     mfw_err_invalid  = -4,   /* ERR invalid: the policy was refused */
     mfw_err_kernel   = -5,   /* ERR kernel: a BPF or XDP operation failed */
     mfw_err_internal = -6,   /* ERR internal */

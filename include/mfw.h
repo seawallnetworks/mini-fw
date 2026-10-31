@@ -45,13 +45,13 @@ enum mfw_proto {
 
 /* ACL list kind (userspace validates range; BPF only sees compiled ACEs) */
 enum mfw_acl_kind {
-    MFW_ACL_STANDARD = 1,  /* lists 1–99: source only; dst/proto/ports ignored */
+    MFW_ACL_STANDARD = 1,  /* lists 1–99: source only; dst/proto/ports unused */
     MFW_ACL_EXTENDED = 2,  /* lists 100–199: full L4 match */
 };
 
 /* mfw_rule.flags */
-#define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* Cisco "established": TCP with ACK or RST */
-#define MFW_RULE_F_REPLY        (1 << 1)  /* a reply to a flow the host opened */
+#define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
+#define MFW_RULE_F_REPLY        (1 << 1)  /* reply to a flow the host opened */
 
 /* "reply" ACEs' idle limits, in seconds: how long after a flow last left
  * its replies still match ("set reply-idle-tcp|reply-idle-udp N") */
@@ -106,7 +106,7 @@ struct mfw_ruleset {
     __u16 std_acl;      /* bound standard list, 0 = none (std pass) */
     __u16 ext_acl;      /* bound extended list, 0 = none (fail-open) */
     __u16 n_std;        /* std[0 .. n_std) in use */
-    __u16 n_ext;        /* ext[0 .. n_ext) in use; a miss is the implicit deny */
+    __u16 n_ext;        /* ext[0 .. n_ext) in use; a miss: implicit deny */
     __u32 generation;   /* mfw_config.generation when it was built */
     __u32 pad;
     struct mfw_rule std[MFW_MAX_STD_ACES];
@@ -119,7 +119,7 @@ struct mfw_ruleset {
  * zeros is a new map that mfwd has yet to set up.
  */
 struct mfw_config {
-    __u8  default_action;      /* always MFW_ACTION_DENY, kept for layout; unused */
+    __u8  default_action;      /* MFW_ACTION_DENY; unused, kept for layout */
     __u8  drop_ipv4_fragments; /* 1 = drop all IPv4 fragments */
     __u8  abi_version;         /* MFW_ABI_VERSION; 0 = not set up yet */
     __u8  pad0;
@@ -135,7 +135,7 @@ enum mfw_stat_id {
     MFW_STAT_DROP,
     /* Reasons */
     MFW_STAT_STD_DENY,          /* standard list: explicit deny */
-    MFW_STAT_STD_PERMIT,        /* standard list: explicit permit, no extended list */
+    MFW_STAT_STD_PERMIT,        /* standard explicit permit, extended unbound */
     MFW_STAT_EXT_PERMIT,        /* extended list: explicit permit */
     MFW_STAT_EXT_DENY,          /* extended list: explicit deny */
     MFW_STAT_EXT_IMPLICIT_DENY, /* extended list: no ACE matched */

@@ -227,8 +227,9 @@ int mfw_apply(const mfw_client_t *c, const char *policy, __u32 *generation,
         *nl = '\0';
     errno = 0;
     gen = strtoul(reply + 3, &end, 10);
-    if (!nl || reply[2] != ' ' || end == reply + 3 || errno || gen > 0xffffffffUL ||
-        (*end && strncmp(end, " missing=", 9))) {
+    if (!nl || reply[2] != ' ' || end == reply + 3 || errno
+        || gen > 0xffffffffUL || (*end && strncmp(end, " missing=", 9)))
+    {
         free(reply);
         return mfw_err_reply;
     }
@@ -246,7 +247,9 @@ static int field(const char *fields, const char *key, char *out, size_t len)
 {
     size_t klen = strlen(key);
 
-    for (const char *p = fields; p && *p; p = strchr(p, ' '), p = p ? p + 1 : NULL) {
+    for (const char *p = fields; p && *p;
+         p = strchr(p, ' '), p = p ? p + 1 : NULL)
+    {
         if (!strncmp(p, key, klen) && p[klen] == '=') {
             size_t n = strcspn(p + klen + 1, " ");
 

@@ -35,8 +35,15 @@
 #define MFW_ACL_MAX     4096   /* ACEs in one policy, all lists */
 #define MFW_ERR_LEN     256    /* enough for any error message below */
 
-static inline int mfw_is_std(int acl_id) { return acl_id >= 1 && acl_id <= 99; }
-static inline int mfw_is_ext(int acl_id) { return acl_id >= 100 && acl_id <= 199; }
+static inline int mfw_is_std(int acl_id)
+{
+    return acl_id >= 1 && acl_id <= 99;
+}
+
+static inline int mfw_is_ext(int acl_id)
+{
+    return acl_id >= 100 && acl_id <= 199;
+}
 
 /* ---- one ACE ---- */
 

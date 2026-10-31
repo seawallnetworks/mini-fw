@@ -67,9 +67,11 @@ static int parse_acl(struct mfw_policy *p, int argc, char **argv, int line,
     long seq;
 
     if (argc < 4)
-        return fail(err, len, line, "expected: acl <list> <seq> permit|deny ...");
+        return fail(err, len, line,
+                    "expected: acl <list> <seq> permit|deny ...");
     if (parse_num(argv[2], 1, 65535, &seq))
-        return fail(err, len, line, "sequence number must be 1-65535, got '%s'", argv[2]);
+        return fail(err, len, line,
+                    "sequence number must be 1-65535, got '%s'", argv[2]);
     if (mfw_parse_ace(argc - 1, argv + 1, &r, msg, sizeof(msg)))
         return fail(err, len, line, "%s", msg);
     for (int i = 0; i < p->n_rules; i++)
@@ -97,19 +99,21 @@ static int parse_bind(struct mfw_policy *p, struct bind_lines *bl, int argc,
     if (!valid_ifname(argv[1]))
         return fail(err, len, line, "bad interface name '%s'", argv[1]);
     if (!strcmp(argv[2], "out"))
-        return fail(err, len, line, "'out' is not supported: egress is not filtered");
+        return fail(err, len, line,
+                    "'out' is not supported: egress is not filtered");
     if (strcmp(argv[2], "in"))
         return fail(err, len, line, "direction must be 'in'");
     if (parse_num(argv[3], 1, 199, &acl))
-        return fail(err, len, line,
-                    "list number must be 1-99 (standard) or 100-199 (extended)");
+        return fail(err, len, line, "list number must be 1-99 (standard) "
+                    "or 100-199 (extended)");
 
     for (i = 0; i < p->n_binds; i++)
         if (!strcmp(p->binds[i].ifname, argv[1]))
             b = &p->binds[i];
     if (!b) {
         if (p->n_binds == MFW_MAX_IFACES)
-            return fail(err, len, line, "more than %d interfaces", MFW_MAX_IFACES);
+            return fail(err, len, line, "more than %d interfaces",
+                        MFW_MAX_IFACES);
         i = p->n_binds++;
         b = &p->binds[i];
         snprintf(b->ifname, sizeof(b->ifname), "%s", argv[1]);
@@ -166,7 +170,9 @@ static int parse_line(struct mfw_policy *p, struct bind_lines *bl, char *s,
 
     if (hash)  /* a comment, to the end of the line */
         *hash = '\0';
-    for (char *t = strtok_r(s, " \t\r", &save); t; t = strtok_r(NULL, " \t\r", &save)) {
+    for (char *t = strtok_r(s, " \t\r", &save); t;
+         t = strtok_r(NULL, " \t\r", &save))
+    {
         if (argc == 40)
             return fail(err, len, line, "too many words");
         argv[argc++] = t;
@@ -179,7 +185,8 @@ static int parse_line(struct mfw_policy *p, struct bind_lines *bl, char *s,
         return parse_bind(p, bl, argc, argv, line, err, len);
     if (!strcmp(argv[0], "set"))
         return parse_set(p, argc, argv, line, err, len);
-    return fail(err, len, line, "unknown keyword '%s' (acl, bind or set)", argv[0]);
+    return fail(err, len, line, "unknown keyword '%s' (acl, bind or set)",
+                argv[0]);
 }
 
 static int rule_cmp(const void *a, const void *b)
@@ -271,7 +278,8 @@ void mfw_policy_free(struct mfw_policy *p)
 }
 
 /* The ACEs of list acl, in seq order, into out[]. Returns how many. */
-static int copy_list(const struct mfw_policy *p, __u16 acl, struct mfw_rule *out, int max)
+static int copy_list(const struct mfw_policy *p, __u16 acl,
+                     struct mfw_rule *out, int max)
 {
     int n = 0;
 
@@ -281,7 +289,8 @@ static int copy_list(const struct mfw_policy *p, __u16 acl, struct mfw_rule *out
     return n;
 }
 
-void mfw_policy_compile(const struct mfw_policy *p, int i, struct mfw_ruleset *rs)
+void mfw_policy_compile(const struct mfw_policy *p, int i,
+                        struct mfw_ruleset *rs)
 {
     const struct mfw_bind *b = &p->binds[i];
 

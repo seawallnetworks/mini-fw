@@ -18,7 +18,7 @@ struct mfw_dp {
     int             rulesets_fd;
     int             config_fd;
     int             stats_fd;
-    int             flows_fd;     /* sw_flowd's table, bound at load; -1: none */
+    int             flows_fd;     /* sw_flowd's table, bound at load, or -1 */
     int             tcx;      /* attach with tcx links (6.6+), not classic TC */
     int             no_xdp;   /* MFW_NO_XDP: TC only, for tests */
 };
@@ -38,22 +38,25 @@ int mfw_dp_attached(const struct mfw_dp *dp, const char *ifname);
  * its XDP hook? */
 int mfw_dp_degraded(const struct mfw_dp *dp, const char *ifname);
 /* Names of the attached interfaces, sorted; returns how many (≤ max). */
-int mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE], int max);
+int mfw_dp_list_attached(const struct mfw_dp *dp, char names[][IF_NAMESIZE],
+    int max);
 /* In libxdp's dispatcher; at TC ingress if a program that is not one holds
  * the XDP hook. */
-int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err, size_t errlen);
+int mfw_dp_attach(struct mfw_dp *dp, const char *ifname, char *err,
+    size_t errlen);
 /* Drop the interface's ruleset and detach it. */
 void mfw_dp_detach(struct mfw_dp *dp, const char *ifname);
 
 /* Swap in rs as the ruleset of ifindex (one map update). */
-int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex, const struct mfw_ruleset *rs,
-                   char *err, size_t errlen);
+int mfw_dp_install(struct mfw_dp *dp, __u32 ifindex,
+    const struct mfw_ruleset *rs, char *err, size_t errlen);
 /* Remove every ruleset whose ifindex is not in keep[0..n). */
 void mfw_dp_prune(struct mfw_dp *dp, const __u32 *keep, int n);
 
 int mfw_dp_get_config(const struct mfw_dp *dp, struct mfw_config *cfg);
 /* Set the fragment policy and bump the generation; returns the new one. */
-int mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments, __u32 *generation);
+int mfw_dp_set_config(struct mfw_dp *dp, int drop_ipv4_fragments,
+    __u32 *generation);
 int mfw_dp_stats(const struct mfw_dp *dp, __u64 out[MFW_STAT_MAX]);
 
 /*

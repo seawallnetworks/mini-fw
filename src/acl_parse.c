@@ -117,7 +117,8 @@ static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         int pfx = mfw_wildcard_to_prefix(w);
 
         if (pfx < 0)
-            return fail(err, errlen, "non-contiguous wildcard '%s' not supported",
+            return fail(err, errlen,
+                        "non-contiguous wildcard '%s' not supported",
                         argv[*i + 1]);
         c->prefix = (__u8)pfx;
         c->addr = a & prefix_mask(pfx);
@@ -125,7 +126,8 @@ static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         return 0;
     }
     if (!bare_host_ok)
-        return fail(err, errlen, "'%s' needs a wildcard (or use 'host %s')", tok, tok);
+        return fail(err, errlen, "'%s' needs a wildcard (or use 'host %s')",
+                    tok, tok);
     c->addr = a;
     c->prefix = 32;
     (*i)++;
@@ -149,7 +151,8 @@ static int parse_port(int argc, char **argv, int *i, int ports_ok,
     if (!strcmp(op, "range")) {
         if (*i + 2 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a) ||
             parse_uint(argv[*i + 2], 1, 65535, &b) || a > b)
-            return fail(err, errlen, "'range' needs LO HI with 1 <= LO <= HI <= 65535");
+            return fail(err, errlen,
+                        "'range' needs LO HI with 1 <= LO <= HI <= 65535");
         *i += 3;
     } else {
         if (*i + 1 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a))
@@ -196,11 +199,13 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
     if (argc < 2)
         return fail(err, errlen, "expected <list> [seq] permit|deny ...");
     if (parse_uint(argv[i++], 1, 199, &acl))
-        return fail(err, errlen, "list number must be 1-99 (standard) or 100-199 (extended)");
+        return fail(err, errlen, "list number must be 1-99 (standard) or "
+                    "100-199 (extended)");
 
     if (strcmp(argv[i], "permit") && strcmp(argv[i], "deny")) {
         if (parse_uint(argv[i], 1, 65535, &seq))
-            return fail(err, errlen, "expected permit|deny or a sequence number 1-65535, got '%s'", argv[i]);
+            return fail(err, errlen, "expected permit|deny or a sequence "
+                        "number 1-65535, got '%s'", argv[i]);
         i++;
     }
     if (i >= argc || (strcmp(argv[i], "permit") && strcmp(argv[i], "deny")))
@@ -208,7 +213,8 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
 
     out->acl_id = (__u16)acl;
     out->seq = (__u16)seq;
-    out->action = !strcmp(argv[i++], "permit") ? MFW_ACTION_PERMIT : MFW_ACTION_DENY;
+    out->action = !strcmp(argv[i++], "permit") ? MFW_ACTION_PERMIT
+                                               : MFW_ACTION_DENY;
     out->enabled = 1;
 
     if (mfw_is_std(acl)) {
@@ -217,7 +223,8 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
         if (rc)
             return rc;
         if (i < argc)
-            return fail(err, errlen, "standard lists (1-99) match source only; unexpected '%s'", argv[i]);
+            return fail(err, errlen, "standard lists (1-99) match source "
+                        "only; unexpected '%s'", argv[i]);
         return 0;
     }
 
@@ -225,7 +232,8 @@ int mfw_parse_ace(int argc, char **argv, struct mfw_rule *out,
     if (i >= argc)
         return fail(err, errlen, "extended ACE needs a protocol");
     if (parse_proto(argv[i], &out->proto))
-        return fail(err, errlen, "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)", argv[i]);
+        return fail(err, errlen,
+                    "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)", argv[i]);
     i++;
 
     int ports_ok = out->proto == MFW_PROTO_TCP || out->proto == MFW_PROTO_UDP;
@@ -261,7 +269,9 @@ int mfw_parse_ace_line(const char *line, struct mfw_rule *out,
     if (strlen(line) >= sizeof(buf))
         return fail(err, errlen, "ACE too long");
     snprintf(buf, sizeof(buf), "%s", line);
-    for (char *t = strtok_r(buf, " \t", &save); t; t = strtok_r(NULL, " \t", &save)) {
+    for (char *t = strtok_r(buf, " \t", &save); t;
+         t = strtok_r(NULL, " \t", &save))
+    {
         if (argc == 32)
             return fail(err, errlen, "too many words");
         argv[argc++] = t;
