@@ -213,6 +213,7 @@ extended list:
 | NTP time sync | UDP from port 123 | `permit udp any eq 123 any` |
 | DHCP lease renewal | UDP 67 → 68 | `permit udp any eq 67 any eq 68` |
 | ping | ICMP echo reply | `permit icmp any any` |
+| sends a packet larger than the path's MTU | ICMP "fragmentation needed" | `permit icmp any any` |
 
 With sw_flowd (it ships in the Seawall stack) the first rows have a
 better rule. sw_flowd records each flow the VM opens as it leaves, and
@@ -224,7 +225,12 @@ better rule. sw_flowd records each flow the VM opens as it leaves, and
 | DNS lookups, NTP, other UDP from an ephemeral port | `permit udp any any reply` |
 
 `established` lets in any TCP packet with ACK set, so an ACK flood passes
-it; `reply` doesn't. §5.5 has the details.
+it; `reply` doesn't. §5.5 has the details. `reply` covers TCP and UDP only:
+keep `permit icmp any any`. Without it, path MTU discovery breaks: a
+router on a path with a smaller MTU, such as a VPC's 9001-byte jumbo frames
+meeting the internet's 1500, answers a full-size packet from the VM with
+"fragmentation needed", the list drops that, and the connection hangs as
+soon as the VM sends more than a small answer.
 
 **Forgetting these is the most common mistake.** Section 6.1 has a ready-made
 baseline.
@@ -248,7 +254,7 @@ acl 100 20 permit tcp any any established      # TCP replies
 acl 100 30 permit udp any eq 53 any            # DNS replies
 acl 100 40 permit udp any eq 123 any           # NTP replies
 acl 100 50 permit udp any eq 67 any eq 68      # DHCP
-acl 100 60 permit icmp any any                 # ping
+acl 100 60 permit icmp any any                 # ping, path MTU discovery
 
 bind eth0 in 10
 bind eth0 in 100
@@ -456,7 +462,8 @@ acl 100 50 permit icmp any any
 ```
 
 Drop the DHCP line if the VM has a static address. Drop the NTP line if it
-doesn't sync time over the network.
+doesn't sync time over the network. Keep the ICMP line: it lets in path MTU
+discovery's "fragmentation needed" as well as ping (§3.4).
 
 ### 6.2 SSH only from an admin network
 
@@ -773,6 +780,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
 | `reply` rules let nothing in; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`) | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
+| connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped | `permit icmp any any` (§3.4) |
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |

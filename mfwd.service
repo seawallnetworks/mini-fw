@@ -1,5 +1,5 @@
 [Unit]
-Description=mini-fw daemon (eBPF/TC inbound firewall)
+Description=mini-fw daemon (eBPF inbound firewall at XDP, else TC)
 Documentation=https://github.com/seawallnetworks/mini-fw
 # Front ends such as sw_configd send the policy once mfwd is up.
 Before=sw_configd.service

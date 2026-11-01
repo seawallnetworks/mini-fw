@@ -46,12 +46,18 @@ acl 10 10 deny host 203.0.113.66
 acl 100 10 permit tcp any host 10.0.0.5 eq 22
 acl 100 20 permit tcp any any reply          # replies to our outbound TCP
 acl 100 30 permit udp any any reply          # and UDP (DNS, NTP...)
+acl 100 40 permit icmp any any               # ping, and path MTU discovery
 bind eth0 in 10
 bind eth0 in 100
 set drop-ipv4-fragments 0
 set reply-idle-tcp 86400                     # the defaults
 set reply-idle-udp 180
 ```
+
+Keep ICMP permitted: once an extended list is bound, everything it doesn't
+permit is dropped, "fragmentation needed" included, and without that a
+connection whose path has a smaller MTU, such as from a VPC's jumbo frames
+to the internet, hangs on the first full-size packet the VM sends.
 
 mfwd checks all of it first, so a bad line changes nothing. Then it
 attaches every interface that gets a list, swaps in each one's ruleset
