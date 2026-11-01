@@ -58,6 +58,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 
@@ -577,15 +578,23 @@ handle(mfwd_t *d, char *req, uid_t uid, char **reply)
 
 /*
  * Reads one request: a line, or for APPLY every line up to "END".
- * Returns the request (malloc'd), or NULL with a reason in *why.
+ * Returns the request (malloc'd), or NULL with a reason in *why. The
+ * socket's receive timeout bounds each recv(); the whole request must be
+ * in within MFWD_READ_SECS too, or a client sending a byte at a time would
+ * hold mfwd, which serves one at a time.
  */
 static char *
 read_request(int fd, const char **why)
 {
-    int       apply;
-    char     *buf, *nl, *p;
-    size_t    len, off, pos, size;
-    ssize_t   n;
+    int               apply;
+    char             *buf, *nl, *p;
+    size_t            len, off, pos, size;
+    ssize_t           n;
+    time_t            deadline;
+    struct timespec   now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    deadline = now.tv_sec + MFWD_READ_SECS;
 
     size = 4096;
     off = 0;
@@ -642,6 +651,13 @@ read_request(int fd, const char **why)
             }
 
             buf = p;
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+
+        if (now.tv_sec > deadline) {
+            *why = "request not complete in time";
+            goto failed;
         }
 
         n = recv(fd, buf + off, size - 1 - off, 0);
