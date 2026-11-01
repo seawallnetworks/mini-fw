@@ -30,9 +30,10 @@
 
 /*
  * Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
- * the pins, of any version. 2: per-interface rulesets
+ * the pins, of any version. 2: per-interface rulesets; 3: no unused
+ * fields
  */
-#define MFW_ABI_VERSION  2
+#define MFW_ABI_VERSION  3
 
 /* mfw_rule.flags */
 #define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
@@ -51,14 +52,6 @@
 enum mfw_action {
     MFW_ACTION_DENY   = 0,
     MFW_ACTION_PERMIT = 1,
-};
-
-
-/* Direction flags (bitmask). Step 1 binds ingress only; kept for ABI. */
-enum mfw_dir {
-    MFW_DIR_INGRESS = 1 << 0,  /* in  */
-    MFW_DIR_EGRESS  = 1 << 1,  /* out */
-    MFW_DIR_BOTH    = MFW_DIR_INGRESS | MFW_DIR_EGRESS,
 };
 
 
@@ -102,17 +95,12 @@ struct mfw_rule {
     __u16                  seq;       /* line order; lower first */
     __u8                   action;    /* MFW_ACTION_PERMIT / DENY */
     __u8                   proto;     /* 0=any/ip; ignored for standard */
-    __u8                   direction; /* always MFW_DIR_INGRESS in step 1 */
-    __u8                   enabled;   /* set by the parser; BPF counts */
     __u8                   kind;      /* MFW_ACL_STANDARD | _EXTENDED */
     __u8                   flags;     /* MFW_RULE_F_* */
-    __u8                   pad0[2];
     struct mfw_cidr        src;
     struct mfw_cidr        dst;       /* any for standard */
     struct mfw_port_range  sport;     /* any for standard */
     struct mfw_port_range  dport;
-    /* (acl_id << 16) | seq; nothing reads it */
-    __u32                  rule_id;
     /*
      * "reply" ACEs: the policy's reply-idle-tcp or -udp, in seconds, set
      * by mfw_policy_compile()
@@ -135,8 +123,6 @@ struct mfw_ruleset {
     __u16                  ext_acl;   /* bound extended list, 0 = none */
     __u16                  n_std;     /* std[0 .. n_std) in use */
     __u16                  n_ext;     /* ext[0 .. n_ext) in use */
-    __u32                  generation;  /* mfw_config's, when built */
-    __u32                  pad;
     struct mfw_rule        std[MFW_MAX_STD_ACES];
     struct mfw_rule        ext[MFW_MAX_EXT_ACES];
 };
@@ -146,21 +132,18 @@ struct mfw_ruleset {
  * Settings for every interface: the single entry (key 0) of the "config"
  * array map. mfwd writes it; BPF reads only drop_ipv4_fragments. All
  * zeros is a new map that mfwd has yet to set up: abi_version is 0.
- * default_action is always MFW_ACTION_DENY, unused, kept for the layout.
  */
 struct mfw_config {
-    __u8                   default_action;
     __u8                   drop_ipv4_fragments;  /* 1: drop all fragments */
     __u8                   abi_version;          /* MFW_ABI_VERSION */
-    __u8                   pad0;
+    __u8                   pad0[2];
     __u32                  generation;           /* bumped on every apply */
 };
 
 
 /*
  * Stats: every packet increments exactly one OUTCOME and at most one
- * REASON. Append new ids at the end, so each id keeps its meaning for
- * STATS and libmfw's callers.
+ * REASON. STATS names each counter, and libmfw reads them by name.
  */
 enum mfw_stat_id {
     /* Outcomes; named xdp_pass and xdp_drop in STATS, whichever the hook */

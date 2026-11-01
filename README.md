@@ -179,10 +179,9 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   runs several in turn, and mini-fw never replaces a program that is not
   one: on that interface it filters at TC instead (degraded: a TC drop costs
   more). The design's TC egress program, `access-group … out`, and the
-  egress list order are dropped. `mfw_rule.direction` stays in the ABI but
-  is always `in`. If conntrack is added later, it will need a TC egress
-  hook again to see outbound flows. At TC a pass is `TCX_NEXT`, so a tc
-  program attached after mini-fw still runs.
+  egress list order are dropped. If conntrack is added later, it will need
+  a TC egress hook again to see outbound flows. At TC a pass is
+  `TCX_NEXT`, so a tc program attached after mini-fw still runs.
 - **Per-packet cost.** At TC, after GRO, the extended list is scanned once
   per merged GRO packet, not per wire packet, and a packet whose headers
   are not all in the skb's linear part is pulled in first
@@ -229,5 +228,5 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   need kernel 5.12+, and tcx 6.6+ (classic TC before).
 - **Stats.** There are two outcomes (`xdp_pass`, `xdp_drop`, whichever
   hook) and one reason
-  per packet (`std_deny`, `ext_permit`, `ext_implicit_deny`, …). New ids are
-  appended at the end.
+  per packet (`std_deny`, `ext_permit`, `ext_implicit_deny`, …), each
+  named in `STATS`.

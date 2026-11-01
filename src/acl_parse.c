@@ -344,7 +344,6 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     out->seq = (__u16) seq;
     out->action = strcmp(argv[i++], "permit") == 0 ? MFW_ACTION_PERMIT
                                                    : MFW_ACTION_DENY;
-    out->enabled = 1;
 
     if (mfw_is_std(acl)) {
         out->kind = MFW_ACL_STANDARD;

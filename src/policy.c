@@ -144,8 +144,6 @@ parse_acl(struct mfw_policy *p, int argc, char **argv, int line, char *err,
         return fail(err, len, line, "more than %d ACEs", MFW_ACL_MAX);
     }
 
-    r.rule_id = ((__u32) r.acl_id << 16) | r.seq;
-    r.direction = MFW_DIR_INGRESS;
     p->rules[p->n_rules++] = r;
 
     return 0;

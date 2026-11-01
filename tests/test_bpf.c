@@ -304,8 +304,6 @@ add(const char *line)
         return;
     }
 
-    r.direction = MFW_DIR_INGRESS;
-
     /*
      * set as mfw_policy_compile() does; the test's limits: an hour for
      * TCP, a minute for UDP

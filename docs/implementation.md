@@ -289,7 +289,7 @@ minimum is above the design's 5.10.
 
 All shared types are in `include/mfw.h`, fixed-width with explicit padding.
 
-### 4.1 `struct mfw_rule` (44 bytes)
+### 4.1 `struct mfw_rule` (36 bytes)
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -297,19 +297,16 @@ All shared types are in `include/mfw.h`, fixed-width with explicit padding.
 | `seq` | `u16` | sequence number |
 | `action` | `u8` | `MFW_ACTION_DENY` = 0, `MFW_ACTION_PERMIT` = 1 |
 | `proto` | `u8` | 0 = any; otherwise the IPv4 protocol number |
-| `direction` | `u8` | always `MFW_DIR_INGRESS` in step 1 (kept for ABI) |
-| `enabled` | `u8` | set to 1 by the parser; BPF scans by `n_std` / `n_ext` instead |
 | `kind` | `u8` | `MFW_ACL_STANDARD` = 1, `MFW_ACL_EXTENDED` = 2 |
 | `flags` | `u8` | `MFW_RULE_F_ESTABLISHED` (bit 0), `MFW_RULE_F_REPLY` (bit 1) |
 | `src`, `dst` | `mfw_cidr` | `addr` (network order) + `prefix` 0–32, normalized (host bits cleared) |
 | `sport`, `dport` | `mfw_port_range` | inclusive `min..max`, host order; `(0,0)` = any |
-| `rule_id` | `u32` | `(acl_id << 16) \| seq`, the same as the `acl_db` key |
-| `reply_idle` | `u32` | `reply` ACEs: the idle limit in seconds, from `set reply-idle-tcp` / `-udp`, filled in by `mfw_policy_compile()`; 0 otherwise. Was padding: the layout is unchanged |
+| `reply_idle` | `u32` | `reply` ACEs: the idle limit in seconds, from `set reply-idle-tcp` / `-udp`, filled in by `mfw_policy_compile()`; 0 otherwise |
 
 Port 0 cannot be filtered, because `(0,0)` is the "any" sentinel. The parser
 rejects `eq 0`.
 
-### 4.2 `struct mfw_ruleset` (8,464 bytes)
+### 4.2 `struct mfw_ruleset` (6,920 bytes)
 
 Everything one interface enforces, compiled from its bindings:
 
@@ -319,7 +316,6 @@ Everything one interface enforces, compiled from its bindings:
 | `ext_acl` | `u16` | bound extended list, 0 = none (fail-open) |
 | `n_std` | `u16` | `std[0 .. n_std)` are in use |
 | `n_ext` | `u16` | `ext[0 .. n_ext)` are in use; a bound list may have 0 |
-| `generation` | `u32` | `config.generation` when it was built |
 | `std` | `mfw_rule[64]` | the standard list's ACEs, in `seq` order |
 | `ext` | `mfw_rule[128]` | the extended list's ACEs, in `seq` order |
 
@@ -327,9 +323,8 @@ Everything one interface enforces, compiled from its bindings:
 
 | Field | Meaning |
 |-------|---------|
-| `default_action` | ABI only. Always DENY and ignored by BPF (design K10) |
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
-| `abi_version` | `MFW_ABI_VERSION` (2: per-interface rulesets), shown by `mfwd -V`. A start replaces the pins of any version |
+| `abi_version` | `MFW_ABI_VERSION` (3: per-interface rulesets, no unused fields), shown by `mfwd -V`. A start replaces the pins of any version |
 | `generation` | bumped after each successful materialization; starts again at each start of mfwd |
 
 ### 4.4 Maps
@@ -388,10 +383,10 @@ Each packet increments **exactly one outcome** and **at most one reason**.
 | 10 | `tcp_frag_off1` | reason | TCP fragment at offset 1 (§3.2) |
 
 Packets passed with no list deciding (both unbound, a standard miss with
-extended unbound, or a non-first fragment) get an outcome but no reason. **New ids must be appended
-at the end** so existing ids keep their meaning. A new id still makes the
-map larger; that needs no care, since every start pins new maps (§5.1)
-and the counters restart.
+extended unbound, or a non-first fragment) get an outcome but no reason.
+`STATS` names every counter and libmfw reads them by name, so ids may be
+added or reordered; every start pins new maps (§5.1) and the counters
+restart.
 
 ---
 
@@ -428,7 +423,7 @@ and the counters restart.
    Open the embedded skeleton with pin root `maps/`, bind that table to
    `flows`, and load it; libbpf creates and pins the maps. Every XDP copy
    loaded later binds the same table.
-5. Initialize `config`: `default_action` DENY, `abi_version`.
+5. Initialize `config`: `abi_version`.
 6. **Restore:** apply the saved policy again, if there is one (§6). Its
    interfaces are attached to the program just loaded, so an upgrade
    takes effect here, and an mfwd started after sw_flowd reads its table.
@@ -798,9 +793,9 @@ Notes:
 | Bound detection | sketch checked "index 0 enabled", per direction | `std_acl` / `ext_acl` in the ruleset | Explicit; no sentinel entries |
 | Implicit deny | trailing synthetic `deny ip any any` | running off the end of a bound extended list | Counted separately from explicit denies; takes no ACE slot |
 | `established` | not in design | added (Cisco-compatible) | Makes stateless reply handling practical |
-| Stats ids | TC/CT/frag ids | one set (§4.5), outcomes named `xdp_*` whichever hook | Nothing shipped; clean layout, append-only from now on |
+| Stats ids | TC/CT/frag ids | one set (§4.5), outcomes named `xdp_*` whichever hook | Nothing shipped; clean layout, read by name |
 | Kernel | 5.10+ | 6.1+ | tcx links from 6.6, classic TC before (§5.3); global BPF function with pointer arguments (5.12+, §3.4) |
-| `rule_id` delete | `no ip access-list N <rule_id\|seq>` | none: a policy is replaced as a whole | `rule_id` is still `(acl << 16) \| seq` |
+| `rule_id` delete | `no ip access-list N <rule_id\|seq>` | none: a policy is replaced as a whole | No `rule_id` field: a rule is its (list, seq) |
 | clsact management | meta markers, TC attach | before 6.6 only | tcx links need no clsact qdisc; classic TC adds one if missing and leaves it |
 
 ---

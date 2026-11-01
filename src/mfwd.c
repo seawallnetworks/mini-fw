@@ -252,11 +252,11 @@ detach_added(mfwd_t *d, const struct mfw_policy *p, const int *added)
 
 
 /*
- * Make each existing bound interface's ruleset, compiled into rs and
- * stamped with the new generation, put in *gen; then swap in the policy's
- * config and those rulesets, and remove the rulesets of interfaces no
- * longer bound. Every ruleset is made before anything is swapped in, so
- * a failure to make one changes nothing.
+ * Make each existing bound interface's ruleset, compiled into rs; then
+ * swap in the policy's config, with the new generation put in *gen, and
+ * those rulesets, and remove the rulesets of interfaces no longer bound.
+ * Every ruleset is made before anything is swapped in, so a failure to
+ * make one changes nothing.
  */
 static int
 install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
@@ -287,7 +287,6 @@ install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
         }
 
         mfw_policy_compile(p, i, rs);
-        rs->generation = *gen;
 
         fd[i] = mfw_dp_ruleset(rs, msg, sizeof(msg));
         if (fd[i] < 0) {

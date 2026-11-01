@@ -193,7 +193,6 @@ init_config(int config_fd, char *err, size_t len)
     k = 0;
 
     memset(&cfg, 0, sizeof(cfg));
-    cfg.default_action = MFW_ACTION_DENY;
     cfg.abi_version = MFW_ABI_VERSION;
 
     if (bpf_map_update_elem(config_fd, &k, &cfg, BPF_ANY) != 0) {
