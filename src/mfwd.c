@@ -479,24 +479,33 @@ status(mfwd_t *d, char **reply)
 static void
 stats(mfwd_t *d, char **reply)
 {
-    int     i;
-    __u64   c[MFW_STAT_MAX];
-    size_t  off;
-    char    buf[1024];
+    int      i, failed;
+    FILE    *f;
+    __u64    c[MFW_STAT_MAX];
+    size_t   len;
 
     if (mfw_dp_stats(&d->dp, c) != 0) {
         error_reply(reply, "kernel", "read counters: %s", strerror(errno));
         return;
     }
 
-    off = snprintf(buf, sizeof(buf), "OK");
-
-    for (i = 0; i < MFW_STAT_MAX; i++) {
-        off += snprintf(buf + off, sizeof(buf) - off, " %s=%llu",
-                        mfw_stat_name(i), (unsigned long long) c[i]);
+    f = open_memstream(reply, &len);
+    if (f == NULL) {
+        *reply = NULL;
+        return;
     }
 
-    if (asprintf(reply, "%s\n", buf) < 0) {
+    fputs("OK", f);
+
+    for (i = 0; i < MFW_STAT_MAX; i++) {
+        fprintf(f, " %s=%llu", mfw_stat_name(i), (unsigned long long) c[i]);
+    }
+
+    fputc('\n', f);
+    failed = ferror(f);
+
+    if (fclose(f) != 0 || failed) {
+        free(*reply);
         *reply = NULL;
     }
 }

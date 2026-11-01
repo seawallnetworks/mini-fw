@@ -511,45 +511,47 @@ mfw_policy_compile(const struct mfw_policy *p, int i,
 char *
 mfw_policy_format(const struct mfw_policy *p)
 {
-    int                     i;
+    int                     i, failed;
+    FILE                   *f;
     char                   *buf;
-    size_t                  off, size;
+    size_t                  len;
     const struct mfw_bind  *b;
     char                    ace[160];
 
-    size = (size_t) p->n_rules * 160 + (size_t) p->n_binds * 2 * 48 + 128;
-
-    buf = malloc(size);
-    if (buf == NULL) {
+    /* grows as written, so no line is ever cut short */
+    f = open_memstream(&buf, &len);
+    if (f == NULL) {
         return NULL;
     }
 
-    buf[0] = '\0';
-    off = 0;
-
     for (i = 0; i < p->n_rules; i++) {
         mfw_format_ace(&p->rules[i], ace, sizeof(ace));
-        off += snprintf(buf + off, size - off, "acl %u %u %s\n",
-                        p->rules[i].acl_id, p->rules[i].seq, ace);
+        fprintf(f, "acl %u %u %s\n", p->rules[i].acl_id, p->rules[i].seq,
+                ace);
     }
 
     for (i = 0; i < p->n_binds; i++) {
         b = &p->binds[i];
 
         if (b->std_acl != 0) {
-            off += snprintf(buf + off, size - off, "bind %s in %u\n",
-                            b->ifname, b->std_acl);
+            fprintf(f, "bind %s in %u\n", b->ifname, b->std_acl);
         }
 
         if (b->ext_acl != 0) {
-            off += snprintf(buf + off, size - off, "bind %s in %u\n",
-                            b->ifname, b->ext_acl);
+            fprintf(f, "bind %s in %u\n", b->ifname, b->ext_acl);
         }
     }
 
-    snprintf(buf + off, size - off, "set drop-ipv4-fragments %d\n"
-             "set reply-idle-tcp %u\nset reply-idle-udp %u\n",
-             p->drop_ipv4_fragments, p->reply_idle_tcp, p->reply_idle_udp);
+    fprintf(f, "set drop-ipv4-fragments %d\nset reply-idle-tcp %u\n"
+            "set reply-idle-udp %u\n", p->drop_ipv4_fragments,
+            p->reply_idle_tcp, p->reply_idle_udp);
+
+    failed = ferror(f);
+
+    if (fclose(f) != 0 || failed) {
+        free(buf);
+        return NULL;
+    }
 
     return buf;
 }
