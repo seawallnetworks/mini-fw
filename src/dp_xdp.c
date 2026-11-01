@@ -11,6 +11,7 @@
 #include "mfw.skel.h"
 
 #include <sw/bpffs.h>
+#include <sw/log.h>
 #include <sw/netif.h>
 
 #include <bpf/bpf.h>
@@ -350,13 +351,17 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
 
     /*
      * A new dispatcher was tried in native mode: if the driver refused,
-     * try skb mode. A dispatcher that was there keeps its own mode.
+     * try skb mode, saying why, since it costs much more. A dispatcher
+     * that was there keeps its own mode.
      */
     if (e != 0
         && state == mfw_xdp_free
         && e != -EBUSY
         && e != -EEXIST)
     {
+        sw_log_warn("%s: native XDP refused: %s; trying skb (generic) mode",
+                    ifname, strerror(-e));
+
         e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd);
     }
 
