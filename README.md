@@ -62,9 +62,8 @@ everything until it has applied the saved policy again.
 
 ## Build and install
 
-Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`),
-and the static archives of libelf, zlib, libzstd and glibc (mfwd is linked
-fully static, so it needs no libraries on the machine), bpftool, Linux ≥ 6.1 with BTF, bpffs at
+Requirements: clang, libbpf ≥ 1.3 and libxdp (`libbpf-dev`, `libxdp-dev`;
+mfwd links both in statically), bpftool, Linux ≥ 6.1 with BTF, bpffs at
 `/sys/fs/bpf`, and sw_flowd's header (`<sw_flowd/sw_flowd.h>`, the
 layout of its table: `make -C ../sw_flowd install-header`, or its `make
 install`, puts it in `/usr/local/seawall/include`; `SW_FLOWD_PREFIX`
