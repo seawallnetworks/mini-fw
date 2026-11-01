@@ -81,7 +81,10 @@ static void error_reply(char **reply, const char *code, const char *fmt,
     ...);
 static void append(char *buf, size_t len, const char *name);
 static int attach_bound(mfwd_t *d, const struct mfw_policy *p,
-    __u32 *ifindex, char *missing, size_t mlen, char *err, size_t errlen);
+    __u32 *ifindex, int *added, char *missing, size_t mlen, char *err,
+    size_t errlen);
+static void detach_added(mfwd_t *d, const struct mfw_policy *p,
+    const int *added);
 static int install(mfwd_t *d, const struct mfw_policy *p,
     const __u32 *ifindex, struct mfw_ruleset *rs, __u32 *gen, char *err,
     size_t errlen);
@@ -182,18 +185,19 @@ append(char *buf, size_t len, const char *name)
 /*
  * Look up every bound interface, putting its index in ifindex (0 if it
  * doesn't exist, and its name in missing), and attach those that exist and
- * aren't attached yet. On failure, the ones attached here are detached
- * again: the old policy runs as it did.
+ * aren't attached yet, setting added for them. On failure, the ones
+ * attached here are detached again: the old policy runs as it did.
  */
 static int
 attach_bound(mfwd_t *d, const struct mfw_policy *p, __u32 *ifindex,
-    char *missing, size_t mlen, char *err, size_t errlen)
+    int *added, char *missing, size_t mlen, char *err, size_t errlen)
 {
-    int          i, idx, n_added;
+    int          i, idx;
     const char  *ifname;
-    char         added[MFW_MAX_IFACES][IF_NAMESIZE];
 
-    n_added = 0;
+    for (i = 0; i < p->n_binds; i++) {
+        added[i] = 0;
+    }
 
     for (i = 0; i < p->n_binds; i++) {
         ifname = p->binds[i].ifname;
@@ -201,7 +205,7 @@ attach_bound(mfwd_t *d, const struct mfw_policy *p, __u32 *ifindex,
         /* can't tell whether it exists: the old policy stays */
         idx = sw_netif_index(ifname, err, errlen);
         if (idx < 0) {
-            goto undo;
+            goto failed;
         }
 
         ifindex[i] = idx;
@@ -216,43 +220,65 @@ attach_bound(mfwd_t *d, const struct mfw_policy *p, __u32 *ifindex,
         }
 
         if (mfw_dp_attach(&d->dp, ifname, err, errlen) != 0) {
-            goto undo;
+            goto failed;
         }
 
-        snprintf(added[n_added++], IF_NAMESIZE, "%s", ifname);
+        added[i] = 1;
     }
 
     return 0;
 
-undo:
+failed:
 
-    for (i = 0; i < n_added; i++) {
-        mfw_dp_detach(&d->dp, added[i]);
-    }
+    detach_added(d, p, added);
 
     return -1;
 }
 
 
+/* Detach the interfaces attach_bound() attached. */
+static void
+detach_added(mfwd_t *d, const struct mfw_policy *p, const int *added)
+{
+    int  i;
+
+    for (i = 0; i < p->n_binds; i++) {
+        if (added[i]) {
+            mfw_dp_detach(&d->dp, p->binds[i].ifname);
+        }
+    }
+}
+
+
 /*
- * Swap in the policy's config, then each existing bound interface's
- * ruleset, compiled into rs and stamped with the new generation, put in
- * *gen. The rulesets of interfaces no longer bound are removed.
+ * Make each existing bound interface's ruleset, compiled into rs and
+ * stamped with the new generation, put in *gen; then swap in the policy's
+ * config and those rulesets, and remove the rulesets of interfaces no
+ * longer bound. Every ruleset is made before anything is swapped in, so
+ * a failure to make one changes nothing.
  */
 static int
 install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
     struct mfw_ruleset *rs, __u32 *gen, char *err, size_t errlen)
 {
-    int    i, n_keep;
-    __u32  keep[MFW_MAX_IFACES];
-    char   msg[MFW_ERR_LEN - IF_NAMESIZE - 2];  /* after "<ifname>: " */
+    int                i, n_keep, rc;
+    struct mfw_config  cfg;
+    int                fd[MFW_MAX_IFACES];
+    __u32              keep[MFW_MAX_IFACES];
+    char               msg[MFW_ERR_LEN - IF_NAMESIZE - 2];  /* after "<if>: " */
 
-    if (mfw_dp_set_config(&d->dp, p->drop_ipv4_fragments, gen) != 0) {
-        snprintf(err, errlen, "update config: %s", strerror(errno));
+    if (mfw_dp_get_config(&d->dp, &cfg) != 0) {
+        snprintf(err, errlen, "read config: %s", strerror(errno));
         return -1;
     }
 
+    *gen = cfg.generation + 1;
     n_keep = 0;
+    rc = -1;
+
+    for (i = 0; i < p->n_binds; i++) {
+        fd[i] = -1;
+    }
 
     for (i = 0; i < p->n_binds; i++) {
         if (ifindex[i] == 0) {
@@ -262,17 +288,45 @@ install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
         mfw_policy_compile(p, i, rs);
         rs->generation = *gen;
 
-        if (mfw_dp_install(&d->dp, ifindex[i], rs, msg, sizeof(msg)) != 0) {
+        fd[i] = mfw_dp_ruleset(rs, msg, sizeof(msg));
+        if (fd[i] < 0) {
             snprintf(err, errlen, "%s: %s", p->binds[i].ifname, msg);
-            return -1;
+            goto out;
+        }
+    }
+
+    if (mfw_dp_set_config(&d->dp, p->drop_ipv4_fragments, *gen) != 0) {
+        snprintf(err, errlen, "update config: %s", strerror(errno));
+        goto out;
+    }
+
+    for (i = 0; i < p->n_binds; i++) {
+        if (fd[i] < 0) {
+            continue;
+        }
+
+        if (mfw_dp_install(&d->dp, ifindex[i], fd[i], msg, sizeof(msg)) != 0)
+        {
+            snprintf(err, errlen, "%s: %s", p->binds[i].ifname, msg);
+            goto out;
         }
 
         keep[n_keep++] = ifindex[i];
     }
 
     mfw_dp_prune(&d->dp, keep, n_keep);
+    rc = 0;
 
-    return 0;
+out:
+
+    /* the rulesets map holds those it took */
+    for (i = 0; i < p->n_binds; i++) {
+        if (fd[i] >= 0) {
+            close(fd[i]);
+        }
+    }
+
+    return rc;
 }
 
 
@@ -303,9 +357,10 @@ detach_unbound(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex)
 /*
  * Make the kernel enforce the policy: attach every bound interface that
  * exists, swap in its ruleset, then remove rulesets and detach interfaces
- * that are no longer bound. Validation and new attaches come first, so a
- * policy refused by them leaves the old one running; a map update that
- * fails after them leaves what was installed so far.
+ * that are no longer bound. A policy refused before the swaps leaves the
+ * old one running, the interfaces it attached detached again. Only a swap
+ * that fails, which a map already made hardly does, leaves some
+ * interfaces on the new ruleset and the rest on the old.
  */
 static void
 apply(mfwd_t *d, const char *text, char **reply)
@@ -314,6 +369,7 @@ apply(mfwd_t *d, const char *text, char **reply)
     __u32                gen;
     struct mfw_policy    p;
     struct mfw_ruleset  *rs;
+    int                  added[MFW_MAX_IFACES];
     __u32                ifindex[MFW_MAX_IFACES];
     char                 err[MFW_ERR_LEN], missing[1024];
 
@@ -331,10 +387,15 @@ apply(mfwd_t *d, const char *text, char **reply)
         goto out;
     }
 
-    if (attach_bound(d, &p, ifindex, missing, sizeof(missing), err,
-                     sizeof(err)) != 0
-        || install(d, &p, ifindex, rs, &gen, err, sizeof(err)) != 0)
+    if (attach_bound(d, &p, ifindex, added, missing, sizeof(missing), err,
+                     sizeof(err)) != 0)
     {
+        error_reply(reply, "kernel", "%s", err);
+        goto out;
+    }
+
+    if (install(d, &p, ifindex, rs, &gen, err, sizeof(err)) != 0) {
+        detach_added(d, &p, added);
         error_reply(reply, "kernel", "%s", err);
         goto out;
     }

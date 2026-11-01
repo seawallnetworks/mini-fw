@@ -65,19 +65,24 @@ int mfw_dp_attach(mfw_dp_t *dp, const char *ifname, char *err,
 /* Drop the interface's ruleset and detach it. */
 void mfw_dp_detach(mfw_dp_t *dp, const char *ifname);
 
-/* Swap in rs as the ruleset of ifindex (one map update). */
-int mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, const struct mfw_ruleset *rs,
-    char *err, size_t errlen);
+/*
+ * A new inner map holding rs, for mfw_dp_install(). Returns its fd, or -1
+ * with a message in err.
+ */
+int mfw_dp_ruleset(const struct mfw_ruleset *rs, char *err, size_t errlen);
+/*
+ * Swap in the inner map ruleset_fd as the ruleset of ifindex (one map
+ * update). The caller still closes ruleset_fd.
+ */
+int mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
+    size_t errlen);
 /* Remove every ruleset whose ifindex is not in keep[0..n). */
 void mfw_dp_prune(mfw_dp_t *dp, const __u32 *keep, int n);
 
 int mfw_dp_get_config(const mfw_dp_t *dp, struct mfw_config *cfg);
-/*
- * Set the fragment policy and bump the generation, putting the new one in
- * *generation. Returns 0, or -1 with errno.
- */
+/* Set the fragment policy and the generation. Returns 0, or -1 with errno. */
 int mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments,
-    __u32 *generation);
+    __u32 generation);
 int mfw_dp_stats(const mfw_dp_t *dp, __u64 out[MFW_STAT_MAX]);
 
 /*

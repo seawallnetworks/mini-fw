@@ -387,8 +387,7 @@ mfw_dp_detach(mfw_dp_t *dp, const char *ifname)
 
 
 int
-mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, const struct mfw_ruleset *rs,
-    char *err, size_t errlen)
+mfw_dp_ruleset(const struct mfw_ruleset *rs, char *err, size_t errlen)
 {
     int    e, fd;
     __u32  zero;
@@ -399,19 +398,27 @@ mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, const struct mfw_ruleset *rs,
         return sw_fail(err, errlen, "create ruleset map: %s", strerror(errno));
     }
 
-    e = 0;
     zero = 0;
 
-    if (bpf_map_update_elem(fd, &zero, rs, BPF_ANY) != 0
-        || bpf_map_update_elem(dp->rulesets_fd, &ifindex, &fd, BPF_ANY) != 0)
-    {
+    if (bpf_map_update_elem(fd, &zero, rs, BPF_ANY) != 0) {
         e = errno;
+        close(fd);
+
+        return sw_fail(err, errlen, "fill ruleset map: %s", strerror(e));
     }
 
-    close(fd);  /* the outer map holds the inner map now */
+    return fd;
+}
 
-    if (e != 0) {
-        return sw_fail(err, errlen, "install ruleset: %s", strerror(e));
+
+int
+mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
+    size_t errlen)
+{
+    if (bpf_map_update_elem(dp->rulesets_fd, &ifindex, &ruleset_fd, BPF_ANY)
+        != 0)
+    {
+        return sw_fail(err, errlen, "install ruleset: %s", strerror(errno));
     }
 
     return 0;
@@ -457,8 +464,7 @@ mfw_dp_get_config(const mfw_dp_t *dp, struct mfw_config *cfg)
 
 
 int
-mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments,
-    __u32 *generation)
+mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
 {
     __u32              k;
     struct mfw_config  cfg;
@@ -470,7 +476,7 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments,
     }
 
     cfg.drop_ipv4_fragments = !!drop_ipv4_fragments;
-    *generation = ++cfg.generation;
+    cfg.generation = generation;
 
     return bpf_map_update_elem(dp->config_fd, &k, &cfg, BPF_ANY) != 0 ? -1 : 0;
 }
