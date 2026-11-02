@@ -722,20 +722,23 @@ serve(mfwd_t *d, int fd)
 
 /*
  * A policy saved by an earlier mfwd: applied again, to the new pins.
- * Until it is, every interface passes everything.
+ * Until it is, every interface passes everything, so a failure is an
+ * error: mfwd still serves, for a front end to apply a policy.
  */
 static void
 restore(mfwd_t *d)
 {
-    char  *reply, *text;
-    char   path[PATH_MAX], err[PATH_MAX + 64];
+    char        *reply, *text;
+    const char  *why;
+    char         path[PATH_MAX], err[PATH_MAX + 64];
 
     policy_path(d, path, sizeof(path));
 
     text = sw_file_read(path, MFW_REQUEST_MAX, NULL, err, sizeof(err));
     if (text == NULL) {
         if (errno != ENOENT) {
-            sw_log_warn("saved policy not restored: %s", err);
+            sw_log_err("saved policy not applied again: %s; every "
+                       "interface passes everything until one is", err);
         }
 
         return;
@@ -744,10 +747,20 @@ restore(mfwd_t *d)
     reply = NULL;
     apply(d, text, &reply);
 
-    if (reply != NULL) {
-        sw_log(strncmp(reply, "OK", 2) == 0 ? SW_LOG_INFO : SW_LOG_WARN,
-               "saved policy applied again: %.*s",
-               (int) strcspn(reply, "\n"), reply);
+    /* d->policy is set by an apply that succeeded, reply or not */
+    if (d->policy == NULL) {
+        why = reply != NULL ? reply : "ERR internal out of memory";
+
+        sw_log_err("saved policy not applied again: %.*s; every interface "
+                   "passes everything until one is",
+                   (int) strcspn(why, "\n"), why);
+
+    } else if (reply != NULL) {
+        sw_log_info("saved policy applied again: %.*s",
+                    (int) strcspn(reply, "\n"), reply);
+
+    } else {
+        sw_log_info("saved policy applied again: OK %u", d->generation);
     }
 
     free(text);

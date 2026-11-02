@@ -433,8 +433,12 @@ installed release of mini-fw.
    `sw_notify_ready()`; `mfwd.service` is `Type=notify`), so sw_configd,
    ordered after mfwd, finds the socket, and serve.
 
-If a step after 1 fails, mfwd exits and the interfaces stay unfiltered
-until an mfwd starts.
+If a step from 2 to 5 fails, mfwd exits and the interfaces stay
+unfiltered until an mfwd starts. Step 6 is the exception: a saved policy
+that can't be read or is refused is logged as an error, and mfwd goes on,
+fail-open, to serve, so a front end can apply a policy. Exiting would
+not help: the restart would purge again, and keep the socket from the
+front end.
 
 An interface is looked up with libsw's `sw_netif_index()`, which tells one
 that doesn't exist from a lookup that failed (glibc's needs `AF_UNIX`,
@@ -763,7 +767,7 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
 | ACE parser | `make test` | nothing | wildcard→prefix, field values, normalization, canonical round trips, every rejection rule |
 | Policy | `make test` | nothing | parse and canonical form with comments and CRLF, every refusal with its line number, size limits (64/128 bound, 4096 total, 64 interfaces), compile |
 | Dataplane | `make test-bpf` | root | crafted frames through `BPF_PROG_TEST_RUN`: unbound pass, standard blacklist, extended permit/deny/implicit, standard and extended combined, `established`, fragments (non-first: standard list only, TCP offset 1) and strict mode, VLAN/QinQ/ARP/IPv6, corrupt headers, full 64 + 128 tables, per-interface rulesets (separate lists, swap, removal, interface without a ruleset), `reply` with and without a flow table (ports, address, flags, idle limits, the ACE's other fields), stats |
-| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart applies the saved policy again on new pins, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, sw_flowd's table bound only at start (by the TC entry and every XDP copy), and refused for its layout, purge, no daemon |
+| mfwd | `make test-mfwd` | root, `python3` | dummy interfaces in a private netns: apply/show/status/stats, socket mode, refusals leave the policy in place, missing interfaces, unbinding detaches, every `badreq` case (unknown, incomplete, too long, too slow), restart applies the saved policy again on new pins, one that fails is logged and mfwd still serves, a smaller pinned stats map from an older build is replaced, lost pins are re-applied, a re-created interface, sw_flowd's table bound only at start (by the TC entry and every XDP copy), and refused for its layout, purge, no daemon |
 | End-to-end | `make smoke` | root, `nc`, `ping`, `python3` | real traffic through mfwd between two network namespaces over two veth pairs: standard deny and wildcard, extended permit and implicit deny, `established` for outbound TCP, bound empty list, different lists on two interfaces, filtering while mfwd is down and after a restart, with sw_flowd (else skipped): its table taken when mfwd starts after it, `reply` for outbound TCP and UDP, an ACK flood dropped, recording through sw_flowd's pinned link while it is stopped, nothing for an mfwd started after `sw_flowd -P`; no TC filters, refused policies, purge |
 
 Notes:

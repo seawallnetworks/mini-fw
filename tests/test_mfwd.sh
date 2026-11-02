@@ -226,6 +226,16 @@ start
 same "attached again" "$(field attached)" d0,d1
 expect ok "on d0" on d0
 
+echo "== a saved policy that fails: an error, and mfwd still serves"
+stop
+echo "frob 1" >"$RUN/policy"
+start
+grep -q "saved policy not applied again: ERR invalid line 1:" "$LOG" \
+    && ok "log: not applied again" || bad "log: not applied again"
+same "nothing attached" "$(field attached)" -
+expect ok "a front end applies again" mfw apply <(echo "$POLICY")
+same "attached again" "$(field attached)" d0,d1
+
 echo "== re-created interface"
 ip -n "$NS" link del d0
 ip -n "$NS" link add d0 type dummy; ip -n "$NS" link set d0 up
