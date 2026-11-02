@@ -44,7 +44,10 @@ in_cli() { ip netns exec "$CLI" "$@"; }
 in_fw()  { ip netns exec "$FW" "$@"; }
 # ip link doesn't show tcx programs; bpftool does, and classic TC's
 # (SW_NO_TCX=1, or a kernel before 6.6) as clsact/<hook>
-tcx_on() { in_fw bpftool net show dev "$1" | grep -Eq "(tcx|clsact)/${2:-ingress} mfw_tc[ :]"; }
+tcx_on() {
+    in_fw bpftool net show dev "$1" \
+        | grep -Eq "(tcx|clsact)/${2:-ingress} mfw_tc[ :]"
+}
 xdp_on() { in_fw ip link show "$1" | grep -q ' xdp'; }
 # mini-fw in the interface's XDP dispatcher; xdp-loader reads it from the
 # test's bpffs, which ip netns exec hides
@@ -65,7 +68,8 @@ start_mfwd() {
 stop_mfwd() { kill "$PID"; wait "$PID" 2>/dev/null; PID=; }
 
 start_flowd() {
-    printf 'interfaces = veth-fw veth-fw2\ntick_ms = 200\n' > "$TMP/sw_flowd.conf"
+    printf 'interfaces = veth-fw veth-fw2\ntick_ms = 200\n' \
+        >"$TMP/sw_flowd.conf"
     nsenter --net=/var/run/netns/$FW "$FLOWD" -c "$TMP/sw_flowd.conf" \
         >>"$TMP/sw_flowd.log" 2>&1 &
     FLOWD_PID=$!
@@ -76,7 +80,8 @@ flows_is() { mfw status | grep -q "^flows  *$1\$"; }
 cleanup() {
     [[ -n $PID ]] && stop_mfwd
     [[ -n $FLOWD_PID ]] && stop_flowd
-    [[ -x $FLOWD ]] && nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
+    [[ -x $FLOWD ]] \
+        && nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
     "$MFWD" -P -d "$TMP/run" >/dev/null 2>&1
     for ns in "$CLI" "$FW"; do
         ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null
@@ -114,14 +119,19 @@ for i in range($2):
     s.sendto(struct.pack('!HHIIBBHHH', 40000 + i, $1, 1, 1, 5 << 4, 0x10,
                          1024, 0, 0), ('$FW_IP', 0))"
 }
-stat_of() { mfw stats --json | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
+stat_of() {
+    mfw stats --json \
+        | python3 -c "import json, sys; print(json.load(sys.stdin)['$1'])"
+}
 
 # ---- topology ----
 ip netns add "$CLI"; ip netns add "$FW"
 ip link add veth-cli netns "$CLI" type veth peer name veth-fw netns "$FW"
 ip link add veth-cli2 netns "$CLI" type veth peer name veth-fw2 netns "$FW"
-in_cli ip addr add $CLI_IP/24 dev veth-cli; in_cli ip addr add $CLI_IP2/24 dev veth-cli2
-in_fw  ip addr add $FW_IP/24 dev veth-fw;   in_fw  ip addr add $FW_IP2/24 dev veth-fw2
+in_cli ip addr add $CLI_IP/24 dev veth-cli
+in_cli ip addr add $CLI_IP2/24 dev veth-cli2
+in_fw  ip addr add $FW_IP/24 dev veth-fw
+in_fw  ip addr add $FW_IP2/24 dev veth-fw2
 for i in veth-cli veth-cli2 lo; do in_cli ip link set $i up; done
 for i in veth-fw veth-fw2 lo; do in_fw ip link set $i up; done
 
@@ -163,7 +173,8 @@ expect fail "ping from denied host" ping_fw
 expect ok   "std_deny counted" test "$(stat_of std_deny)" -gt 0
 policy "acl 10 20 permit any" "bind veth-fw in 10"
 expect ok   "ping after removing the deny ACE" ping_fw
-policy "acl 10 5 deny 10.200.0.0 0.0.0.255" "acl 10 20 permit any" "bind veth-fw in 10"
+policy "acl 10 5 deny 10.200.0.0 0.0.0.255" "acl 10 20 permit any" \
+    "bind veth-fw in 10"
 expect fail "ping denied by wildcard ACE at seq 5" ping_fw
 policy "acl 10 10 deny host 192.0.2.1" "bind veth-fw in 10"
 expect ok   "ping not on the blacklist (no implicit deny)" ping_fw
@@ -180,9 +191,12 @@ expect ok   "tcp 8080 permitted" tcp_to_fw 8080
 expect fail "tcp 8081 implicit deny" tcp_to_fw 8081
 expect ok   "ping permitted" ping_fw
 expect ok   "udp 5353 echo (egress never filtered)" udp_echo_fw 5353
-expect fail "outbound tcp: SYN-ACK hits implicit deny (stateless)" tcp_to_cli 9090
-expect ok   "ext_implicit_deny counted" test "$(stat_of ext_implicit_deny)" -gt 0
-policy "${EXT[@]}" "acl 100 40 permit tcp any any established" "bind veth-fw in 100"
+expect fail "outbound tcp: SYN-ACK hits implicit deny (stateless)" \
+    tcp_to_cli 9090
+expect ok   "ext_implicit_deny counted" \
+    test "$(stat_of ext_implicit_deny)" -gt 0
+policy "${EXT[@]}" "acl 100 40 permit tcp any any established" \
+    "bind veth-fw in 100"
 expect ok   "outbound tcp with 'established'" tcp_to_cli 9090
 expect fail "inbound SYN to 8081 still denied" tcp_to_fw 8081
 policy "bind veth-fw in 101"
@@ -205,7 +219,8 @@ stop_mfwd
 expect fail "veth-fw2 still blocked without mfwd" ping_fw2
 start_mfwd
 expect fail "veth-fw2 still blocked after restart" ping_fw2
-expect ok   "policy kept" bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
+expect ok   "policy kept" \
+    bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
 policy
 
 echo "== reply: replies to the flows fw opened (sw_flowd)"
@@ -216,7 +231,8 @@ if [[ -x $FLOWD ]]; then
            "bind veth-fw in 100")
     policy "${REPLY[@]}"
     expect ok   "flows: none before sw_flowd" flows_is none
-    expect fail "outbound tcp: reply matches nothing without sw_flowd" tcp_to_cli 9090
+    expect fail "outbound tcp: reply matches nothing without sw_flowd" \
+        tcp_to_cli 9090
     start_flowd
     sleep 0.5   # sw_flowd's pins, and its first sync: the ephemeral port range
     expect ok   "flows: none until mfwd restarts" flows_is none
@@ -228,7 +244,8 @@ if [[ -x $FLOWD ]]; then
     expect ok   "inbound tcp 8080 still permitted" tcp_to_fw 8080
     before=$(stat_of ext_implicit_deny)
     acks_to_fw 8081 100
-    expect ok   "an ACK flood is dropped" test $(( $(stat_of ext_implicit_deny) - before )) -ge 100
+    expect ok   "an ACK flood is dropped" \
+        test $(( $(stat_of ext_implicit_deny) - before )) -ge 100
     policy "${REPLY[@]}" "acl 100 40 permit tcp any any established"
     before=$(stat_of ext_permit)
     acks_to_fw 8081 100
@@ -236,7 +253,8 @@ if [[ -x $FLOWD ]]; then
         test $(( $(stat_of ext_permit) - before )) -ge 100
     policy "${REPLY[@]}"
     stop_flowd
-    expect ok   "sw_flowd stopped: its pinned link still records" tcp_to_cli 9090
+    expect ok   "sw_flowd stopped: its pinned link still records" \
+        tcp_to_cli 9090
     # mfwd keeps the table it bound, whose flows match until idle, until
     # it restarts: a layout change restarts the readers (0009)
     nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
@@ -252,12 +270,15 @@ echo "== ingress only; egress is never filtered"
 policy "acl 100 10 permit ip any any" "bind veth-fw in 100"
 expect fail "nothing at TC egress" tcx_on veth-fw egress
 expect fail "bind ... out refused" policy "bind veth-fw out 100"
-expect fail "ports on a standard list refused" policy "acl 10 10 deny host 1.1.1.1 eq 22"
-expect fail "non-contiguous wildcard refused" policy "acl 10 10 deny 10.0.0.0 0.0.2.255"
+expect fail "ports on a standard list refused" \
+    policy "acl 10 10 deny host 1.1.1.1 eq 22"
+expect fail "non-contiguous wildcard refused" \
+    policy "acl 10 10 deny 10.0.0.0 0.0.2.255"
 expect ok   "refusals left the policy in place" ping_fw
 
 echo "== stats"
-expect ok "stats json" bash -c "$MFW -s $SOCK stats --json | python3 -m json.tool"
+expect ok "stats json" \
+    bash -c "$MFW -s $SOCK stats --json | python3 -m json.tool"
 
 echo "== purge"
 stop_mfwd

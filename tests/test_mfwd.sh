@@ -46,10 +46,17 @@ bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 expect() {  # expect ok|fail "description" cmd...
     local want=$1 desc=$2 got; shift 2
     if "$@" >/dev/null 2>&1; then got=ok; else got=fail; fi
-    [[ $got == "$want" ]] && ok "$desc" || bad "$desc (expected $want, got $got)"
+    [[ $got == "$want" ]] && ok "$desc" \
+        || bad "$desc (expected $want, got $got)"
 }
 same() {  # same "description" actual expected
     [[ $2 == "$3" ]] && ok "$1" || bad "$1: got '$2', want '$3'"
+}
+has() {  # has "description" actual part
+    [[ $2 == *"$3"* ]] && ok "$1" || bad "$1: $2"
+}
+logged() {  # logged "description" pattern: mfwd logged a line with it
+    grep -q -- "$2" "$LOG" && ok "$1" || bad "$1"
 }
 
 mfw()  { "$MFW" -s "$SOCK" "$@"; }
@@ -58,17 +65,29 @@ in_ns() { nsenter --net=/var/run/netns/$NS "$@"; }
 xdp_in() { in_ns xdp-loader status "$1" 2>/dev/null | grep -c ' mfw_xdp '; }
 # ip link doesn't show tcx programs; bpftool does, and classic TC's
 # (SW_NO_TCX=1, or a kernel before 6.6) as clsact/ingress
-tc_on() { in_ns bpftool net show dev "$1" | grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'; }
+tc_on() {
+    in_ns bpftool net show dev "$1" \
+        | grep -Eq '(tcx|clsact)/ingress mfw_tc[ :]'
+}
 # mini-fw filters the interface, at XDP or TC
 on() { [[ -z ${MFW_NO_XDP:-} && $(xdp_in "$1") == 1 ]] || tc_on "$1"; }
 field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
+# STATS names every counter
+all_stats() {
+    mfw stats --json | python3 -c '
+import json, sys
+assert len(json.load(sys.stdin)) == 11'
+}
 
 start() {
     # nsenter execs mfwd, so $! is mfwd itself
     nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$RUN" "$@" \
         >>"$LOG" 2>&1 &
     PID=$!
-    for _ in $(seq 50); do [[ -S $SOCK ]] && mfw ping >/dev/null 2>&1 && return; sleep 0.1; done
+    for _ in $(seq 50); do
+        [[ -S $SOCK ]] && mfw ping >/dev/null 2>&1 && return
+        sleep 0.1
+    done
     echo "mfwd did not start:"; cat "$LOG"; exit 1
 }
 stop() { kill "$PID"; wait "$PID" 2>/dev/null; PID=; }
@@ -94,7 +113,10 @@ EOF
 }
 
 ip netns add "$NS"
-for i in d0 d1 d2 d3; do ip -n "$NS" link add $i type dummy; ip -n "$NS" link set $i up; done
+for i in d0 d1 d2 d3; do
+    ip -n "$NS" link add $i type dummy
+    ip -n "$NS" link set $i up
+done
 
 POLICY="acl 10 10 deny host 192.0.2.1
 acl 100 10 permit tcp any any eq 22
@@ -114,15 +136,16 @@ echo "== refused at start, before the pins"
 # libsw's listener: checked before mfwd touches the pins, so the first
 # one, on the same pins, goes on as it was
 ino=$(stat -c %i "$SOCK")
-out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" -d "$RUN" 2>&1)
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$SOCK" \
+      -d "$RUN" 2>&1)
 same "a second mfwd: exit 1" "$?" 1
-[[ $out == *"another process listens on it"* ]] && ok "says why" || bad "says why: $out"
+has "says why" "$out" "another process listens on it"
 same "its socket untouched" "$(stat -c %i "$SOCK")" "$ino"
 expect ok "the first one serves on" mfw ping
-out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" -s "$TMP/g.sock" -d "$RUN" \
-      -g sw-no-such-group 2>&1)
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" \
+      -s "$TMP/g.sock" -d "$RUN" -g sw-no-such-group 2>&1)
 same "an unknown group: exit 1" "$?" 1
-[[ $out == *'no group "sw-no-such-group"'* ]] && ok "says why" || bad "says why: $out"
+has "says why" "$out" 'no group "sw-no-such-group"'
 expect fail "no socket left" test -e "$TMP/g.sock"
 expect fail "-m '': refused" "$MFWD" -m "" -s "$TMP/m.sock" -d "$RUN"
 expect fail "-m 1777: refused" "$MFWD" -m 1777 -s "$TMP/m.sock" -d "$RUN"
@@ -144,25 +167,30 @@ set drop-ipv4-fragments 0
 set reply-idle-tcp 86400
 set reply-idle-udp 180"
 expect ok "check accepts it" mfw check <(echo "$POLICY")
-expect ok "stats" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
+expect ok "stats" all_stats
 
 echo "== refusals leave the policy in place"
-out=$(mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\nacl 10 10 deny 10.0.0.0 0.0.2.255\n') 2>&1)
+out=$(mfw apply <(printf '%s\n' 'acl 100 10 permit ip any any' \
+    'bind d0 in 100' 'acl 10 10 deny 10.0.0.0 0.0.2.255') 2>&1)
 same "exit status 1" "$?" 1
-same "names the line" "$out" "mfw: line 3: non-contiguous wildcard '0.0.2.255' not supported"
+same "names the line" "$out" \
+    "mfw: line 3: non-contiguous wildcard '0.0.2.255' not supported"
 same "generation unchanged" "$(field generation)" 1
 same "still attached" "$(field attached)" d0,d1
 out=$(mfw check <(printf 'bind d0 in 10\nbind d0 in 20\n') 2>&1)
-same "check refuses locally" "$out" "mfw: line 2: d0 already has standard list 10"
+same "check refuses locally" "$out" \
+    "mfw: line 2: d0 already has standard list 10"
 
 echo "== missing interfaces"
 out=$(mfw apply <(printf '%s\nbind d9 in 110\n' "$POLICY"))
-same "apply reports d9" "$(echo "$out" | tail -1)" "not present, so not attached: d9"
+same "apply reports d9" "$(echo "$out" | tail -1)" \
+    "not present, so not attached: d9"
 same "status: missing d9" "$(field missing)" d9
 same "status: attached unchanged" "$(field attached)" d0,d1
 
 echo "== unbinding detaches"
-expect ok "apply d0 only" mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\n')
+expect ok "apply d0 only" \
+    mfw apply <(printf 'acl 100 10 permit ip any any\nbind d0 in 100\n')
 same "attached d0" "$(field attached)" d0
 expect fail "not on d1" on d1
 expect ok "empty policy" mfw apply /dev/null
@@ -172,7 +200,8 @@ expect fail "not on d0" on d0
 echo "== protocol errors"
 same "unknown request" "$(raw 'FROB\n')" "ERR badreq unknown request 'FROB'"
 same "lower case" "$(raw 'ping\n')" "ERR badreq unknown request 'ping'"
-same "APPLY without END" "$(raw 'APPLY\nbind d0 in 10\n')" "ERR badreq request not complete"
+same "APPLY without END" "$(raw 'APPLY\nbind d0 in 10\n')" \
+    "ERR badreq request not complete"
 same "no newline" "$(raw 'PING')" "ERR badreq request not complete"
 same "too long" "$(raw '' huge)" "ERR badreq request too long"
 same "too slow" "$(raw 'PI' hold)" "ERR badreq request not complete in time"
@@ -197,27 +226,30 @@ s.bind(sys.argv[1])
 s.settimeout(10)
 msg = s.recv(256).decode()
 up = os.path.exists(sys.argv[3]) and stat.S_ISSOCK(os.stat(sys.argv[3]).st_mode)
-open(sys.argv[2], "w").write(msg + (" listening" if up else " not-listening") + "\n")
+open(sys.argv[2], "w").write(msg + (" listening" if up else " not-listening")
+                             + "\n")
 PY
 notifier=$!
 for _ in $(seq 50); do [[ -S $TMP/notify ]] && break; sleep 0.1; done
 NOTIFY_SOCKET=$TMP/notify start
 wait "$notifier"
-same "READY=1 once it listens" "$(cat "$TMP/notified" 2>/dev/null)" "READY=1 listening"
+same "READY=1 once it listens" "$(cat "$TMP/notified" 2>/dev/null)" \
+    "READY=1 listening"
 # new pins: the generation starts again
 same "generation 1" "$(field generation)" 1
 same "policy kept" "$(mfw show | head -1)" "acl 10 10 deny host 192.0.2.1"
 same "attached again" "$(field attached)" d0,d1
-grep -q "saved policy applied again: OK 1" "$LOG" && ok "log: applied again" || bad "log: applied again"
+logged "log: applied again" "saved policy applied again: OK 1"
 
 echo "== pins from an older build are replaced"
 stop
 rm "$PINS/maps/stats"
-bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 entries 10 name stats
+bpftool map create "$PINS/maps/stats" type percpu_array key 4 value 8 \
+    entries 10 name stats
 start
 same "generation 1" "$(field generation)" 1
 expect ok "stays on d0" on d0
-expect ok "stats has every id" bash -c "$MFW -s $SOCK stats --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)) == 11'"
+expect ok "stats has every id" all_stats
 
 echo "== lost pins: the saved policy is applied again"
 stop
@@ -230,8 +262,8 @@ echo "== a saved policy that fails: an error, and mfwd still serves"
 stop
 echo "frob 1" >"$RUN/policy"
 start
-grep -q "saved policy not applied again: ERR invalid line 1:" "$LOG" \
-    && ok "log: not applied again" || bad "log: not applied again"
+logged "log: not applied again" \
+    "saved policy not applied again: ERR invalid line 1:"
 same "nothing attached" "$(field attached)" -
 expect ok "a front end applies again" mfw apply <(echo "$POLICY")
 same "attached again" "$(field attached)" d0,d1
@@ -264,16 +296,21 @@ char LICENSE[] __attribute__((section("license"), used)) = "GPL";
 EOF
 clang -O2 -target bpf -c "$TMP/pass.bpf.c" -o "$TMP/pass.bpf.o"
 in_ns ip link set dev d3 xdpgeneric obj "$TMP/pass.bpf.o" sec xdp
-xdp_id() { in_ns ip -d link show "$1" | sed -n 's/.*prog\/xdp id \([0-9]*\).*/\1/p'; }
+xdp_id() {
+    in_ns ip -d link show "$1" | sed -n 's/.*prog\/xdp id \([0-9]*\).*/\1/p'
+}
+# xdp-filter's program in the interface's dispatcher
+xdpfilt_in() { in_ns xdp-loader status "$1" | grep -q xdpfilt_; }
 customer=$(xdp_id d3)
-expect ok "apply binding d2, d3" mfw apply <(printf '%s\nbind d2 in 110\nbind d3 in 110\n' "$POLICY")
+expect ok "apply binding d2, d3" \
+    mfw apply <(printf '%s\nbind d2 in 110\nbind d3 in 110\n' "$POLICY")
 same "attached d0..d3" "$(field attached)" d0,d1,d2,d3
 same "d2 in xdp-filter's dispatcher" "$(xdp_in d2)" 1
-expect ok "xdp-filter still there" bash -c "nsenter --net=/var/run/netns/$NS xdp-loader status d2 | grep -q xdpfilt_"
+expect ok "xdp-filter still there" xdpfilt_in d2
 expect ok "TC on d3" tc_on d3
 same "d3 degraded" "$(field degraded)" d3
 same "the customer's program left alone" "$(xdp_id d3)" "$customer"
-grep -q "d3: customer holds the XDP hook" "$LOG" && ok "log: degraded" || bad "log: degraded"
+logged "log: degraded" "d3: customer holds the XDP hook"
 # once the hook is free, a restart moves d3 to XDP
 in_ns ip link set dev d3 xdpgeneric off
 stop
@@ -281,9 +318,10 @@ start
 same "d3 in a dispatcher" "$(xdp_in d3)" 1
 expect fail "not at TC on d3" tc_on d3
 same "nothing degraded" "$(field degraded)" -
-expect ok "apply without d2" mfw apply <(printf '%s\nbind d3 in 110\n' "$POLICY")
+expect ok "apply without d2" \
+    mfw apply <(printf '%s\nbind d3 in 110\n' "$POLICY")
 same "d2 left" "$(xdp_in d2)" 0
-expect ok "xdp-filter stays" bash -c "nsenter --net=/var/run/netns/$NS xdp-loader status d2 | grep -q xdpfilt_"
+expect ok "xdp-filter stays" xdpfilt_in d2
 in_ns xdp-filter unload d2 --all
 # pins lost while attached: the program they named is taken out, not doubled
 stop
@@ -297,38 +335,53 @@ echo "== sw_flowd's table"
 # in scripts/smoke-test.sh. mfwd binds the table when it starts.
 FLOWS=/sys/fs/bpf/seawall/flows
 # the ids of the maps mini-fw's loaded programs use
-prog_maps() { bpftool -j prog show | python3 -c '
+prog_maps() {
+    bpftool -j prog show | python3 -c '
 import json, sys
 print(" ".join(str(m) for p in json.load(sys.stdin)
-               if p.get("name") in ("mfw_tc", "mfw_xdp") for m in p.get("map_ids", [])))'; }
-map_id() { bpftool -j map show pinned "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'; }
-grep -q 'no sw_flowd flow table' "$LOG" && ok "log: no table" || bad "log: no table"
+               if p.get("name") in ("mfw_tc", "mfw_xdp")
+               for m in p.get("map_ids", [])))'
+}
+map_id() {
+    bpftool -j map show pinned "$1" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])'
+}
+logged "log: no table" 'no sw_flowd flow table'
 same "flows: none" "$(field flows)" none
 mkdir -p "$FLOWS"
-bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 entries 1024 name outbound
+bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 \
+    entries 1024 name outbound
 sleep 1.5
 same "a table that comes later is not picked up" "$(field flows)" none
 stop
 start
 same "flows: sw_flowd after a restart" "$(field flows)" sw_flowd
-grep -q "reading sw_flowd's flow table (1024 flows)" "$LOG" && ok "log: reading" || bad "log: reading"
+logged "log: reading" "reading sw_flowd's flow table (1024 flows)"
 id=$(map_id "$FLOWS/outbound")
-[[ " $(prog_maps) " == *" $id "* ]] && ok "the loaded programs use the pinned table" \
-    || bad "the loaded programs use the pinned table ($id not in $(prog_maps))"
+if [[ -n $id ]]; then
+    has "the loaded programs use the pinned table ($id)" \
+        " $(prog_maps) " " $id "
+else
+    bad "the pinned table has no id"
+fi
 if [[ -z ${MFW_NO_XDP:-} ]]; then
     # each interface's copy in its dispatcher, not only the TC entry
     for i in d0 d1; do
-        xid=$(in_ns xdp-loader status "$i" 2>/dev/null | awk '$3 == "mfw_xdp" { print $4 }')
-        [[ -n $xid ]] && bpftool -j prog show id "$xid" | grep -q "\"map_ids\":\[[0-9,]*\b$id\b" \
-            && ok "$i's XDP copy uses it" || bad "$i's XDP copy uses it (prog '$xid')"
+        xid=$(in_ns xdp-loader status "$i" 2>/dev/null \
+              | awk '$3 == "mfw_xdp" { print $4 }')
+        [[ -n $xid ]] && bpftool -j prog show id "$xid" \
+            | grep -q "\"map_ids\":\[[0-9,]*\b$id\b" \
+            && ok "$i's XDP copy uses it" \
+            || bad "$i's XDP copy uses it (prog '$xid')"
     done
 fi
 rm "$FLOWS/outbound"
-bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 16 entries 1024 name outbound
+bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 16 \
+    entries 1024 name outbound
 stop
 start
 same "another layout is refused" "$(field flows)" none
-grep -q "is not the layout this mfwd reads" "$LOG" && ok "log: refused" || bad "log: refused"
+logged "log: refused" "is not the layout this mfwd reads"
 rm -rf "$FLOWS"
 
 echo "== purge"
@@ -351,7 +404,8 @@ stop
 echo "== without mfwd"
 out=$(mfw ping 2>&1)
 same "exit status 2" "$?" 2
-[[ $out == "mfw: cannot reach mfwd: "* ]] && ok "says why" || bad "says why: $out"
+[[ $out == "mfw: cannot reach mfwd: "* ]] && ok "says why" \
+    || bad "says why: $out"
 
 echo
 echo "test_mfwd: $PASS passed, $FAIL failed"

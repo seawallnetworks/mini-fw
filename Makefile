@@ -145,6 +145,7 @@ uninstall:
 	    $(DESTDIR)/etc/systemd/system/mfwd.service
 
 clean:
-	rm -rf build src/mfw.skel.h mfwd mfw libmfw.a tests/test_acl tests/test_policy tests/test_bpf tests/*.d
+	rm -rf build src/mfw.skel.h mfwd mfw libmfw.a tests/test_acl \
+	    tests/test_policy tests/test_bpf tests/*.d
 
 -include build/*.d
