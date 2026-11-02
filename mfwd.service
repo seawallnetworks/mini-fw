@@ -26,6 +26,24 @@ ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+# No ProtectKernelTunables=: it mounts /sys read-only, /sys/fs/bpf
+# included, whatever ReadWritePaths= says, and mfwd and libxdp pin there.
+# CAP_SYS_ADMIN stays: libxdp looks programs up by id.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service bpf
+SystemCallErrorNumber=EPERM
+UMask=0077
 # Stopping mfwd does not stop filtering: mini-fw stays attached through
 # its pins. Use "mfwd -P" to remove mini-fw from every interface.
 
