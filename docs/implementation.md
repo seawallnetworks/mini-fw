@@ -4,7 +4,7 @@
 |-------|-------|
 | **Document** | Implementation description — what is actually built |
 | **Scope** | Step 1: stateless, ingress-only ACL at XDP in libxdp's dispatcher, or at TC ingress (tcx, or classic TC before 6.6) where another program holds the XDP hook, for a local VM, per-interface lists, driven by the mfwd daemon |
-| **Version** | mfwd / mfw 0.4.0, ABI 2 |
+| **Version** | mfwd / mfw 0.4.0, ABI 3 |
 | **Date** | 2026-10-29 |
 | **Target** | Linux ≥ 6.1 with BTF (tcx from 6.6), libbpf ≥ 1.3, libxdp, clang |
 | **Related** | [`design.md`](design.md) (full v1 design, Rev 18), [`../README.md`](../README.md) (operator quick start) |
@@ -325,7 +325,7 @@ Everything one interface enforces, compiled from its bindings:
 |-------|---------|
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
 | `abi_version` | `MFW_ABI_VERSION` (3: per-interface rulesets, no unused fields), shown by `mfwd -V`. A start replaces the pins of any version |
-| `generation` | bumped after each successful materialization; starts again at each start of mfwd |
+| `generation` | bumped on each `APPLY` that reaches step 4 of §6; starts again at each start of mfwd |
 
 ### 4.4 Maps
 
@@ -386,7 +386,9 @@ Packets passed with no list deciding (both unbound, a standard miss with
 extended unbound, or a non-first fragment) get an outcome but no reason.
 `STATS` names every counter and libmfw reads them by name, so ids may be
 added or reordered; every start pins new maps (§5.1) and the counters
-restart.
+restart. `mfw_stats()` still fills an array indexed by id, so a front end
+must be built against the `mfw.h` of the `libmfw.a` it links: from one
+installed release of mini-fw.
 
 ---
 
@@ -530,11 +532,16 @@ and the user manual). mfwd:
    If an attach fails, the ones attached by this request are detached
    again and the request is refused (`ERR kernel`). Bound interfaces that
    don't exist are skipped and reported as `missing`.
-3. Increments `config.generation` and sets `drop_ipv4_fragments`.
-4. **Installs** a ruleset for each bound, existing interface
-   (`mfw_policy_compile()`, stamped with the generation): a new inner map,
-   filled, then stored in `maps/rulesets` under the ifindex. That last
-   update is the switch.
+3. **Makes** a ruleset for each bound, existing interface
+   (`mfw_policy_compile()`): a new inner map, filled. If one can't be
+   made, the maps made so far are closed, the interfaces attached in step
+   2 are detached, and the request is refused.
+4. Increments `config.generation`, sets `drop_ipv4_fragments`, and
+   **installs** each ruleset: stored in `maps/rulesets` under the
+   ifindex. That update is the switch. A swap that fails, which one of a
+   map already made hardly does, leaves the new config and some
+   interfaces on the new ruleset, the rest on the old; the interfaces
+   attached in step 2 are detached again.
 5. Removes every other entry of `maps/rulesets` and **detaches** attached
    interfaces that are no longer bound.
 6. Saves the policy (canonical form, `mfw_policy_format()`) to
@@ -542,8 +549,9 @@ and the user manual). mfwd:
    fsynced and renamed, then the directory fsynced, so a crash just after
    an `APPLY` keeps it.
 
-Nothing in the kernel changes before step 2, so a refused policy leaves
-the running one in place.
+Nothing in the kernel changes before step 2, and steps 2 and 3 are
+undone on failure, so a policy refused before step 4 leaves the running
+one in place.
 
 **Atomic per interface.** An installed inner map is never written again,
 and the switch in step 4 is one map update. A packet holds the inner map

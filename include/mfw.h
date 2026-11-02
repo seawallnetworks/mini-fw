@@ -143,7 +143,9 @@ struct mfw_config {
 
 /*
  * Stats: every packet increments exactly one OUTCOME and at most one
- * REASON. STATS names each counter, and libmfw reads them by name.
+ * REASON. STATS names each counter, and libmfw reads them by name; its
+ * mfw_stats() fills an array indexed by these ids, so a front end must
+ * be built against the mfw.h of the libmfw.a it links.
  */
 enum mfw_stat_id {
     /* Outcomes; named xdp_pass and xdp_drop in STATS, whichever the hook */

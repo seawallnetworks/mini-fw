@@ -359,8 +359,8 @@ detach_unbound(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex)
  * exists, swap in its ruleset, then remove rulesets and detach interfaces
  * that are no longer bound. A policy refused before the swaps leaves the
  * old one running, the interfaces it attached detached again. Only a swap
- * that fails, which a map already made hardly does, leaves some
- * interfaces on the new ruleset and the rest on the old.
+ * that fails, which a map already made hardly does, leaves the new config
+ * and some interfaces on the new ruleset, the rest on the old.
  */
 static void
 apply(mfwd_t *d, const char *text, char **reply)

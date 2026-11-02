@@ -300,7 +300,8 @@ test_compile(void)
               && rs.n_ext == 1, "eth0: std %u/%u ext %u/%u", rs.std_acl,
               rs.n_std, rs.ext_acl, rs.n_ext);
     mfw_check(rs.std[0].seq == 10 && rs.std[1].seq == 20, "eth0: seq order");
-    mfw_check(rs.std[0].action == MFW_ACTION_DENY
+    mfw_check(rs.std[0].src.prefix == 32
+              && rs.ext[0].action == MFW_ACTION_PERMIT
               && rs.ext[0].dport.min == 22, "eth0: fields");
 
     mfw_policy_compile(&p, 1, &rs);
