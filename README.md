@@ -3,7 +3,9 @@
 An IPv4 L4 host firewall built on eBPF, with Cisco IOS-style numbered access lists.
 See [`docs/user-manual.md`](docs/user-manual.md) for the operator manual,
 [`docs/implementation.md`](docs/implementation.md) for a detailed description of
-what is built, and [`docs/design.md`](docs/design.md) for the full v1 design.
+what is built, [`docs/design.md`](docs/design.md) for the full v1 design, and
+[`docs/userspace-ebpf.md`](docs/userspace-ebpf.md) ([中文](docs/userspace-ebpf.zh-CN.md))
+for how mfwd loads, pins and attaches the BPF side.
 
 **Current state: stateless ACLs at XDP, in libxdp's dispatcher, or at TC
 ingress when another program holds the XDP hook; inbound only, driven by
