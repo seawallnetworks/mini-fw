@@ -66,18 +66,18 @@ int mfw_dp_attach(mfw_dp_t *dp, const char *ifname, char *err,
 void mfw_dp_detach(mfw_dp_t *dp, const char *ifname);
 
 /*
- * A new inner map holding rs, for mfw_dp_install(). Returns its fd, or -1
+ * A new inner map holding rs, for mfw_dp_ruleset_swap(). Returns its fd, or -1
  * with a message in err.
  */
-int mfw_dp_ruleset(const struct mfw_ruleset *rs, char *err, size_t errlen);
+int mfw_dp_ruleset_new(const struct mfw_ruleset *rs, char *err, size_t errlen);
 /*
  * Swap in the inner map ruleset_fd as the ruleset of ifindex (one map
  * update). The caller still closes ruleset_fd.
  */
-int mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
+int mfw_dp_ruleset_swap(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
     size_t errlen);
 /* Remove every ruleset whose ifindex is not in keep[0..n). */
-void mfw_dp_prune(mfw_dp_t *dp, const __u32 *keep, int n);
+void mfw_dp_ruleset_prune(mfw_dp_t *dp, const __u32 *keep, int n);
 
 int mfw_dp_get_config(const mfw_dp_t *dp, struct mfw_config *cfg);
 /* Set the fragment policy and the generation. Returns 0, or -1 with errno. */

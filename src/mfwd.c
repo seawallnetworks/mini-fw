@@ -288,7 +288,7 @@ install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
 
         mfw_policy_compile(p, i, rs);
 
-        fd[i] = mfw_dp_ruleset(rs, msg, sizeof(msg));
+        fd[i] = mfw_dp_ruleset_new(rs, msg, sizeof(msg));
         if (fd[i] < 0) {
             snprintf(err, errlen, "%s: %s", p->binds[i].ifname, msg);
             goto out;
@@ -305,7 +305,8 @@ install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
             continue;
         }
 
-        if (mfw_dp_install(&d->dp, ifindex[i], fd[i], msg, sizeof(msg)) != 0)
+        if (mfw_dp_ruleset_swap(&d->dp, ifindex[i], fd[i], msg, sizeof(msg))
+            != 0)
         {
             snprintf(err, errlen, "%s: %s", p->binds[i].ifname, msg);
             goto out;
@@ -314,7 +315,7 @@ install(mfwd_t *d, const struct mfw_policy *p, const __u32 *ifindex,
         keep[n_keep++] = ifindex[i];
     }
 
-    mfw_dp_prune(&d->dp, keep, n_keep);
+    mfw_dp_ruleset_prune(&d->dp, keep, n_keep);
     rc = 0;
 
 out:

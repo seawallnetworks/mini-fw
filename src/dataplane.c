@@ -386,7 +386,7 @@ mfw_dp_detach(mfw_dp_t *dp, const char *ifname)
 
 
 int
-mfw_dp_ruleset(const struct mfw_ruleset *rs, char *err, size_t errlen)
+mfw_dp_ruleset_new(const struct mfw_ruleset *rs, char *err, size_t errlen)
 {
     int    e, fd;
     __u32  zero;
@@ -411,13 +411,13 @@ mfw_dp_ruleset(const struct mfw_ruleset *rs, char *err, size_t errlen)
 
 
 int
-mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
+mfw_dp_ruleset_swap(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
     size_t errlen)
 {
     if (bpf_map_update_elem(dp->rulesets_fd, &ifindex, &ruleset_fd, BPF_ANY)
         != 0)
     {
-        return sw_fail(err, errlen, "install ruleset: %s", strerror(errno));
+        return sw_fail(err, errlen, "swap ruleset: %s", strerror(errno));
     }
 
     return 0;
@@ -425,7 +425,7 @@ mfw_dp_install(mfw_dp_t *dp, __u32 ifindex, int ruleset_fd, char *err,
 
 
 void
-mfw_dp_prune(mfw_dp_t *dp, const __u32 *keep, int n)
+mfw_dp_ruleset_prune(mfw_dp_t *dp, const __u32 *keep, int n)
 {
     int    i, kept, wanted;
     __u32  last, next;

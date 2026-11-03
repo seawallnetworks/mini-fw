@@ -541,7 +541,7 @@ and the user manual). mfwd:
    made, the maps made so far are closed, the interfaces attached in step
    2 are detached, and the request is refused.
 4. Increments `config.generation`, sets `drop_ipv4_fragments`, and
-   **installs** each ruleset: stored in `maps/rulesets` under the
+   **swaps in** each ruleset: stored in `maps/rulesets` under the
    ifindex. That update is the switch. A swap that fails, which one of a
    map already made hardly does, leaves the new config and some
    interfaces on the new ruleset, the rest on the old; the interfaces
