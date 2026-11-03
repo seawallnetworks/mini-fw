@@ -10,6 +10,7 @@
 
 #include "dp_attach.h"
 
+#include <sw/bpf.h>
 #include <sw/fail.h>
 #include <sw/netif.h>
 
@@ -25,20 +26,6 @@
 
 
 /*
- * tcx came with Linux 6.6. When building with older UAPI headers (Amazon
- * Linux 2023 has 6.1's), define its values here, so mfwd still uses tcx
- * on a kernel that has it.
- */
-#ifndef BPF_F_BEFORE
-#define BPF_TCX_INGRESS    46
-#define BPF_LINK_TYPE_TCX  11
-/* in bpf_link_info's union, tcx.ifindex is where xdp.ifindex is */
-#define TCX_IFINDEX(info)  ((info).xdp.ifindex)
-#else /* BPF_F_BEFORE */
-#define TCX_IFINDEX(info)  ((info).tcx.ifindex)
-#endif /* BPF_F_BEFORE */
-
-/*
  * mini-fw's classic TC filter. The handle identifies it; the priority is
  * a late one, so tc programs attached before mini-fw run first, as they
  * do with tcx.
@@ -51,7 +38,6 @@ static void tcx_path(const char *root, const char *ifname, char *buf,
     size_t len);
 static void tc_path(const char *root, const char *ifname, char *buf,
     size_t len);
-static __u32 tcx_link_ifindex(int fd);
 
 
 static void
@@ -166,28 +152,6 @@ mfw_tc_pin(const char *root, const char *ifname, int prog_fd)
 
 
 /*
- * The ifindex a tcx link is attached to; 0 if it is not a tcx link or its
- * interface is gone.
- */
-static __u32
-tcx_link_ifindex(int fd)
-{
-    __u32                  len;
-    struct bpf_link_info   info = {};
-
-    len = sizeof(info);
-
-    if (bpf_link_get_info_by_fd(fd, &info, &len) != 0
-        || info.type != BPF_LINK_TYPE_TCX)
-    {
-        return 0;
-    }
-
-    return TCX_IFINDEX(info);
-}
-
-
-/*
  * Is ifname attached with a tcx link? If attach/tcx_<ifname> is pinned but
  * the link is not on ifname (the interface was deleted or re-created), the
  * stale pin is deleted and 0 returned. If the interface can't be looked
@@ -207,7 +171,7 @@ mfw_tcx_attached(const char *root, const char *ifname)
         return 0;
     }
 
-    on = tcx_link_ifindex(fd);
+    on = sw_bpf_tcx_ifindex(fd, NULL);
     close(fd);
 
     ifindex = sw_netif_index(ifname, err, sizeof(err));
