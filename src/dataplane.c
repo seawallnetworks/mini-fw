@@ -78,7 +78,7 @@ static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
 static int init_config(int config_fd, char *err, size_t len);
 static int detach_pinned(const char *root, char *err, size_t errlen);
-static int flows_open(void);
+static int flow_table_open(void);
 
 
 int
@@ -241,7 +241,7 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
         return sw_fail(err, errlen, "open BPF object: %s", strerror(errno));
     }
 
-    dp->flows_fd = flows_open();
+    dp->flows_fd = flow_table_open();
 
     if (dp->flows_fd >= 0
         && bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0)
@@ -482,14 +482,14 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
 
 
 /*
- * sw_flowd's table, for every program this mfwd loads to bind.
+ * sw_flowd's flow table, for every program this mfwd loads to bind.
  * sf_outbound_open() refuses one of another layout, a sw_flowd built from
  * another sw_flowd.h than mini-fw was. Without it, "reply" ACEs match
  * nothing until mfwd restarts with the right one. Returns its fd, or
  * -errno (the reason logged).
  */
 static int
-flows_open(void)
+flow_table_open(void)
 {
     int    fd;
     __u32  size;
