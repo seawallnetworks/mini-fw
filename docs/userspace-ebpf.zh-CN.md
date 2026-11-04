@@ -25,6 +25,8 @@ mini-fw 的用户态只做一件事：把 BPF 程序和 maps 放进内核，并�
 /sys/fs/bpf/seawall/flows/outbound         ← sw_flowd 的表（mini-fw 只读）
 ```
 
+下文的"组件"指 libxdp 所说的组件程序（component program），也就是挂在 dispatcher 里的每一个 XDP 程序。不叫"子程序"，因为 BPF 里的子程序（subprog）指的是一个程序内部调用的函数。
+
 三种挂载方式里，真正让程序挂着的东西各不相同：
 
 | 挂载方式 | 谁持有程序 | `attach/` 下 pin 的作用 | 如何拆除 |
