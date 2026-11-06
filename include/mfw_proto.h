@@ -2,7 +2,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
 
 /*
- * mfw_client.h — talk to mfwd over its Unix socket. Part of libmfw.a, no
+ * mfw_proto.h — talk to mfwd over its Unix socket. Part of libmfw.a, no
  * privileges needed beyond access to the socket.
  *
  * Each call opens one connection, sends one request and reads the reply.
@@ -11,8 +11,8 @@
  */
 
 
-#ifndef _MFW_CLIENT_H_INCLUDED_
-#define _MFW_CLIENT_H_INCLUDED_
+#ifndef _MFW_PROTO_H_INCLUDED_
+#define _MFW_PROTO_H_INCLUDED_
 
 
 #include "mfw.h"
@@ -94,4 +94,4 @@ int mfw_request(const mfw_client_t *c, const char *request, char **reply,
     char *err, size_t errlen);
 
 
-#endif /* _MFW_CLIENT_H_INCLUDED_ */
+#endif /* _MFW_PROTO_H_INCLUDED_ */

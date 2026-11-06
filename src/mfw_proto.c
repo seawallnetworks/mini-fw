@@ -13,7 +13,7 @@
  */
 
 
-#include "mfw_client.h"
+#include "mfw_proto.h"
 
 #include <sw/sock.h>
 

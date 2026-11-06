@@ -39,7 +39,7 @@
 #define _GNU_SOURCE
 
 #include "dataplane.h"
-#include "mfw_client.h"
+#include "mfw_proto.h"
 #include "mfw_policy.h"
 
 #include <sw/bpf.h>

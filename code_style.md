@@ -577,7 +577,7 @@ These override nginx where they conflict.
   `struct mfw_*` / `enum mfw_*` without typedefs, and uppercase enum
   values (`MFW_ACTION_PERMIT`), since both sides use those forms and the
   BPF maps' BTF names them.
-- `include/mfw_policy.h` and `include/mfw_client.h` are libmfw.a's API,
+- `include/mfw_policy.h` and `include/mfw_proto.h` are libmfw.a's API,
   which sw_configd links against: their names (`struct mfw_policy`,
   `enum mfw_rc`, `mfw_client_t`, ...) stay as they are. New public types
   follow this guide.

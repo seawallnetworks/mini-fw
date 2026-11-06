@@ -39,7 +39,7 @@ or drops it. A standard `permit` does **not** bypass the extended list.
 |-|-|
 | `mfwd` | The daemon, run as root. The only process that touches the BPF side: it attaches and detaches interfaces, swaps rulesets, reads counters. Listens on `/run/mfwd.sock`. |
 | `mfw` | Command-line client: `apply`, `check`, `show`, `status`, `stats`. |
-| `libmfw.a` | For front ends such as sw_configd: `mfw_policy.h` parses and checks policies with mfwd's own rules, `mfw_client.h` talks to mfwd. No libbpf, no privileges. |
+| `libmfw.a` | For front ends such as sw_configd: `mfw_policy.h` parses and checks policies with mfwd's own rules, `mfw_proto.h` talks to mfwd. No libbpf, no privileges. |
 
 A **policy** is the whole desired state, one item per line, sent at once:
 

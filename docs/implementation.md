@@ -105,11 +105,11 @@ Key properties:
 ```text
 include/mfw.h          shared UAPI: mfw_rule, mfw_ruleset, mfw_config, stat ids
 include/mfw_policy.h   libmfw: ACE and policy parsing, checks, compile, canonical form
-include/mfw_client.h   libmfw: the mfwd client
+include/mfw_proto.h    libmfw: the mfwd protocol, request side
 src/bpf/mfw.bpf.c      XDP and TC ingress program: libpkt's status to a verdict, standard + extended matching
 src/acl_parse.c        libmfw: Cisco ACE parser and formatter
 src/policy.c           libmfw: whole policies
-src/mfwd_proto.c       libmfw: mfwd protocol, request side
+src/mfw_proto.c        libmfw: mfwd protocol, request side
 src/mfwd.c             the daemon: socket, requests, saved policy
 src/dataplane.c/.h     mfwd's BPF side: load, pins, purge, attach/detach, rulesets, counters
 src/dp_attach.h        the hooks, for dataplane.c: XDP (dp_xdp.c) and TC (dp_tc.c)
@@ -609,7 +609,7 @@ Every `APPLY` is logged with the caller's uid (`SO_PEERCRED`).
 | Header | Functions |
 |--------|-----------|
 | `mfw_policy.h` | `mfw_parse_ace()`, `mfw_parse_ace_line()`, `mfw_format_ace()`, `mfw_policy_parse()`, `mfw_policy_compile()`, `mfw_policy_format()`, `mfw_policy_free()` |
-| `mfw_client.h` | `mfw_ping()`, `mfw_apply()`, `mfw_status()`, `mfw_stats()`, `mfw_show()`, `mfw_request()`, `mfw_strerror()`, `mfw_stat_name()` |
+| `mfw_proto.h` | `mfw_ping()`, `mfw_apply()`, `mfw_status()`, `mfw_stats()`, `mfw_show()`, `mfw_request()`, `mfw_strerror()`, `mfw_stat_name()` |
 
 Client calls return `mfw_ok` (0) or a negative `enum mfw_rc`: `io` (cannot
 reach mfwd; see `errno`), `reply`, and one per `ERR` code. Each call opens
