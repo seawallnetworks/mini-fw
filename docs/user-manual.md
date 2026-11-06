@@ -55,9 +55,10 @@ see [`implementation.md`](implementation.md).
 |-------------|--------------|
 | Linux kernel 6.1 or newer, with BTF | `uname -r`; `ls /sys/kernel/btf/vmlinux` |
 | bpffs mounted at `/sys/fs/bpf` | `mount \| grep /sys/fs/bpf` |
-| mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) | `mfwd.service` does this |
+| mfwd runs as root (`CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_PERFMON`; `CAP_CHOWN` for `-g`) | `mfwd.service` does this |
 | `mfw` needs access to mfwd's socket | root, or a member of the group `mfw` with the shipped unit; see `mfwd -m` / `-g` |
-| To build: clang, make, bpftool, libbpf-dev | `clang --version`, `bpftool version` |
+| To build: clang, make, bpftool, libbpf-dev, libxdp-dev | `clang --version`, `bpftool version` |
+| To build: libsw (`libsw.a`, `libsw_bpf.a`) and libpkt's headers | `ls /usr/local/seawall/lib/libsw.a /usr/local/seawall/include/libpkt/parse.h`; `make install` in each puts them there |
 | To build: sw_flowd's header | `ls /usr/local/seawall/include/sw_flowd/sw_flowd.h`; sw_flowd's `make install-header` puts it there |
 | For `reply` rules: sw_flowd running | `sudo mfw status` shows `flows sw_flowd` |
 
@@ -84,7 +85,7 @@ sudo mfw ping
 ```
 
 ```text
-mfw 0.4.0, ABI 2
+mfw 0.4.0, ABI 3
 mfwd is running
 ```
 
@@ -305,6 +306,9 @@ set reply-idle-udp <seconds>            the same for UDP; default 180
 acl <1-99>    <seq> permit|deny <source>
 acl <100-199> <seq> permit|deny <protocol> <source> [<port>] <destination> [<port>] [established|reply]
 ```
+
+Numbers (list, sequence, prefix length, port, protocol, seconds) are
+plain decimal digits: `+10` or `-0` is refused.
 
 The order of lines in the file doesn't matter: rules are sorted by list and
 sequence number. `mfw show` prints the running policy in that sorted,
@@ -689,6 +693,7 @@ kernel error), **2** usage, file or connection error.
 ```text
 mfwd [-v] [-s socket] [-m mode] [-g group] [-d rundir]
 mfwd -P [-d rundir]
+mfwd -V
 ```
 
 | Option | Default | Meaning |
@@ -697,7 +702,7 @@ mfwd -P [-d rundir]
 | `-s socket` | `/run/mfwd.sock` | where to listen; refused if another mfwd answers there |
 | `-m mode` | `0600` | socket permissions, octal, at most `0777` |
 | `-g group` | | socket group, from `/etc/group`; with `-m 0660`, that group may use `mfw` without root. An unknown group stops mfwd |
-| `-d rundir` | `/run/mfwd` | where the running policy is saved |
+| `-d rundir` | `/run/mfwd` | where the running policy is saved; the shipped unit lets mfwd write only under `/run` and `/sys/fs/bpf`, so a rundir elsewhere also needs `ReadWritePaths=` (`systemctl edit mfwd`) |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |
 
@@ -717,7 +722,8 @@ The kernel side and the saved policy live in memory (`/sys/fs/bpf`,
 `/run`), so a reboot clears them: **the VM boots unprotected until a
 policy is applied.** Restarting mfwd, on the other hand, keeps the policy:
 it applies it again, though the interfaces pass everything for the moment
-that takes.
+that takes. If it can't, it logs `saved policy not applied again` as an
+error, and the interfaces pass everything until a policy is applied (§12).
 
 On a system with sw_configd, sw_configd applies its configuration when it
 starts. Standalone, apply your policy file whenever mfwd starts, with a
@@ -775,6 +781,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | `eth0: attach XDP: …` | the driver refused XDP in both modes, or missing capabilities | check §1.2; `sudo xdp-loader status eth0` |
 | `eth0: attach TC ingress: …` | missing capabilities | check §1.2 |
 | an interface listed as `degraded` | a program that isn't libxdp's dispatcher holds its XDP hook (mfwd log: `holds the XDP hook`) | none needed: it is filtered at TC; to move it to XDP, load that program through libxdp, then restart mfwd |
+| `saved policy not applied again: …` (mfwd log, at start) | the policy saved before the restart was refused this time, for example an interface's attach failed | fix the cause the log names, then apply the policy again; sw_configd sends its own again by itself. Until then every interface passes everything |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
 | DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
