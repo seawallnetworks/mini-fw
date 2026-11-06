@@ -208,6 +208,13 @@ test_rejections(void)
     reject("set reply-idle-udp 31536001\n",
            "line 1: reply-idle-udp must be 1-31536000 seconds");
     reject("set reply-idle-udp\n", MFW_SET_USAGE);
+    reject("acl 100 +10 permit ip any any\n",
+           "line 1: sequence number must be 1-65535, got '+10'");
+    reject("bind eth0 in +10\n",
+           "line 1: list number must be 1-99 (standard) or 100-199 "
+           "(extended)");
+    reject("set reply-idle-tcp +60\n",
+           "line 1: reply-idle-tcp must be 1-31536000 seconds");
 }
 
 

@@ -216,6 +216,13 @@ main(void)
     reject("100 permit");
     reject("100 frob ip any any");
     reject("100 0 permit ip any any");              /* seq 0 */
+    reject("+10 deny any");                         /* digits only */
+    reject("10 +5 deny any");
+    reject("10 deny 10.0.0.0/-0");
+    reject("10 deny 10.0.0.0/+8");
+    reject("10 deny 10.0.0.0/ 8");
+    reject("100 permit tcp any any eq +80");
+    reject("100 permit -6 any any");
 
     if (mfw_failures != 0) {
         printf("%d failure(s)\n", mfw_failures);

@@ -9,16 +9,14 @@
 
 #include "mfw_policy.h"
 
+#include <sw/conf.h>
 #include <sw/fail.h>
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 
-static int parse_uint(const char *s, long min, long max, long *out);
 static __be32 prefix_mask(int prefix);
 static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
     struct mfw_cidr *c, char *err, size_t errlen);
@@ -28,29 +26,6 @@ static int parse_proto(const char *s, __u8 *proto);
 static size_t fmt_addr(const struct mfw_cidr *c, char *buf, size_t len);
 static size_t fmt_port(const struct mfw_port_range *r, char *buf,
     size_t len);
-
-
-static int
-parse_uint(const char *s, long min, long max, long *out)
-{
-    long   v;
-    char  *end;
-
-    if (s == NULL || *s == '\0') {
-        return -1;
-    }
-
-    errno = 0;
-    v = strtol(s, &end, 10);
-
-    if (errno != 0 || *end != '\0' || v < min || v > max) {
-        return -1;
-    }
-
-    *out = v;
-
-    return 0;
-}
 
 
 int
@@ -104,12 +79,12 @@ static int
 parse_addr(int argc, char **argv, int *i, int bare_host_ok,
     struct mfw_cidr *c, char *err, size_t errlen)
 {
-    int          pfx;
-    long         p;
-    __be32       a, w;
-    size_t       n;
-    const char  *slash, *tok;
-    char         ip[INET_ADDRSTRLEN];
+    int                  pfx;
+    __be32               a, w;
+    size_t               n;
+    const char          *slash, *tok;
+    unsigned long long   p;
+    char                 ip[INET_ADDRSTRLEN];
 
     memset(c, 0, sizeof(*c));
 
@@ -148,7 +123,7 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         ip[n] = '\0';
 
         if (mfw_parse_ipv4(ip, &a) != 0
-            || parse_uint(slash + 1, 0, 32, &p) != 0)
+            || sw_conf_uint(slash + 1, 0, 32, &p) != 0)
         {
             return sw_fail(err, errlen, "bad CIDR '%s'", tok);
         }
@@ -197,8 +172,8 @@ static int
 parse_port(int argc, char **argv, int *i, int ports_ok,
     struct mfw_port_range *r, char *err, size_t errlen)
 {
-    long         a, b;
-    const char  *op;
+    const char          *op;
+    unsigned long long   a, b;
 
     r->min = 0;
     r->max = 0;
@@ -218,8 +193,8 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
 
     if (strcmp(op, "range") == 0) {
         if (*i + 2 >= argc
-            || parse_uint(argv[*i + 1], 1, 65535, &a) != 0
-            || parse_uint(argv[*i + 2], 1, 65535, &b) != 0
+            || sw_conf_uint(argv[*i + 1], 1, 65535, &a) != 0
+            || sw_conf_uint(argv[*i + 2], 1, 65535, &b) != 0
             || a > b)
         {
             return sw_fail(err, errlen,
@@ -229,7 +204,7 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
         *i += 3;
 
     } else {
-        if (*i + 1 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a) != 0) {
+        if (*i + 1 >= argc || sw_conf_uint(argv[*i + 1], 1, 65535, &a) != 0) {
             return sw_fail(err, errlen, "'%s' needs a port 1-65535", op);
         }
 
@@ -265,7 +240,7 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
 static int
 parse_proto(const char *s, __u8 *proto)
 {
-    long  v;
+    unsigned long long  v;
 
     if (strcmp(s, "ip") == 0) {
         *proto = MFW_PROTO_ANY;
@@ -279,7 +254,7 @@ parse_proto(const char *s, __u8 *proto)
     } else if (strcmp(s, "icmp") == 0) {
         *proto = MFW_PROTO_ICMP;
 
-    } else if (parse_uint(s, 0, 255, &v) == 0) {
+    } else if (sw_conf_uint(s, 0, 255, &v) == 0) {
         *proto = (__u8) v;
 
     } else {
@@ -294,8 +269,8 @@ int
 mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     size_t errlen)
 {
-    int   i, ports_ok, rc;
-    long  acl, seq;
+    int                  i, ports_ok, rc;
+    unsigned long long   acl, seq;
 
     memset(out, 0, sizeof(*out));
 
@@ -306,13 +281,13 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     i = 0;
     seq = 0;
 
-    if (parse_uint(argv[i++], 1, 199, &acl) != 0) {
+    if (sw_conf_uint(argv[i++], 1, 199, &acl) != 0) {
         return sw_fail(err, errlen, "list number must be 1-99 (standard) or "
                        "100-199 (extended)");
     }
 
     if (strcmp(argv[i], "permit") != 0 && strcmp(argv[i], "deny") != 0) {
-        if (parse_uint(argv[i], 1, 65535, &seq) != 0) {
+        if (sw_conf_uint(argv[i], 1, 65535, &seq) != 0) {
             return sw_fail(err, errlen, "expected permit|deny or a sequence "
                            "number 1-65535, got '%s'", argv[i]);
         }

@@ -10,7 +10,8 @@
 
 #include "mfw_policy.h"
 
-#include <errno.h>
+#include <sw/conf.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,6 @@ typedef struct {
 
 
 static int fail(char *err, size_t len, int line, const char *fmt, ...);
-static int parse_num(const char *s, long min, long max, long *out);
 static int valid_ifname(const char *s);
 static int parse_acl(struct mfw_policy *p, int argc, char **argv, int line,
     char *err, size_t len);
@@ -66,29 +66,6 @@ fail(char *err, size_t len, int line, const char *fmt, ...)
 }
 
 
-static int
-parse_num(const char *s, long min, long max, long *out)
-{
-    long   v;
-    char  *end;
-
-    if (s == NULL || *s == '\0') {
-        return -1;
-    }
-
-    errno = 0;
-    v = strtol(s, &end, 10);
-
-    if (errno != 0 || *end != '\0' || v < min || v > max) {
-        return -1;
-    }
-
-    *out = v;
-
-    return 0;
-}
-
-
 /* What the kernel accepts as a device name (dev_valid_name). */
 static int
 valid_ifname(const char *s)
@@ -114,17 +91,17 @@ static int
 parse_acl(struct mfw_policy *p, int argc, char **argv, int line, char *err,
     size_t len)
 {
-    int               i;
-    long              seq;
-    struct mfw_rule   r;
-    char              msg[MFW_ERR_LEN];
+    int                  i;
+    struct mfw_rule      r;
+    unsigned long long   seq;
+    char                 msg[MFW_ERR_LEN];
 
     if (argc < 4) {
         return fail(err, len, line,
                     "expected: acl <list> <seq> permit|deny ...");
     }
 
-    if (parse_num(argv[2], 1, 65535, &seq) != 0) {
+    if (sw_conf_uint(argv[2], 1, 65535, &seq) != 0) {
         return fail(err, len, line,
                     "sequence number must be 1-65535, got '%s'", argv[2]);
     }
@@ -155,9 +132,9 @@ static int
 parse_bind(struct mfw_policy *p, mfw_bind_lines_t *bl, int argc,
     char **argv, int line, char *err, size_t len)
 {
-    int               i;
-    long              acl;
-    struct mfw_bind  *b;
+    int                  i;
+    struct mfw_bind     *b;
+    unsigned long long   acl;
 
     if (argc != 4) {
         return fail(err, len, line, "expected: bind <interface> in <list>");
@@ -176,7 +153,7 @@ parse_bind(struct mfw_policy *p, mfw_bind_lines_t *bl, int argc,
         return fail(err, len, line, "direction must be 'in'");
     }
 
-    if (parse_num(argv[3], 1, 199, &acl) != 0) {
+    if (sw_conf_uint(argv[3], 1, 199, &acl) != 0) {
         return fail(err, len, line, "list number must be 1-99 (standard) "
                     "or 100-199 (extended)");
     }
@@ -231,13 +208,13 @@ static int
 parse_set(struct mfw_policy *p, int argc, char **argv, int line, char *err,
     size_t len)
 {
-    long  v;
+    unsigned long long  v;
 
     if (argc == 3
         && (strcmp(argv[1], "reply-idle-tcp") == 0
             || strcmp(argv[1], "reply-idle-udp") == 0))
     {
-        if (parse_num(argv[2], 1, MFW_REPLY_IDLE_MAX, &v) != 0) {
+        if (sw_conf_uint(argv[2], 1, MFW_REPLY_IDLE_MAX, &v) != 0) {
             return fail(err, len, line, "%s must be 1-%d seconds", argv[1],
                         MFW_REPLY_IDLE_MAX);
         }
