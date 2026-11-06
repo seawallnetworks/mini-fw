@@ -9,15 +9,15 @@
 
 #include "mfw_policy.h"
 
+#include <sw/fail.h>
+
 #include <arpa/inet.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 
-static int fail(char *err, size_t len, const char *fmt, ...);
 static int parse_uint(const char *s, long min, long max, long *out);
 static __be32 prefix_mask(int prefix);
 static int parse_addr(int argc, char **argv, int *i, int bare_host_ok,
@@ -28,20 +28,6 @@ static int parse_proto(const char *s, __u8 *proto);
 static size_t fmt_addr(const struct mfw_cidr *c, char *buf, size_t len);
 static size_t fmt_port(const struct mfw_port_range *r, char *buf,
     size_t len);
-
-
-/* Puts the message in err and returns -1. */
-static int
-fail(char *err, size_t len, const char *fmt, ...)
-{
-    va_list  ap;
-
-    va_start(ap, fmt);
-    vsnprintf(err, len, fmt, ap);
-    va_end(ap);
-
-    return -1;
-}
 
 
 static int
@@ -129,7 +115,7 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
 
     tok = *i < argc ? argv[*i] : NULL;
     if (tok == NULL) {
-        return fail(err, errlen, "missing address");
+        return sw_fail(err, errlen, "missing address");
     }
 
     if (strcmp(tok, "any") == 0) {
@@ -139,7 +125,7 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
 
     if (strcmp(tok, "host") == 0) {
         if (*i + 1 >= argc || mfw_parse_ipv4(argv[*i + 1], &a) != 0) {
-            return fail(err, errlen, "'host' needs an IPv4 address");
+            return sw_fail(err, errlen, "'host' needs an IPv4 address");
         }
 
         c->addr = a;
@@ -155,7 +141,7 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         n = slash - tok;
 
         if (n >= sizeof(ip)) {
-            return fail(err, errlen, "bad CIDR '%s'", tok);
+            return sw_fail(err, errlen, "bad CIDR '%s'", tok);
         }
 
         memcpy(ip, tok, n);
@@ -164,7 +150,7 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
         if (mfw_parse_ipv4(ip, &a) != 0
             || parse_uint(slash + 1, 0, 32, &p) != 0)
         {
-            return fail(err, errlen, "bad CIDR '%s'", tok);
+            return sw_fail(err, errlen, "bad CIDR '%s'", tok);
         }
 
         c->prefix = (__u8) p;
@@ -175,15 +161,15 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
     }
 
     if (mfw_parse_ipv4(tok, &a) != 0) {
-        return fail(err, errlen, "bad address '%s'", tok);
+        return sw_fail(err, errlen, "bad address '%s'", tok);
     }
 
     if (*i + 1 < argc && mfw_parse_ipv4(argv[*i + 1], &w) == 0) {
         pfx = mfw_wildcard_to_prefix(w);
         if (pfx < 0) {
-            return fail(err, errlen,
-                        "non-contiguous wildcard '%s' not supported",
-                        argv[*i + 1]);
+            return sw_fail(err, errlen,
+                           "non-contiguous wildcard '%s' not supported",
+                           argv[*i + 1]);
         }
 
         c->prefix = (__u8) pfx;
@@ -194,8 +180,8 @@ parse_addr(int argc, char **argv, int *i, int bare_host_ok,
     }
 
     if (!bare_host_ok) {
-        return fail(err, errlen, "'%s' needs a wildcard (or use 'host %s')",
-                    tok, tok);
+        return sw_fail(err, errlen, "'%s' needs a wildcard (or use 'host %s')",
+                       tok, tok);
     }
 
     c->addr = a;
@@ -227,7 +213,7 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
     }
 
     if (!ports_ok) {
-        return fail(err, errlen, "ports are only valid with tcp or udp");
+        return sw_fail(err, errlen, "ports are only valid with tcp or udp");
     }
 
     if (strcmp(op, "range") == 0) {
@@ -236,22 +222,22 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
             || parse_uint(argv[*i + 2], 1, 65535, &b) != 0
             || a > b)
         {
-            return fail(err, errlen,
-                        "'range' needs LO HI with 1 <= LO <= HI <= 65535");
+            return sw_fail(err, errlen,
+                           "'range' needs LO HI with 1 <= LO <= HI <= 65535");
         }
 
         *i += 3;
 
     } else {
         if (*i + 1 >= argc || parse_uint(argv[*i + 1], 1, 65535, &a) != 0) {
-            return fail(err, errlen, "'%s' needs a port 1-65535", op);
+            return sw_fail(err, errlen, "'%s' needs a port 1-65535", op);
         }
 
         b = a;
 
         if (strcmp(op, "gt") == 0) {
             if (a == 65535) {
-                return fail(err, errlen, "'gt 65535' matches nothing");
+                return sw_fail(err, errlen, "'gt 65535' matches nothing");
             }
 
             a = a + 1;
@@ -259,7 +245,7 @@ parse_port(int argc, char **argv, int *i, int ports_ok,
 
         } else if (strcmp(op, "lt") == 0) {
             if (a == 1) {
-                return fail(err, errlen, "'lt 1' matches nothing");
+                return sw_fail(err, errlen, "'lt 1' matches nothing");
             }
 
             b = a - 1;
@@ -314,21 +300,21 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     memset(out, 0, sizeof(*out));
 
     if (argc < 2) {
-        return fail(err, errlen, "expected <list> [seq] permit|deny ...");
+        return sw_fail(err, errlen, "expected <list> [seq] permit|deny ...");
     }
 
     i = 0;
     seq = 0;
 
     if (parse_uint(argv[i++], 1, 199, &acl) != 0) {
-        return fail(err, errlen, "list number must be 1-99 (standard) or "
-                    "100-199 (extended)");
+        return sw_fail(err, errlen, "list number must be 1-99 (standard) or "
+                       "100-199 (extended)");
     }
 
     if (strcmp(argv[i], "permit") != 0 && strcmp(argv[i], "deny") != 0) {
         if (parse_uint(argv[i], 1, 65535, &seq) != 0) {
-            return fail(err, errlen, "expected permit|deny or a sequence "
-                        "number 1-65535, got '%s'", argv[i]);
+            return sw_fail(err, errlen, "expected permit|deny or a sequence "
+                           "number 1-65535, got '%s'", argv[i]);
         }
 
         i++;
@@ -337,7 +323,7 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     if (i >= argc
         || (strcmp(argv[i], "permit") != 0 && strcmp(argv[i], "deny") != 0))
     {
-        return fail(err, errlen, "expected permit|deny");
+        return sw_fail(err, errlen, "expected permit|deny");
     }
 
     out->acl_id = (__u16) acl;
@@ -354,8 +340,8 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
         }
 
         if (i < argc) {
-            return fail(err, errlen, "standard lists (1-99) match source "
-                        "only; unexpected '%s'", argv[i]);
+            return sw_fail(err, errlen, "standard lists (1-99) match source "
+                           "only; unexpected '%s'", argv[i]);
         }
 
         return 0;
@@ -364,12 +350,13 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     out->kind = MFW_ACL_EXTENDED;
 
     if (i >= argc) {
-        return fail(err, errlen, "extended ACE needs a protocol");
+        return sw_fail(err, errlen, "extended ACE needs a protocol");
     }
 
     if (parse_proto(argv[i], &out->proto) != 0) {
-        return fail(err, errlen,
-                    "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)", argv[i]);
+        return sw_fail(err, errlen,
+                       "unknown protocol '%s' (ip|tcp|udp|icmp|0-255)",
+                       argv[i]);
     }
 
     i++;
@@ -398,7 +385,8 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
 
     if (i < argc && strcmp(argv[i], "established") == 0) {
         if (out->proto != MFW_PROTO_TCP) {
-            return fail(err, errlen, "'established' is only valid with tcp");
+            return sw_fail(err, errlen,
+                           "'established' is only valid with tcp");
         }
 
         out->flags |= MFW_RULE_F_ESTABLISHED;
@@ -406,7 +394,8 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
 
     } else if (i < argc && strcmp(argv[i], "reply") == 0) {
         if (out->proto != MFW_PROTO_TCP && out->proto != MFW_PROTO_UDP) {
-            return fail(err, errlen, "'reply' is only valid with tcp or udp");
+            return sw_fail(err, errlen,
+                           "'reply' is only valid with tcp or udp");
         }
 
         out->flags |= MFW_RULE_F_REPLY;
@@ -414,7 +403,7 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     }
 
     if (i < argc) {
-        return fail(err, errlen, "unexpected '%s'", argv[i]);
+        return sw_fail(err, errlen, "unexpected '%s'", argv[i]);
     }
 
     return 0;
@@ -430,7 +419,7 @@ mfw_parse_ace_line(const char *line, struct mfw_rule *out, char *err,
     char  *argv[32], buf[256];
 
     if (strlen(line) >= sizeof(buf)) {
-        return fail(err, errlen, "ACE too long");
+        return sw_fail(err, errlen, "ACE too long");
     }
 
     snprintf(buf, sizeof(buf), "%s", line);
@@ -443,7 +432,7 @@ mfw_parse_ace_line(const char *line, struct mfw_rule *out, char *err,
          t = strtok_r(NULL, " \t", &save))
     {
         if (argc == 32) {
-            return fail(err, errlen, "too many words");
+            return sw_fail(err, errlen, "too many words");
         }
 
         argv[argc++] = t;
