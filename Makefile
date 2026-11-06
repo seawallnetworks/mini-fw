@@ -39,7 +39,7 @@ LIBBPF     := $(patsubst -lbpf,-l:libbpf.a,$(patsubst -lxdp,-l:libxdp.a, \
               $(or $(shell pkg-config --static --libs libxdp 2>/dev/null), \
               -lxdp -lbpf -lelf -lz)))
 
-LIB_OBJS   := build/acl_parse.o build/policy.o build/client.o
+LIB_OBJS   := build/acl_parse.o build/policy.o build/mfwd_proto.o
 MFWD_OBJS  := build/mfwd.o build/dataplane.o build/dp_xdp.o build/dp_tc.o
 HEADERS    := include/mfw.h include/mfw_policy.h include/mfw_client.h
 

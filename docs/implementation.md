@@ -109,7 +109,7 @@ include/mfw_client.h   libmfw: the mfwd client
 src/bpf/mfw.bpf.c      XDP and TC ingress program: libpkt's status to a verdict, standard + extended matching
 src/acl_parse.c        libmfw: Cisco ACE parser and formatter
 src/policy.c           libmfw: whole policies
-src/client.c           libmfw: socket client
+src/mfwd_proto.c       libmfw: mfwd protocol, request side
 src/mfwd.c             the daemon: socket, requests, saved policy
 src/dataplane.c/.h     mfwd's BPF side: load, pins, purge, attach/detach, rulesets, counters
 src/dp_attach.h        the hooks, for dataplane.c: XDP (dp_xdp.c) and TC (dp_tc.c)
