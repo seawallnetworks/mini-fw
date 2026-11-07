@@ -37,7 +37,7 @@ typedef struct {
 
 static int recv_all(int fd, char **out);
 static int parse_err(const char *reply, char *err, size_t errlen);
-static int simple(const mfw_client_t *c, const char *req, char **reply,
+static int request_line(const mfw_client_t *c, const char *req, char **reply,
     char **fields);
 static int field(const char *fields, const char *key, char *out,
     size_t len);
@@ -260,11 +260,13 @@ mfw_request(const mfw_client_t *c, const char *request, char **reply,
 
 
 /*
- * A one-line request whose reply is a single line; *fields points just
- * after "OK" (at "" or at the fields), inside *reply.
+ * Send a one-line request through mfw_request() and check the reply is a
+ * single line; *fields points just after "OK" (at "" or at the fields),
+ * inside *reply.
  */
 static int
-simple(const mfw_client_t *c, const char *req, char **reply, char **fields)
+request_line(const mfw_client_t *c, const char *req, char **reply,
+    char **fields)
 {
     int    rc;
     char  *nl;
@@ -295,7 +297,7 @@ mfw_ping(const mfw_client_t *c)
     int    rc;
     char  *fields, *reply;
 
-    rc = simple(c, "PING\n", &reply, &fields);
+    rc = request_line(c, "PING\n", &reply, &fields);
 
     if (rc == mfw_ok && *fields != '\0') {
         rc = mfw_err_reply;
@@ -426,7 +428,7 @@ mfw_status(const mfw_client_t *c, struct mfw_status *st)
     char  *fields, *reply;
     char   frag[4], gen[16];
 
-    rc = simple(c, "STATUS\n", &reply, &fields);
+    rc = request_line(c, "STATUS\n", &reply, &fields);
     if (rc != 0) {
         return rc;
     }
@@ -464,7 +466,7 @@ mfw_stats(const mfw_client_t *c, __u64 counters[MFW_STAT_MAX])
     char  *fields, *reply;
     char   v[24];
 
-    rc = simple(c, "STATS\n", &reply, &fields);
+    rc = request_line(c, "STATS\n", &reply, &fields);
     if (rc != 0) {
         return rc;
     }
