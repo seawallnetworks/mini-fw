@@ -879,7 +879,7 @@ main(int argc, char **argv)
      * refuses this one before it touches the pins. A client that connects
      * while the policy is restored waits for it.
      */
-    fd = sw_sock_listen(sock, mode, group, err, sizeof(err));
+    fd = sw_sock_listen_unix(sock, mode, group, err, sizeof(err));
     if (fd < 0) {
         sw_log_err("%s", err);
         return 1;

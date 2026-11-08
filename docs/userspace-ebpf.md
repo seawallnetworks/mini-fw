@@ -237,7 +237,7 @@ Every mfwd start purges and rebuilds, and an exit removes nothing; only `mfwd -P
 
 ```
 mfwd starts
-  sw_sock_listen()            ← take the socket first: a second mfwd can't touch the pins
+  sw_sock_listen_unix()       ← take the socket first: a second mfwd can't touch the pins
   mfw_dp_purge()              ← detach by the attach/ pins, then unpin attach/ and maps/
                                 (an interface that can't be looked up → stop, keep the pins)
   mfw_dp_open()               ← load the TC entry; the maps are made anew and pinned

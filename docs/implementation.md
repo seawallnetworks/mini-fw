@@ -408,7 +408,7 @@ installed release of mini-fw.
 ### 5.1 Start
 
 0. **Listen** on the socket (default `0600`; `-m`, `-g`), with libsw's
-   `sw_sock_listen()` (Seawall proposal 0011 §4), before anything else: a
+   `sw_sock_listen_unix()` (Seawall proposal 0011 §4), before anything else: a
    socket another mfwd answers on, a path that isn't a socket, or a group
    not in `/etc/group` refuses the start before the pins are touched. It
    binds under `umask(0177)` and sets the group and mode before

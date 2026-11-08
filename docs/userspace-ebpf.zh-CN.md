@@ -239,7 +239,7 @@ mfwd 每次启动都清空重建，退出时什么都不拆；只有 `mfwd -P` �
 
 ```
 mfwd 启动
-  sw_sock_listen()            ← 先占住 socket：防止第二个 mfwd 碰 pins
+  sw_sock_listen_unix()       ← 先占住 socket：防止第二个 mfwd 碰 pins
   mfw_dp_purge()              ← 按 attach/ pins 拆除挂载，再 unpin attach/ 和 maps/
                                 （任一接口无法 lookup → 中止，保留 pins，宁可不动）
   mfw_dp_open()               ← load TC 入口，maps 被新建并 pin

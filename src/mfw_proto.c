@@ -223,7 +223,7 @@ mfw_request(const mfw_client_t *c, const char *request, char **reply,
     timeout = c != NULL && c->timeout_ms > 0 ? c->timeout_ms : MFW_TIMEOUT_MS;
 
     /* the timeout bounds connect() too: an mfwd that never accepts */
-    fd = sw_sock_connect(path, timeout, NULL, 0);
+    fd = sw_sock_connect_unix(path, timeout, NULL, 0);
     if (fd < 0) {
         return mfw_err_io;
     }
