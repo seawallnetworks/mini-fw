@@ -15,6 +15,7 @@
 
 #include "mfw_proto.h"
 
+#include <sw/buf.h>
 #include <sw/sock.h>
 
 #include <errno.h>
@@ -103,40 +104,29 @@ mfw_strerror(int rc)
 }
 
 
-/* Reads to EOF into a malloc'd, NUL-terminated buffer. */
+/*
+ * Read the reply up to EOF, at most MFW_REPLY_MAX bytes.
+ *
+ * Returns 0 with the reply, NUL-terminated, in *out for the caller to
+ * free(); or -1 with errno EMSGSIZE (too long), ETIMEDOUT, ENOMEM, or
+ * recv()'s.
+ */
 static int
 recv_all(int fd, char **out)
 {
-    char     *buf, *p;
-    size_t    off, size;
+    int       e;
     ssize_t   n;
+    sw_buf_t  b;
 
-    size = 4096;
-    off = 0;
-
-    buf = malloc(size);
-    if (buf == NULL) {
-        return -1;
-    }
+    /* one byte more, so that a reply of exactly the limit reaches EOF */
+    sw_buf_init(&b, MFW_REPLY_MAX + 1, 0);
 
     for ( ;; ) {
-        if (off + 1 == size) {
-            if (size >= MFW_REPLY_MAX) {
-                errno = EMSGSIZE;
-                goto failed;
-            }
-
-            size *= 2;
-
-            p = realloc(buf, size);
-            if (p == NULL) {
-                goto failed;
-            }
-
-            buf = p;
+        if (b.used == b.size && sw_buf_grow(&b) != 0) {
+            goto failed;
         }
 
-        n = recv(fd, buf + off, size - 1 - off, 0);
+        n = recv(fd, b.data + b.used, b.size - b.used, 0);
 
         if (n < 0 && errno == EINTR) {
             continue;
@@ -154,17 +144,19 @@ recv_all(int fd, char **out)
             break;
         }
 
-        off += n;
+        b.used += n;
     }
 
-    buf[off] = '\0';
-    *out = buf;
+    b.data[b.used] = '\0';
+    *out = b.data;
 
     return 0;
 
 failed:
 
-    free(buf);
+    e = errno;
+    sw_buf_free(&b);
+    errno = e;
 
     return -1;
 }

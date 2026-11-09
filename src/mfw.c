@@ -10,6 +10,8 @@
 #include "mfw_proto.h"
 #include "mfw_policy.h"
 
+#include <sw/buf.h>
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,55 +82,49 @@ usage(FILE *f)
 }
 
 
+/*
+ * Read f to EOF, at most MFW_REQUEST_MAX bytes: more could never fit in
+ * mfwd's request.
+ *
+ * Returns the text, NUL-terminated, for the caller to free(); or NULL
+ * with errno EFBIG (too long), ENOMEM, or the read error's.
+ */
 static char *
 read_all(FILE *f)
 {
-    char    *buf, *p;
-    size_t   n, off, size;
+    int       e;
+    size_t    n;
+    sw_buf_t  b;
 
-    size = 4096;
-    off = 0;
-
-    buf = malloc(size + 1);
-    if (buf == NULL) {
-        return NULL;
-    }
+    /* one byte more, so that a file of exactly the limit reaches EOF */
+    sw_buf_init(&b, MFW_REQUEST_MAX + 1, 0);
 
     for ( ;; ) {
-        n = fread(buf + off, 1, size - off, f);
-        off += n;
+        if (b.used == b.size && sw_buf_grow(&b) != 0) {
+            e = errno == EMSGSIZE ? EFBIG : errno;
+            sw_buf_free(&b);
+            errno = e;
+            return NULL;
+        }
+
+        n = fread(b.data + b.used, 1, b.size - b.used, f);
+        b.used += n;
 
         if (n == 0) {
             break;
         }
-
-        if (off == size) {
-            if (size > MFW_REQUEST_MAX) {
-                errno = EFBIG;
-                free(buf);
-                return NULL;
-            }
-
-            size *= 2;
-
-            p = realloc(buf, size + 1);
-            if (p == NULL) {
-                free(buf);
-                return NULL;
-            }
-
-            buf = p;
-        }
     }
 
     if (ferror(f)) {
-        free(buf);
+        e = errno;
+        sw_buf_free(&b);
+        errno = e;
         return NULL;
     }
 
-    buf[off] = '\0';
+    b.data[b.used] = '\0';
 
-    return buf;
+    return b.data;
 }
 
 

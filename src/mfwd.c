@@ -43,6 +43,7 @@
 #include "mfw_policy.h"
 
 #include <sw/bpf.h>
+#include <sw/buf.h>
 #include <sw/conf.h>
 #include <sw/file.h>
 #include <sw/log.h>
@@ -577,80 +578,70 @@ handle(mfwd_t *d, char *req, uid_t uid, char **reply)
 
 
 /*
- * Reads one request: a line, or for APPLY every line up to "END".
- * Returns the request (malloc'd), or NULL with a reason in *why. The
- * socket's receive timeout bounds each recv(); the whole request must be
- * in within MFWD_READ_SECS too, or a client sending a byte at a time would
- * hold mfwd, which serves one at a time.
+ * Read one request: a line, or for APPLY every line up to "END".
+ *
+ * - It holds at most MFW_REQUEST_MAX bytes, APPLY block included.
+ * - The socket's receive timeout bounds each recv(); the whole request
+ *   must be in within MFWD_READ_SECS too, or a client sending a byte at
+ *   a time would hold mfwd, which serves one at a time.
+ *
+ * Returns the request, NUL-terminated after its last "\n", for the
+ * caller to free(); or NULL with the reason in *why.
  */
 static char *
 read_request(int fd, const char **why)
 {
     int               apply;
-    char             *buf, *nl, *p;
-    size_t            len, off, pos, size;
-    ssize_t           n;
+    char             *nl;
+    size_t            len, pos;
     time_t            deadline;
+    ssize_t           n;
+    sw_buf_t          b;
     struct timespec   now;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     deadline = now.tv_sec + MFWD_READ_SECS;
 
-    size = 4096;
-    off = 0;
+    sw_buf_init(&b, MFW_REQUEST_MAX, 0);
     pos = 0;
     apply = -1;  /* unknown until the first line is in */
 
     *why = "out of memory";
 
-    buf = malloc(size);
-    if (buf == NULL) {
-        return NULL;
-    }
-
     for ( ;; ) {
         /* complete lines from pos on */
-        while ((nl = memchr(buf + pos, '\n', off - pos)) != NULL) {
-            len = nl - (buf + pos);
+        while (b.used > pos
+               && (nl = memchr(b.data + pos, '\n', b.used - pos)) != NULL)
+        {
+            len = nl - (b.data + pos);
 
             if (apply < 0) {
-                apply = len == 5 && memcmp(buf, "APPLY", 5) == 0;
+                apply = len == 5 && memcmp(b.data, "APPLY", 5) == 0;
             }
 
             if (!apply
-                || (pos > 0 && len == 3 && memcmp(buf + pos, "END", 3) == 0))
+                || (pos > 0 && len == 3
+                    && memcmp(b.data + pos, "END", 3) == 0))
             {
+                /* at most data[used], sw_buf_t's spare byte */
                 nl[1] = '\0';
-                return buf;
+                return b.data;
             }
 
-            if (memchr(buf + pos, '\0', len) != NULL) {
+            if (memchr(b.data + pos, '\0', len) != NULL) {
                 *why = "NUL byte in request";
                 goto failed;
             }
 
-            pos = nl + 1 - buf;
+            pos = nl + 1 - b.data;
         }
 
-        if (off + 1 >= size) {
-            /* the buffer holds at most MFW_REQUEST_MAX bytes */
-            if (size > MFW_REQUEST_MAX) {
+        if (b.used == b.size && sw_buf_grow(&b) != 0) {
+            if (errno == EMSGSIZE) {
                 *why = "request too long";
-                goto failed;
             }
 
-            size *= 2;
-
-            if (size > MFW_REQUEST_MAX + 1) {
-                size = MFW_REQUEST_MAX + 1;
-            }
-
-            p = realloc(buf, size + 1);
-            if (p == NULL) {
-                goto failed;
-            }
-
-            buf = p;
+            goto failed;
         }
 
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -660,7 +651,7 @@ read_request(int fd, const char **why)
             goto failed;
         }
 
-        n = recv(fd, buf + off, size - 1 - off, 0);
+        n = recv(fd, b.data + b.used, b.size - b.used, 0);
 
         if (n < 0 && errno == EINTR && !mfwd_stop) {
             continue;
@@ -672,12 +663,12 @@ read_request(int fd, const char **why)
             goto failed;
         }
 
-        off += n;
+        b.used += n;
     }
 
 failed:
 
-    free(buf);
+    sw_buf_free(&b);
 
     return NULL;
 }
