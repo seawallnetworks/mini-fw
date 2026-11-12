@@ -537,11 +537,11 @@ now_ns(void)
 
 /*
  * A flow the host opened, as sw_flowd records it: to raddr:rport from
- * lport, last out ago_s seconds ago.
+ * lport, last out ago_s seconds ago, in the close state state.
  */
 static void
-flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
-    __u16 lport, __u64 ago_s)
+flow_add_state(int table, __u8 proto, const char *raddr, __u16 rport,
+    __u16 lport, __u64 ago_s, __u64 state)
 {
     __be32               a;
     struct sf_flow       f = {};
@@ -555,12 +555,22 @@ flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
     a = inet_addr(raddr);
     memcpy(k.raddr, &a, 4);
 
-    f.last_seen = now_ns() - ago_s * 1000000000ULL;
+    f.last_seen = ((now_ns() - ago_s * 1000000000ULL) & ~SF_STATE_MASK)
+                  | state;
 
     if (bpf_map_update_elem(table, &k, &f, BPF_ANY) != 0) {
         perror("flow_add");
         mfw_failures++;
     }
+}
+
+
+/* an open flow: flow_add_state()'s */
+static void
+flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
+    __u16 lport, __u64 ago_s)
+{
+    flow_add_state(table, proto, raddr, rport, lport, ago_s, SF_STATE_OPEN);
 }
 
 
@@ -625,6 +635,34 @@ test_reply(void)
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_UDP,
                      .sport = 443, .dport = 40000)
               == TC_ACT_SHOT, "UDP doesn't match a TCP flow");
+
+    /* UDP is a reply only to a port in the ephemeral range */
+    flow_add(table, IPPROTO_UDP, "8.8.8.8", 53, 1000, 0);
+    mfw_check(mfw_tc(.src = "8.8.8.8", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 53, .dport = 1000)
+              == TC_ACT_SHOT, "UDP to a port outside the range");
+
+    /* a flow the host closed: SF_FIN_NS after a FIN, SF_RST_NS after RST */
+    flow_add_state(table, IPPROTO_TCP, "1.1.1.4", 443, 40010, 60,
+                   SF_STATE_FIN);
+    flow_add_state(table, IPPROTO_TCP, "1.1.1.4", 443, 40011, 130,
+                   SF_STATE_FIN);
+    flow_add_state(table, IPPROTO_TCP, "1.1.1.4", 443, 40012, 5,
+                   SF_STATE_RST);
+    flow_add_state(table, IPPROTO_TCP, "1.1.1.4", 443, 40013, 15,
+                   SF_STATE_RST);
+    mfw_check(mfw_tc(.src = "1.1.1.4", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40010, .tcp_flags = 0x11)
+              == TC_ACT_UNSPEC, "60 s after the host's FIN");
+    mfw_check(mfw_tc(.src = "1.1.1.4", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40011, .tcp_flags = 0x10)
+              == TC_ACT_SHOT, "130 s after it");
+    mfw_check(mfw_tc(.src = "1.1.1.4", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40012, .tcp_flags = 0x10)
+              == TC_ACT_UNSPEC, "5 s after the host's RST");
+    mfw_check(mfw_tc(.src = "1.1.1.4", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40013, .tcp_flags = 0x10)
+              == TC_ACT_SHOT, "15 s after it");
 
     /* the ACE's other fields still apply: the lookup is last */
     reset();
@@ -858,6 +896,23 @@ main(void)
     {
         perror("flow table");
         return 1;
+    }
+
+    /* and its config: the default ephemeral range */
+    {
+        int               zero = 0, cfd;
+        struct sf_config  c = { .port_lo = 32768, .port_hi = 60999 };
+
+        cfd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "config", sizeof(__u32),
+                             sizeof(struct sf_config), 1, NULL);
+
+        if (cfd < 0
+            || bpf_map_update_elem(cfd, &zero, &c, BPF_ANY) != 0
+            || bpf_map__reuse_fd(mfw_skel->maps.flows_config, cfd) != 0)
+        {
+            perror("flow config");
+            return 1;
+        }
     }
 
     if (mfw_bpf__load(mfw_skel) != 0) {

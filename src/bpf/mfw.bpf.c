@@ -17,7 +17,7 @@
  * a failure mode. Non-IPv4 always passes. No conntrack of its own: return
  * traffic is permitted explicitly, with "established", or with "reply":
  * a reply to a flow the host opened, in sw_flowd's table (Seawall
- * proposal 0009). Without the table, "reply" matches nothing.
+ * proposal 0015). Without the table, "reply" matches nothing.
  *
  * Two entries share mfw_judge(): mfw_xdp, run by libxdp's dispatcher after
  * a DDoS gate such as voidgate, and mfw_tc, at TC ingress when another
@@ -131,9 +131,10 @@ struct {
 
 
 /*
- * sw_flowd's table (Seawall proposal 0009): mfwd binds its pinned map
- * here before the load (bpf_map__reuse_fd), with sw_flowd's size. Without
- * it, this is a map of mini-fw's own that stays empty: no reply.
+ * sw_flowd's table and its config (Seawall proposal 0015): mfwd binds
+ * their pinned maps here before the load (bpf_map__reuse_fd), the table
+ * with sw_flowd's size. Without them, these are maps of mini-fw's own
+ * that stay empty: no reply.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -141,6 +142,14 @@ struct {
     __type(key, struct sf_flow_key);
     __type(value, struct sf_flow);
 } flows SEC(".maps");
+
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct sf_config);
+} flows_config SEC(".maps");
 
 
 /*
@@ -226,32 +235,22 @@ port_in_range(__u16 port, const struct mfw_port_range *r)
 
 
 /*
- * Is p a reply to a flow the host opened: one sw_flowd recorded leaving
- * within the ACE's idle limit? A TCP reply has ACK or RST, as after the
- * host's SYN; mfw_ext_ace_match() only asks for TCP and UDP. The clock
- * is sw_flowd's, the coarse one: to the last tick, which is all an idle
- * limit in seconds needs, and never behind the last_seen it wrote.
+ * Is p a reply to a flow the host opened, as sw_flowd's sf_is_reply()
+ * defines one (Seawall proposal 0015 §2), within the ACE's idle limit?
+ * mfw_ext_ace_match() only asks for TCP and UDP: TCP with ACK or RST, UDP
+ * to a port in the ephemeral range, of a flow sw_flowd recorded, closed
+ * by the host no longer than SF_FIN_NS or SF_RST_NS ago. sf_is_reply()
+ * takes no packet pointer, so this global function can call it.
  */
 static __always_inline int
 is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
 {
-    __u64  seen;
+    struct sf_idle  idle;
 
-    if (p->l4_proto == IPPROTO_TCP
-        && !(p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)))
-    {
-        return 0;
-    }
+    idle.tcp_ns = r->reply_idle * MFW_NSEC_PER_SEC;
+    idle.udp_ns = idle.tcp_ns;
 
-    seen = sf_flow_seen(&flows, SF_FAMILY_V4, p->l4_proto, p->addr_src,
-                        bpf_ntohs(p->sport), bpf_ntohs(p->dport));
-
-    if (seen == 0) {
-        return 0;
-    }
-
-    return bpf_ktime_get_coarse_ns() - seen
-           < r->reply_idle * MFW_NSEC_PER_SEC;
+    return sf_is_reply(&flows, &flows_config, p, &idle) == SF_REPLY;
 }
 
 

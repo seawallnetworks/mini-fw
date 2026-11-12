@@ -75,7 +75,9 @@ src/mfw.skel.h: build/mfw.bpf.o
 build/%.o: src/%.c | build $(LIBSW_A)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/dataplane.o: CFLAGS += -I$(SW_FLOWD_PREFIX)/include
+# SW_FLOWD_PREFIX's header before the stack prefix's in CFLAGS, which
+# holds an installed sw_flowd.h too
+build/dataplane.o: CFLAGS := -I$(SW_FLOWD_PREFIX)/include $(CFLAGS)
 build/dataplane.o: $(SW_FLOWD_H)
 
 # the skeleton embeds the BPF object
@@ -98,7 +100,7 @@ tests/test_policy: tests/test_policy.c libmfw.a $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $< libmfw.a $(LIBSW_A)
 
 tests/test_bpf: tests/test_bpf.c src/mfw.skel.h libmfw.a $(LIBSW_A)
-	$(CC) $(CFLAGS) -I$(SW_FLOWD_PREFIX)/include -o $@ $< libmfw.a \
+	$(CC) -I$(SW_FLOWD_PREFIX)/include $(CFLAGS) -o $@ $< libmfw.a \
 	    $(LIBSW_A) $(LIBBPF)
 
 # no privileges needed

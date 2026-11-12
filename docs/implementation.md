@@ -235,11 +235,15 @@ other field is ignored, so a standard ACE applies to all IPv4 protocols.
    `sport` and `dport` are in range; `(0,0)` means any. If the ACE has
    `established`, the TCP flags must include ACK or RST. Every packet that
    reaches the extended list has its ports: non-first fragments never get
-   here. If the ACE has `reply`, checked last: the packet, TCP with ACK or
-   RST or UDP, must be in sw_flowd's table as `{AF_INET, proto, saddr,
-   sport, dport}` (`struct sf_flow_key`), and its flow's `last_seen` within
-   the ACE's `reply_idle` of now: `mfw_policy_compile()` puts the
-   policy's `reply-idle-tcp` or `reply-idle-udp` there. Without
+   here. If the ACE has `reply`, checked last: sw_flowd's `sf_is_reply()`
+   (Seawall proposal 0015 §2) must call the packet a reply: TCP with ACK
+   or RST, or UDP to a port in the ephemeral range of sw_flowd's config,
+   in sw_flowd's table as `{AF_INET, proto, saddr, sport, dport}` (`struct
+   sf_flow_key`), its flow's time within the ACE's `reply_idle` of now,
+   or within 120 s of the host's FIN or 10 s of its RST:
+   `mfw_policy_compile()` puts the policy's `reply-idle-tcp` or
+   `reply-idle-udp` there. `sf_is_reply()` takes no packet pointer, so
+   `mfw_ext_ace_match()`, a global function, can call it. Without
    sw_flowd's table, `flows` is an empty map of the program's own, and
    matches nothing.
 4. For ICMP and other protocols, port fields and flags are ignored.
@@ -337,11 +341,13 @@ Everything one interface enforces, compiled from its bindings:
 | `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | mfw_tc | mfwd |
 | `flows` (sw_flowd's `outbound`) | LRU_HASH | `sf_flow_key` → `sf_flow` | sw_flowd's | sw_flowd | mfw_tc |
 
-`flows` is sw_flowd's pinned table, `/sys/fs/bpf/seawall/flows/outbound`
-(Seawall proposal 0009), not one of mini-fw's pins. sw_flowd starts
-first: mfwd opens the pin when it starts, refuses a table whose type, key
-or value size is not `sw_flowd.h`'s, and binds it to every program it
-loads, the TC entry and each XDP copy, with `bpf_map__reuse_fd()`. An
+`flows` and `flows_config` are sw_flowd's pinned table and config,
+`/sys/fs/bpf/seawall/flows/outbound` and `config` (Seawall proposal
+0015), not mini-fw's pins. sw_flowd starts first: mfwd opens both pins
+when it starts, refuses maps whose type, key or value size is not
+`sw_flowd.h`'s, and a table without its config, and binds both to every
+program it loads, the TC entry and each XDP copy, with
+`bpf_map__reuse_fd()`. An
 mfwd started without it warns; its programs get an empty map of their
 own, and `reply` matches nothing until an mfwd started with the table
 replaces them (§5.1). The programs hold the table, so a restart of
@@ -797,7 +803,7 @@ Notes:
 | Hooks | XDP + TC ingress + TC egress | XDP in libxdp's dispatcher, or TC ingress (tcx) where another program holds XDP | Local VM only, no egress. The dispatcher shares the XDP hook with the DDoS gate (voidgate), first |
 | Extended list | TC ingress and egress | TC ingress, after the standard list | A stateless match needs only headers |
 | Egress | TC egress, local-out policy, `access-group out` | none; `out` rejected | Egress is out of scope |
-| Conntrack | Cilium-style, TC | none; `reply` reads sw_flowd's table of the host's flows | Seawall proposal 0009: one egress table shared with voidgate; `established` without it |
+| Conntrack | Cilium-style, TC | none; `reply` reads sw_flowd's table of the host's flows | Seawall proposal 0015: one egress table shared with voidgate; `established` without it |
 | Fragment tracking | Cilium-style port recovery, TC | none; non-first fragments skip the extended list (§8.2), TCP offset 1 dropped | Enough for local traffic; recovery deferred |
 | Control plane | CLI loader compiling ACEs into the maps per command | mfwd daemon, whole-policy `APPLY` over a socket; `mfw` is a client | One writer; whole-policy checks; front ends (sw_configd) link `libmfw` |
 | ACL definitions | not specified (examples define lists before attach) | in the policy; mfwd saves the applied one in `/run/mfwd/policy` | The front end (or a policy file) is the source of truth |

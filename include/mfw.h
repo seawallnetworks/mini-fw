@@ -9,7 +9,7 @@
  * not filtered (local-VM protection only). Each interface has its own
  * ruleset (struct mfw_ruleset), found by the ifindex the packet arrived
  * on. "reply" ACEs look the packet up in sw_flowd's table of the flows the
- * host opened (Seawall proposal 0009); mfw.h itself doesn't need
+ * host opened (Seawall proposal 0015); mfw.h itself doesn't need
  * sw_flowd.h, so front ends build without it.
  */
 

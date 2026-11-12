@@ -30,7 +30,7 @@
 
 
 static int xdp_load(const char *root, const char *ifname, int ifindex,
-    enum xdp_attach_mode mode, int flows_fd);
+    enum xdp_attach_mode mode, int flows_fd, int flows_config_fd);
 
 
 void
@@ -230,12 +230,13 @@ not_found:
  * Load a new copy of mini-fw's XDP program into ifindex's dispatcher, in
  * this mode, and pin it as attach/xdp_<ifname>. libxdp joins the dispatcher
  * there, or makes one. The copy is a new BPF object that shares the
- * pinned maps, and binds sw_flowd's table, flows_fd, unless that is -1;
- * libxdp loads it as an extension of the dispatcher. Returns 0 or -errno.
+ * pinned maps, and binds sw_flowd's table and its config, flows_fd and
+ * flows_config_fd, unless they are -1; libxdp loads it as an extension of
+ * the dispatcher. Returns 0 or -errno.
  */
 static int
 xdp_load(const char *root, const char *ifname, int ifindex,
-    enum xdp_attach_mode mode, int flows_fd)
+    enum xdp_attach_mode mode, int flows_fd, int flows_config_fd)
 {
     char                 maps[PATH_MAX], path[PATH_MAX];
     LIBBPF_OPTS(bpf_object_open_opts, oopts, .pin_root_path = maps);
@@ -253,7 +254,11 @@ xdp_load(const char *root, const char *ifname, int ifindex,
 
     bpf_program__set_autoload(skel->progs.mfw_tc, false);
 
-    if (flows_fd >= 0 && bpf_map__reuse_fd(skel->maps.flows, flows_fd) != 0) {
+    if (flows_fd >= 0
+        && (bpf_map__reuse_fd(skel->maps.flows, flows_fd) != 0
+            || bpf_map__reuse_fd(skel->maps.flows_config,
+                                 flows_config_fd) != 0))
+    {
         e = -errno;
         mfw_bpf__destroy(skel);
         return e;
@@ -312,12 +317,12 @@ done:
  *   so the caller can fall back to TC.
  *
  * Returns 0 when attached, 1 when the hook is held, or -errno
- * (-ENOTSUP if bpffs is not mounted, which libxdp needs). flows_fd is
- * xdp_load()'s.
+ * (-ENOTSUP if bpffs is not mounted, which libxdp needs). flows_fd and
+ * flows_config_fd are xdp_load()'s.
  */
 int
 mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
-    int flows_fd, char *holder, size_t len)
+    int flows_fd, int flows_config_fd, char *holder, size_t len)
 {
     int                   e, i, state;
     enum xdp_attach_mode  mode;
@@ -347,7 +352,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
      */
     for (i = 0; i < 10 && mfw_xdp_unload(ifindex, 0) > 0; i++) { /* void */ }
 
-    e = xdp_load(root, ifname, ifindex, mode, flows_fd);
+    e = xdp_load(root, ifname, ifindex, mode, flows_fd, flows_config_fd);
 
     /*
      * A new dispatcher was tried in native mode: if the driver refused,
@@ -362,7 +367,8 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
         sw_log_warn("%s: native XDP refused: %s; trying skb (generic) mode",
                     ifname, strerror(-e));
 
-        e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd);
+        e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd,
+                     flows_config_fd);
     }
 
     /* another program took the hook after mfw_xdp_state() looked */

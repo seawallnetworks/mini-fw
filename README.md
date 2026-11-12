@@ -15,7 +15,7 @@ gate such as [voidgate](https://github.com/seawallnetworks/voidgate) runs
 first. There is no conntrack or fragment tracking yet (design PR5a–c):
 replies to the host's own connections are matched with `reply`, from
 [sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table of the
-flows the host opened (Seawall proposal 0009).
+flows the host opened (Seawall proposal 0015).
 
 | List | Numbers | Matches | End of list |
 |------|---------|---------|-------------|
@@ -153,9 +153,12 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 - **Outbound traffic always leaves, but its replies are inbound and get
   filtered.** If you bind an extended list, also permit those replies:
   `permit tcp any any reply` and `permit udp any any reply`, with sw_flowd
-  running. `reply` matches only a reply to a flow the host opened, that
-  last left within `reply-idle-tcp` or `reply-idle-udp` seconds, so an
-  ACK flood doesn't pass it. Without sw_flowd when mfwd started, `reply`
+  running. `reply` matches only a reply to a flow the host opened, as
+  sw_flowd's `sf_is_reply()` defines it (Seawall proposal 0015): TCP with
+  ACK or RST, or UDP to a port in the ephemeral range, of a flow that
+  last left within `reply-idle-tcp` or `reply-idle-udp` seconds, and no
+  more than 120 s after the host's FIN or 10 s after its RST, so an ACK
+  flood doesn't pass it. Without sw_flowd when mfwd started, `reply`
   matches nothing (fails closed), and so do connections opened before sw_flowd's first
   start, and flows its full table evicted. `established` (TCP with ACK or
   RST) and source-port ACEs (`permit udp any eq 53 any`) work without it,
@@ -200,11 +203,12 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
 - **`reply` keyword, instead of the design's conntrack.** mini-fw reads
-  sw_flowd's pinned table (Seawall proposal 0009), which records the flows
-  the host opens at TC egress; it never writes it. sw_flowd starts first
-  (`mfwd.service` is `After=` and `Wants=sw_flowd.service`): mfwd opens
-  the table's pin when it starts, and every program it loads binds it
-  (`bpf_map__reuse_fd`). An mfwd started without it warns, and `reply`
+  sw_flowd's pinned table and its config (Seawall proposal 0015), which
+  record the flows the host opens at TC egress and the ephemeral range;
+  it never writes them. sw_flowd starts first (`mfwd.service` is `After=`
+  and `Wants=sw_flowd.service`): mfwd opens both pins when it starts, and
+  every program it loads binds them (`bpf_map__reuse_fd`); a table
+  without its config isn't read. An mfwd started without it warns, and `reply`
   matches nothing until mfwd restarts; a restart of sw_flowd changes
   nothing for mfwd. The idle limits travel in the rules: each compiled
   `reply` ACE holds its protocol's, in `mfw_rule.reply_idle` (the spare

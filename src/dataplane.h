@@ -29,6 +29,7 @@ typedef struct {
     int              config_fd;
     int              stats_fd;
     int              flows_fd;      /* sw_flowd's table, bound at load, or -1 */
+    int              flows_config_fd;   /* and its config, or -1 with it */
     int              tcx;           /* attach with tcx links (6.6+), not
                                      * classic TC */
     int              no_xdp;        /* MFW_NO_XDP: TC only, for tests */

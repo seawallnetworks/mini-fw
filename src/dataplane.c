@@ -12,7 +12,7 @@
  *   maps/stats      per-CPU counters
  *
  * "reply" ACEs look up sw_flowd's table, /sys/fs/bpf/seawall/flows/outbound
- * (Seawall proposal 0009), which every program mfwd loads binds at load:
+ * (Seawall proposal 0015), which every program mfwd loads binds at load:
  * sw_flowd starts first. Without it, a program gets an empty map of its
  * own, and keeps it until an mfwd started with the table replaces it.
  *
@@ -78,7 +78,7 @@ static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
 static int init_config(int config_fd, char *err, size_t len);
 static int detach_pinned(const char *root, char *err, size_t errlen);
-static int flow_table_open(void);
+static int flow_table_open(int *config_fd);
 
 
 int
@@ -215,6 +215,7 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
     dp->config_fd = -1;
     dp->stats_fd = -1;
     dp->flows_fd = -1;
+    dp->flows_config_fd = -1;
 
     dp->root = MFW_PIN_PATH;
 
@@ -241,10 +242,12 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
         return sw_fail(err, errlen, "open BPF object: %s", strerror(errno));
     }
 
-    dp->flows_fd = flow_table_open();
+    dp->flows_fd = flow_table_open(&dp->flows_config_fd);
 
     if (dp->flows_fd >= 0
-        && bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0)
+        && (bpf_map__reuse_fd(dp->skel->maps.flows, dp->flows_fd) != 0
+            || bpf_map__reuse_fd(dp->skel->maps.flows_config,
+                                 dp->flows_config_fd) != 0))
     {
         sw_fail(err, errlen, "bind sw_flowd's flow table: %s",
                 strerror(errno));
@@ -297,6 +300,11 @@ mfw_dp_close(mfw_dp_t *dp)
         close(dp->flows_fd);
         dp->flows_fd = -1;
     }
+
+    if (dp->flows_config_fd >= 0) {
+        close(dp->flows_config_fd);
+        dp->flows_config_fd = -1;
+    }
 }
 
 
@@ -321,8 +329,8 @@ mfw_dp_attach(mfw_dp_t *dp, const char *ifname, char *err,
     }
 
     if (!dp->no_xdp) {
-        e = mfw_xdp_attach(dp->root, ifname, ifindex, dp->flows_fd, holder,
-                           sizeof(holder));
+        e = mfw_xdp_attach(dp->root, ifname, ifindex, dp->flows_fd,
+                           dp->flows_config_fd, holder, sizeof(holder));
 
         if (e == 0) {
             return 0;
@@ -482,20 +490,34 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
 
 
 /*
- * sw_flowd's flow table, for every program this mfwd loads to bind.
- * sf_outbound_open() refuses one of another layout, a sw_flowd built from
- * another sw_flowd.h than mini-fw was. Without it, "reply" ACEs match
- * nothing until mfwd restarts with the right one. Returns its fd, or
- * -errno (the reason logged).
+ * sw_flowd's flow table and its config, for every program this mfwd
+ * loads to bind: both, or neither. sf_outbound_open() and
+ * sf_config_open() refuse maps of another layout, a sw_flowd built from
+ * another sw_flowd.h than mini-fw was. Without them, "reply" ACEs match
+ * nothing until mfwd restarts with the right ones. Returns the table's
+ * fd, the config's in *config_fd, or -errno (the reason logged).
  */
 static int
-flow_table_open(void)
+flow_table_open(int *config_fd)
 {
-    int    fd;
+    int    fd, cfd;
     __u32  size;
 
+    *config_fd = -1;
     size = 0;
     fd = sf_outbound_open(&size);
+
+    if (fd >= 0) {
+        cfd = sf_config_open();
+
+        if (cfd < 0) {
+            close(fd);
+            fd = cfd;
+
+        } else {
+            *config_fd = cfd;
+        }
+    }
 
     if (fd == -ENOENT) {
         sw_log_warn("no sw_flowd flow table under %s: \"reply\" ACEs match "

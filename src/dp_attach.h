@@ -31,7 +31,7 @@ int mfw_xdp_unload(int ifindex, __u32 id);
 __u32 mfw_xdp_pinned_id(const char *path);
 int mfw_xdp_attached(const char *root, const char *ifname);
 int mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
-    int flows_fd, char *holder, size_t len);
+    int flows_fd, int flows_config_fd, char *holder, size_t len);
 void mfw_xdp_detach(const char *root, const char *ifname);
 
 int mfw_tc_attach(int ifindex, int prog_fd);

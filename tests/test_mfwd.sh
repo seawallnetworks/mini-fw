@@ -353,6 +353,12 @@ bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 \
     entries 1024 name outbound
 sleep 1.5
 same "a table that comes later is not picked up" "$(field flows)" none
+# the table and its config, both or neither
+stop
+start
+same "a table without its config is not read" "$(field flows)" none
+bpftool map create "$FLOWS/config" type array key 4 value 4 \
+    entries 1 name config
 stop
 start
 same "flows: sw_flowd after a restart" "$(field flows)" sw_flowd
