@@ -356,8 +356,11 @@ map_id() {
     bpftool -j map show pinned "$1" \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])'
 }
-logged "log: no table" 'no sw_flowd flow table'
+logged "log: no table, at crit" '\[CRIT\] no sw_flowd flow table'
 same "flows: none" "$(field flows)" none
+# a broken install: mfw status says so first (Seawall proposal 0015 §6)
+same "status: CRITICAL first" "$(mfw status | head -1 | cut -d' ' -f1)" \
+    CRITICAL:
 same "no table: replies fall back to established" "$(no_flow_table)" 1
 mkdir -p "$FLOWS"
 bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 \
@@ -374,6 +377,7 @@ stop
 start
 same "flows: sw_flowd after a restart" "$(field flows)" sw_flowd
 same "the table: no fallback" "$(no_flow_table)" 0
+same "the table: no CRITICAL" "$(mfw status | grep -c '^CRITICAL')" 0
 logged "log: reading" "reading sw_flowd's flow table (1024 flows)"
 id=$(map_id "$FLOWS/outbound")
 if [[ -n $id ]]; then

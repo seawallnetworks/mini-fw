@@ -263,14 +263,14 @@ sudo mfw stats
 ```
 
 ```text
-ok: 7 ACEs, 1 interfaces
+ok: 3 ACEs, 1 interfaces
 applied, generation 1
 generation           1
 attached             eth0
 missing              -
 degraded             -
 drop-ipv4-fragments  0
-flows                none
+flows                sw_flowd
 ```
 
 ---
@@ -375,8 +375,10 @@ now an error: replies need no rule.
   reconnect. Once the VM closes a TCP connection, its replies pass for
   120 s more after its FIN, 10 s after a RST.
 - **Without sw_flowd.** mfwd takes sw_flowd's table when it starts, so
-  sw_flowd starts first (the units say so). An mfwd started without it
-  (`mfw status` shows `flows none`) falls back to `established` until it
+  sw_flowd starts first (the units say so). An mfwd started without it,
+  or with a table of another layout, is on a broken install: it logs
+  that at `crit`, `mfw status` starts with a `CRITICAL` line and shows
+  `flows none`, and it falls back to `established` until it
   is restarted: TCP with ACK or RST passes (counter `reply_established`),
   and so does "fragmentation needed", which needs no table; other
   replies, UDP and other ICMP included, need rules (§6.1).
@@ -778,7 +780,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | `saved policy not applied again: …` (mfwd log, at start) | the policy saved before the restart was refused this time, for example an interface's attach failed | fix the cause the log names, then apply the policy again; sw_configd sends its own again by itself. Until then every interface passes everything |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
-| DNS stopped working, web browsing works; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`): replies fell back to `established`, which lets in TCP only | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release. Meanwhile, the §6.1 baseline without sw_flowd |
+| DNS stopped working, web browsing works; `mfw status` starts with `CRITICAL: sw_flowd's flow table not read` and shows `flows none`; the journal has it at `crit` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`): replies fell back to `established`, which lets in TCP only | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release. Meanwhile, the §6.1 baseline without sw_flowd |
 | `apply` refuses a rule ending in `reply` | the keyword is gone: replies pass with no rule | delete the rule |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
 | connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped before mini-fw (a router, a cloud security group), or by a standard-list deny of the router that sends it | let ICMP type 3 code 4 through there; don't blacklist the router (§3.4) |

@@ -65,7 +65,9 @@ usage(FILE *f)
         "\n"
         "  standard ACE (1-99):    permit|deny <addr>\n"
         "  extended ACE (100-199): permit|deny <proto> <addr> [<port>]\n"
-        "                          <addr> [<port>] [established|reply]\n"
+        "                          <addr> [<port>] [established]\n"
+        "  Replies to the host's own flows pass with no ACE, before the\n"
+        "  extended list (sw_flowd records them).\n"
         "    <addr>:  any | host A.B.C.D | A.B.C.D <wildcard> | A.B.C.D/len\n"
         "    <proto>: ip | tcp | udp | icmp | 0-255\n"
         "    <port>:  eq N | range LO HI | gt N | lt N   (tcp/udp only)\n"
@@ -262,6 +264,12 @@ cmd_status(const mfw_client_t *c)
     rc = mfw_status(c, &st);
     if (rc != 0) {
         return failed(rc, NULL);
+    }
+
+    /* a broken install, not a state to run in (Seawall proposal 0015 §6) */
+    if (strcmp(st.flows, "none") == 0) {
+        printf("CRITICAL: sw_flowd's flow table not read: replies fall back "
+               "to \"established\"; start sw_flowd, then restart mfwd\n");
     }
 
     if (st.generation != 0) {

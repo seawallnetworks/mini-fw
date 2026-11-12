@@ -501,8 +501,10 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
  * loads to bind: both, or neither. sf_outbound_open() and
  * sf_config_open() refuse maps of another layout, a sw_flowd built from
  * another sw_flowd.h than mini-fw was. Without them, replies fall back to
- * "established" until mfwd restarts with the right ones. Returns the table's
- * fd, the config's in *config_fd, or -errno (the reason logged).
+ * "established" until mfwd restarts with the right ones: a broken install,
+ * not a state to run in (Seawall proposal 0015 §6), logged at crit.
+ * Returns the table's fd, the config's in *config_fd, or -errno (the
+ * reason logged).
  */
 static int
 flow_table_open(int *config_fd)
@@ -527,17 +529,17 @@ flow_table_open(int *config_fd)
     }
 
     if (fd == -ENOENT) {
-        sw_log_warn("no sw_flowd flow table under %s: replies fall back to "
+        sw_log_crit("no sw_flowd flow table under %s: replies fall back to "
                     "\"established\" until mfwd restarts with it (start "
                     "sw_flowd first)", SF_PIN_ROOT);
 
     } else if (fd == -EPROTO) {
-        sw_log_warn("sw_flowd's flow table under %s is not the layout this "
+        sw_log_crit("sw_flowd's flow table under %s is not the layout this "
                     "mfwd reads: replies fall back to \"established\"",
                     SF_PIN_ROOT);
 
     } else if (fd < 0) {
-        sw_log_warn("sw_flowd's flow table under %s: %s: replies fall back "
+        sw_log_crit("sw_flowd's flow table under %s: %s: replies fall back "
                     "to \"established\"", SF_PIN_ROOT, strerror(-fd));
 
     } else {
