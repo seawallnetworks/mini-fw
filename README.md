@@ -60,10 +60,11 @@ The host's own traffic needs no rule: replies to the flows it opened
 pass before the extended list, ICMP errors about them too, and
 "fragmentation needed" whatever connection it is about, so path MTU
 discovery works for the services the host offers as well. Without
-sw_flowd's table, only TCP with ACK or RST passes so: then permit what
-else the host needs, ICMP included, or a connection whose path has a
-smaller MTU, such as from a VPC's jumbo frames to the internet, hangs on
-the first full-size packet the VM sends.
+sw_flowd's table, only TCP with ACK or RST and "fragmentation needed"
+pass so: then permit what else the host needs, such as DNS's replies.
+"Fragmentation needed" passes in any case: without it, a connection
+whose path has a smaller MTU, such as from a VPC's jumbo frames to the
+internet, hangs on the first full-size packet the VM sends.
 
 mfwd checks all of it first, so a bad line changes nothing. Then it
 attaches every interface that gets a list, swaps in each one's ruleset
@@ -170,8 +171,10 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   `deny ip host 203.0.113.9 any` there still lets that host's replies in.
 - **Without sw_flowd's table** (sw_flowd not running when mfwd started,
   or a table of another layout), replies fall back to `established`: TCP
-  with ACK or RST passes (counter `reply_established`), and UDP goes to
-  the lists, so DNS needs a source-port ACE (`permit udp any eq 53 any`).
+  with ACK or RST passes (counter `reply_established`); "fragmentation
+  needed" about the host's packets still passes, since it needs no table;
+  UDP and other ICMP go to the lists, so DNS needs a source-port ACE
+  (`permit udp any eq 53 any`).
   That is weaker than the table: an ACK flood passes. Connections opened
   before sw_flowd's first start, and flows its full table evicted, are
   dropped unless the extended list permits them.

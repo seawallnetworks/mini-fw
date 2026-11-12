@@ -26,7 +26,7 @@
  * flow's last packet out (default 86400 and 180), echo replies, and ICMP
  * errors about them; the standard list's denies still apply to them.
  * Without sw_flowd's table, TCP with ACK or RST passes, as "established"
- * would. "reply" at the end of an ACE is an error: it is no longer
+ * would, and "fragmentation needed" about the host's packets. "reply" at the end of an ACE is an error: it is no longer
  * needed. '#' starts a comment, to the end of the line; blank
  * lines are ignored. Lists that are not bound are kept but enforce
  * nothing.

@@ -137,7 +137,8 @@ struct mfw_config {
     __u8                   abi_version;          /* MFW_ABI_VERSION */
     /*
      * 1: mfwd started without sw_flowd's table, and replies fall back to
-     * "established": TCP with ACK or RST passes, UDP goes to the lists
+     * "established": TCP with ACK or RST passes, and fragmentation needed,
+     * which needs no table; UDP and other ICMP go to the lists
      */
     __u8                   no_flow_table;
     __u8                   pad0;

@@ -378,7 +378,8 @@ now an error: replies need no rule.
   sw_flowd starts first (the units say so). An mfwd started without it
   (`mfw status` shows `flows none`) falls back to `established` until it
   is restarted: TCP with ACK or RST passes (counter `reply_established`),
-  and other replies, UDP and ICMP included, need rules (§6.1).
+  and so does "fragmentation needed", which needs no table; other
+  replies, UDP and other ICMP included, need rules (§6.1).
   Restarting sw_flowd needs no restart of mfwd; `sw_flowd -P` does.
 - **Connections sw_flowd never saw.** The replies of connections opened
   before sw_flowd first started are dropped unless a rule permits them,
@@ -780,7 +781,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | DNS stopped working, web browsing works; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`): replies fell back to `established`, which lets in TCP only | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release. Meanwhile, the §6.1 baseline without sw_flowd |
 | `apply` refuses a rule ending in `reply` | the keyword is gone: replies pass with no rule | delete the rule |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
-| connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped: without sw_flowd, it needs a rule | start sw_flowd and restart mfwd, or `permit icmp any any` (§3.4) |
+| connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped before mini-fw (a router, a cloud security group), or by a standard-list deny of the router that sends it | let ICMP type 3 code 4 through there; don't blacklist the router (§3.4) |
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |

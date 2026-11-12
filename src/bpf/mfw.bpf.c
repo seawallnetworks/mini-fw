@@ -96,7 +96,9 @@ static __always_inline mfw_match_e match_ext(const struct mfw_ruleset *rs,
     const struct pkt_meta *p);
 
 static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex);
-static __always_inline int reply_checked(__u32 ifindex);
+static __always_inline int is_pmtu_err(const struct pkt_meta *p);
+static __always_inline int reply_checked(__u32 ifindex,
+    const struct pkt_meta *p);
 static __always_inline int mfw_reply(const struct mfw_ruleset *rs,
     const struct pkt_meta *p, void *ctx, int hook);
 static __always_inline mfw_verdict_e mfw_judge(int rc,
@@ -392,19 +394,29 @@ ruleset_of(__u32 ifindex)
 }
 
 
+/* fragmentation needed, ICMP 3/4: mini-fw reads IPv4 only */
+static __always_inline int
+is_pmtu_err(const struct pkt_meta *p)
+{
+    return p->l4_proto == IPPROTO_ICMP && p->icmp_type == 3
+           && p->icmp_code == 4;
+}
+
+
 /*
- * Does mfw_judge() look replies up on ifindex: an extended list bound,
- * and sw_flowd's table read? Else an ICMP error's embedded header isn't
- * read, and mfw_tc doesn't pull it.
+ * Does mfw_judge() read the ICMP error p's embedded header on ifindex: an
+ * extended list bound, and sw_flowd's table read, or, without it, a path
+ * MTU error, which needs no table? Else mfw_tc doesn't pull it.
  */
 static __always_inline int
-reply_checked(__u32 ifindex)
+reply_checked(__u32 ifindex, const struct pkt_meta *p)
 {
     const struct mfw_ruleset  *rs;
 
     rs = ruleset_of(ifindex);
 
-    return rs != NULL && rs->ext_acl != 0 && !cfg_no_flow_table();
+    return rs != NULL && rs->ext_acl != 0
+           && (!cfg_no_flow_table() || is_pmtu_err(p));
 }
 
 
@@ -418,7 +430,10 @@ reply_checked(__u32 ifindex)
  * across a tunnel), and the table holds only the host's own. Without
  * sw_flowd's table, MFW_REPLY_ESTABLISHED for TCP with ACK or RST: the
  * protection "established" gave, weaker than the table's, better than
- * cutting the host off.
+ * cutting the host off; and a path MTU error still passes, since it needs
+ * no flow, only its embedded source to be the host's (the table is then
+ * an empty map of the program's own): without it, a connection over a
+ * path with a smaller MTU hangs.
  */
 static __always_inline int
 mfw_reply(const struct mfw_ruleset *rs, const struct pkt_meta *p, void *ctx,
@@ -427,21 +442,28 @@ mfw_reply(const struct mfw_ruleset *rs, const struct pkt_meta *p, void *ctx,
     int             r;
     struct sf_idle  idle;
 
-    if (cfg_no_flow_table()) {
-        return p->l4_proto == IPPROTO_TCP
-               && (p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST))
-               ? MFW_REPLY_ESTABLISHED : MFW_REPLY_NO;
-    }
-
     idle.tcp_ns = rs->reply_idle_tcp * MFW_NSEC_PER_SEC;
     idle.udp_ns = rs->reply_idle_udp * MFW_NSEC_PER_SEC;
 
-    if (sf_is_reply(&flows, &flows_config, p, &idle) == SF_REPLY) {
-        return MFW_REPLY_YES;
-    }
+    if (cfg_no_flow_table()) {
+        if (p->l4_proto == IPPROTO_TCP
+            && (p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)))
+        {
+            return MFW_REPLY_ESTABLISHED;
+        }
 
-    if (!sf_is_icmp_err(p)) {
-        return MFW_REPLY_NO;
+        if (!is_pmtu_err(p)) {
+            return MFW_REPLY_NO;
+        }
+
+    } else {
+        if (sf_is_reply(&flows, &flows_config, p, &idle) == SF_REPLY) {
+            return MFW_REPLY_YES;
+        }
+
+        if (!sf_is_icmp_err(p)) {
+            return MFW_REPLY_NO;
+        }
     }
 
     if (hook == MFW_HOOK_XDP) {
@@ -654,7 +676,7 @@ mfw_tc(struct __sk_buff *ctx)
      * cloned skb's head: not for errors nothing will read.
      */
     if (rc == PKT_OK && sf_is_icmp_err(&p)
-        && reply_checked(ctx->ingress_ifindex))
+        && reply_checked(ctx->ingress_ifindex, &p))
     {
         want = ctx->len < PKT_ICMP_ERR_MAX ? ctx->len : PKT_ICMP_ERR_MAX;
 

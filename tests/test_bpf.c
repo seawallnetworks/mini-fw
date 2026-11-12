@@ -893,12 +893,25 @@ test_reply(void)
     mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40020, .tcp_flags = 0x02)
               == TC_ACT_SHOT, "no table: a SYN doesn't");
+    /* path MTU errors need no table: they still pass */
     mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
                      .icmp_type = 3, .icmp_code = 4,
                      .in_src = "10.0.0.5", .in_dst = "1.1.1.9",
                      .in_proto = IPPROTO_TCP, .in_sport = 22,
                      .in_dport = 50000)
-              == TC_ACT_SHOT, "no table: frag needed goes to the lists");
+              == TC_ACT_UNSPEC, "no table: frag needed still passes");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.6", .in_dst = "1.1.1.9",
+                     .in_proto = IPPROTO_TCP, .in_sport = 22,
+                     .in_dport = 50000)
+              == TC_ACT_SHOT, "no table: frag needed about another host's");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 3,
+                     .in_src = "10.0.0.5", .in_dst = "8.8.8.8",
+                     .in_proto = IPPROTO_UDP, .in_sport = 50000,
+                     .in_dport = 53)
+              == TC_ACT_SHOT, "no table: other errors go to the lists");
     mfw_check(mfw_tc(.src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
                      .echo_reply = 1, .icmp_id = 0x77)
               == TC_ACT_SHOT, "no table: an echo reply goes to the lists");

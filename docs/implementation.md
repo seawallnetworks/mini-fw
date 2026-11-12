@@ -159,6 +159,7 @@ frame
   │     ├─ a reply to a flow the host opened, or an ICMP
   │     │  error about one, or fragmentation needed ...... PASS   (reply)
   │     ├─ no sw_flowd table: TCP with ACK or RST ........ PASS   (reply_established)
+  │     ├─ no sw_flowd table: fragmentation needed ....... PASS   (reply)
   │     └─ anything else ................................. continue
   │
   └─ 3. extended list
@@ -329,7 +330,7 @@ Everything one interface enforces, compiled from its bindings:
 |-------|---------|
 | `drop_ipv4_fragments` | 1 drops every packet with MF set or offset ≠ 0 |
 | `abi_version` | `MFW_ABI_VERSION` (4: replies by default, their idle limits in the ruleset), shown by `mfwd -V`. A start replaces the pins of any version |
-| `no_flow_table` | 1: mfwd started without sw_flowd's table, and replies fall back to `established` (§8.1) |
+| `no_flow_table` | 1: mfwd started without sw_flowd's table, and replies fall back to `established`, with fragmentation needed still passed (§8.1) |
 | `generation` | bumped on each `APPLY` that reaches step 4 of §6; starts again at each start of mfwd |
 
 ### 4.4 Maps
@@ -698,7 +699,12 @@ switch to turn it off.
   An extended `deny ip host X any` doesn't: replies pass before it.
 - **Without sw_flowd's table**, replies fall back to `established`: TCP
   with ACK or RST passes, which a forged ACK does too, and UDP goes to
-  the lists, so DNS needs `permit udp any eq 53 any`. The table also
+  the lists, so DNS needs `permit udp any eq 53 any`. Fragmentation
+  needed about the host's packets still passes: it needs no table, only
+  its embedded source to be the host's, and without it a connection over
+  a path with a smaller MTU hangs. Other ICMP goes to the lists. mfw_tc
+  pulls an ICMP error only where it will be read: with the table, or a
+  path MTU error without it. The table also
   fails closed for connections opened before sw_flowd's first start, and
   for flows its full table evicted: their replies are dropped unless the
   extended list permits them.
