@@ -51,8 +51,9 @@
 #define mfw_tc(...)         run(mfw_if0, &(mfw_pkt_spec_t) { __VA_ARGS__ })
 #define mfw_tc_on(i, ...)   run((i), &(mfw_pkt_spec_t) { __VA_ARGS__ })
 
-#define MFW_TCP  .proto = IPPROTO_TCP
-#define MFW_UDP  .proto = IPPROTO_UDP
+#define MFW_TCP   .proto = IPPROTO_TCP
+#define MFW_UDP   .proto = IPPROTO_UDP
+#define MFW_ICMP  .proto = IPPROTO_ICMP
 
 /* run_prog(): the program couldn't run (-1 is TC_ACT_UNSPEC) */
 #define MFW_RUN_ERR  (-100)
@@ -71,10 +72,24 @@ typedef struct {
     __u16        frag_off;     /* host order: IP_MF | offset */
     __u8         ihl;          /* default 5 */
     __u16        ethertype;    /* default IPv4 */
+    __u8         icmp_type;    /* default 8, echo request */
+    int          echo_reply;   /* type 0, which icmp_type can't say */
+    __u8         icmp_code;
+    __u16        icmp_id;
+    /*
+     * an ICMP error's embedded packet, if in_proto is set: from in_src to
+     * in_dst, its ports or an echo request's identifier (in_sport)
+     */
+    const char  *in_src;
+    const char  *in_dst;
+    __u8         in_proto;
+    __u16        in_sport;
+    __u16        in_dport;
 } mfw_pkt_spec_t;
 
 
 static int build(const mfw_pkt_spec_t *s, __u8 *buf);
+static void build_inner(const mfw_pkt_spec_t *s, __u8 *p);
 static int run_prog(struct bpf_program *prog, void *ctx, __u32 ctx_size,
     __u8 *buf, int len);
 static void stats_copy(struct mfw_stat_value *save, int restore);
@@ -85,8 +100,12 @@ static void commit_on(__u32 ifindex);
 static void commit(void);
 static __u64 stat(__u32 id);
 static __u64 now_ns(void);
+static void flow_add_state(int table, __u8 proto, const char *raddr,
+    __u16 rport, __u16 lport, __u64 ago_s, __u64 state);
 static void flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
     __u16 lport, __u64 ago_s);
+static void flows_clear(int table);
+static void set_no_flow_table(int on);
 static void test_unbound(void);
 static void test_standard(void);
 static void test_extended(void);
@@ -175,8 +194,16 @@ build(const mfw_pkt_spec_t *s, __u8 *buf)
             p += sizeof(*uh);
 
         } else if (s->proto == IPPROTO_ICMP) {
-            p[0] = 8;            /* echo request */
+            p[0] = s->echo_reply ? 0 : s->icmp_type != 0 ? s->icmp_type : 8;
+            p[1] = s->icmp_code;
+            v = htons(s->icmp_id);
+            memcpy(p + 4, &v, 2);
             p += 8;
+
+            if (s->in_proto != 0) {
+                build_inner(s, p);
+                p += 28;
+            }
         }
     }
 
@@ -184,6 +211,39 @@ build(const mfw_pkt_spec_t *s, __u8 *buf)
     ip->tot_len = htons(p - (__u8 *) ip);
 
     return p - buf;
+}
+
+
+/*
+ * An ICMP error's embedded packet at p: the IPv4 header, and the 8 bytes
+ * of L4 an error carries, 28 bytes in all
+ */
+static void
+build_inner(const mfw_pkt_spec_t *s, __u8 *p)
+{
+    __be16         v;
+    struct iphdr  *ip = (void *) p;
+
+    ip->version = 4;
+    ip->ihl = 5;
+    ip->ttl = 1;
+    ip->protocol = s->in_proto;
+    ip->saddr = inet_addr(s->in_src);
+    ip->daddr = inet_addr(s->in_dst);
+    ip->tot_len = htons(60);
+    p += 20;
+
+    if (s->in_proto == IPPROTO_ICMP) {
+        p[0] = 8;                /* the host's echo request */
+        v = htons(s->in_sport);
+        memcpy(p + 4, &v, 2);
+
+    } else {
+        v = htons(s->in_sport);
+        memcpy(p, &v, 2);
+        v = htons(s->in_dport);
+        memcpy(p + 2, &v, 2);
+    }
 }
 
 
@@ -275,6 +335,11 @@ reset(void)
     k = 0;
 
     memset(&mfw_rs, 0, sizeof(mfw_rs));
+
+    /* as mfw_policy_compile() sets them; the test's: an hour, a minute */
+    mfw_rs.reply_idle_tcp = 3600;
+    mfw_rs.reply_idle_udp = 60;
+
     bpf_map_update_elem(bpf_map__fd(mfw_skel->maps.config), &k, &cfg,
                         BPF_ANY);
     bpf_map_delete_elem(bpf_map__fd(mfw_skel->maps.rulesets), &mfw_if0);
@@ -302,14 +367,6 @@ add(const char *line)
         printf("bad test rule '%s': %s\n", line, err);
         mfw_failures++;
         return;
-    }
-
-    /*
-     * set as mfw_policy_compile() does; the test's limits: an hour for
-     * TCP, a minute for UDP
-     */
-    if (r.flags & MFW_RULE_F_REPLY) {
-        r.reply_idle = r.proto == MFW_PROTO_TCP ? 3600 : 60;
     }
 
     if (r.kind == MFW_ACL_STANDARD) {
@@ -574,34 +631,71 @@ flow_add(int table, __u8 proto, const char *raddr, __u16 rport,
 }
 
 
+/* Empties sw_flowd's table: the flows one test added. */
+static void
+flows_clear(int table)
+{
+    struct sf_flow_key  k, next;
+
+    while (bpf_map_get_next_key(table, NULL, &next) == 0) {
+        k = next;
+        bpf_map_delete_elem(table, &k);
+    }
+}
+
+
+/* mini-fw's config with no_flow_table, as mfwd sets it without the table */
+static void
+set_no_flow_table(int on)
+{
+    __u32              k = 0;
+    struct mfw_config  cfg;
+
+    bpf_map_lookup_elem(bpf_map__fd(mfw_skel->maps.config), &k, &cfg);
+    cfg.no_flow_table = on;
+    bpf_map_update_elem(bpf_map__fd(mfw_skel->maps.config), &k, &cfg,
+                        BPF_ANY);
+}
+
+
 /*
- * "reply": only replies to flows in sw_flowd's table, within the idle
- * limits; nothing while the table is empty, as without sw_flowd.
+ * Replies to flows in sw_flowd's table pass before the extended list,
+ * with no rule (Seawall proposal 0015 §4): within the idle limits, after
+ * the standard list, not stopped by the extended list's denies. Echo
+ * replies, and ICMP errors about the host's packets; path MTU errors
+ * without a flow too. Without the table, TCP with ACK or RST passes.
  */
 static void
 test_reply(void)
 {
-    int  table;
+    int    table;
+    __u64  before;
 
     table = mfw_flows_table;
 
+    /* who may connect in, and nothing else: the host's SSH */
     reset();
-    add("100 permit tcp any any reply");
-    add("100 permit udp any any reply");
+    add("100 permit tcp any host 10.0.0.5 eq 22");
     commit();
 
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40000, .tcp_flags = 0x10)
-              == TC_ACT_SHOT, "empty table: reply matches nothing");
+              == TC_ACT_SHOT, "empty table: no reply");
+    mfw_check(mfw_tc(.src = "1.1.1.9", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 50000, .dport = 22, .tcp_flags = 0x02)
+              == TC_ACT_UNSPEC, "the extended list still lets SSH in");
 
     flow_add(table, IPPROTO_TCP, "1.1.1.1", 443, 40000, 0);
     flow_add(table, IPPROTO_TCP, "1.1.1.2", 443, 40001, 7200);  /* idle 2 h */
     flow_add(table, IPPROTO_UDP, "8.8.8.8", 53, 50000, 10);
     flow_add(table, IPPROTO_UDP, "8.8.4.4", 53, 50001, 120);    /* 2 min */
 
+    before = stat(MFW_STAT_REPLY);
+
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40000, .tcp_flags = 0x12)
               == TC_ACT_UNSPEC, "SYN-ACK of a flow the host opened");
+    mfw_check(stat(MFW_STAT_REPLY) > before, "counted as a reply");
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40000, .tcp_flags = 0x10)
               == TC_ACT_UNSPEC, "ACK of it");
@@ -613,7 +707,7 @@ test_reply(void)
               == TC_ACT_SHOT, "a SYN is no reply");
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40002, .tcp_flags = 0x10)
-              == TC_ACT_SHOT, "ACK to another local port");
+              == TC_ACT_SHOT, "an ACK flood: ACK to another local port");
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 444, .dport = 40000, .tcp_flags = 0x10)
               == TC_ACT_SHOT, "ACK from another remote port");
@@ -664,14 +758,156 @@ test_reply(void)
                      .sport = 443, .dport = 40013, .tcp_flags = 0x10)
               == TC_ACT_SHOT, "15 s after it");
 
-    /* the ACE's other fields still apply: the lookup is last */
+    /* echo replies to the host's identifier; a ping in is the lists' */
+    flow_add(table, IPPROTO_ICMP, "1.1.1.5", 0, 0x77, 0);
+    mfw_check(mfw_tc(.src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
+                     .echo_reply = 1, .icmp_id = 0x77)
+              == TC_ACT_UNSPEC, "echo reply to the host's ping");
+    mfw_check(mfw_tc(.src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
+                     .echo_reply = 1, .icmp_id = 0x78)
+              == TC_ACT_SHOT, "echo reply with another identifier");
+    mfw_check(mfw_tc(.src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 8, .icmp_id = 0x77)
+              == TC_ACT_SHOT, "a ping in: no ICMP permit");
+
+    /* ICMP errors about the host's packets, from a router */
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.1",
+                     .in_proto = IPPROTO_TCP, .in_sport = 40000,
+                     .in_dport = 443)
+              == TC_ACT_UNSPEC, "frag needed about a flow");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.9",
+                     .in_proto = IPPROTO_TCP, .in_sport = 22,
+                     .in_dport = 50000)
+              == TC_ACT_UNSPEC,
+              "frag needed with no flow: an accepted connection's");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.6", .in_dst = "1.1.1.1",
+                     .in_proto = IPPROTO_TCP, .in_sport = 40000,
+                     .in_dport = 443)
+              == TC_ACT_SHOT, "frag needed about another host's packet");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 3,
+                     .in_src = "10.0.0.5", .in_dst = "8.8.8.8",
+                     .in_proto = IPPROTO_UDP, .in_sport = 50000,
+                     .in_dport = 53)
+              == TC_ACT_UNSPEC, "port unreachable about a UDP flow");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 3,
+                     .in_src = "10.0.0.5", .in_dst = "8.8.8.8",
+                     .in_proto = IPPROTO_UDP, .in_sport = 50099,
+                     .in_dport = 53)
+              == TC_ACT_SHOT, "port unreachable with no flow");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 11, .icmp_code = 0,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.5",
+                     .in_proto = IPPROTO_ICMP, .in_sport = 0x77)
+              == TC_ACT_UNSPEC, "time exceeded about the host's ping");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 1,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.2",
+                     .in_proto = IPPROTO_TCP, .in_sport = 40001,
+                     .in_dport = 443)
+              == TC_ACT_SHOT, "host unreachable about a flow past its limit");
+
+    /* a reply counts one reason: reply, not the extended list's */
+    {
+        __u64  permit = stat(MFW_STAT_EXT_PERMIT);
+        __u64  deny = stat(MFW_STAT_EXT_IMPLICIT_DENY);
+        __u64  reply = stat(MFW_STAT_REPLY);
+
+        mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
+                         .sport = 443, .dport = 40000, .tcp_flags = 0x10)
+                  == TC_ACT_UNSPEC, "a reply");
+        /* run() counts the TC run only: it restores XDP's */
+        mfw_check(stat(MFW_STAT_REPLY) == reply + 1
+                  && stat(MFW_STAT_EXT_PERMIT) == permit
+                  && stat(MFW_STAT_EXT_IMPLICIT_DENY) == deny,
+                  "counted as a reply only: %llu %llu %llu",
+                  (unsigned long long) (stat(MFW_STAT_REPLY) - reply),
+                  (unsigned long long) (stat(MFW_STAT_EXT_PERMIT) - permit),
+                  (unsigned long long) (stat(MFW_STAT_EXT_IMPLICIT_DENY)
+                                        - deny));
+    }
+
+    /* the standard list's denies stop replies; the extended list's don't */
     reset();
-    add("100 permit tcp host 9.9.9.9 any reply");
+    add("10 deny host 1.1.1.1");
+    add("100 permit tcp any host 10.0.0.5 eq 22");
     commit();
 
     mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40000, .tcp_flags = 0x10)
-              == TC_ACT_SHOT, "reply from outside the ACE's source");
+              == TC_ACT_SHOT, "a blacklisted address's replies");
+
+    reset();
+    add("10 deny host 9.9.9.9");
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    commit();
+
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.1",
+                     .in_proto = IPPROTO_TCP, .in_sport = 40000,
+                     .in_dport = 443)
+              == TC_ACT_SHOT, "an error from a blacklisted router");
+
+    reset();
+    add("100 deny ip host 1.1.1.1 any");
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    commit();
+
+    mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40000, .tcp_flags = 0x10)
+              == TC_ACT_UNSPEC, "an extended deny doesn't stop replies");
+
+    /* no extended list: everything passes, and nothing is looked up */
+    reset();
+    commit();
+    before = stat(MFW_STAT_REPLY);
+
+    mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40000, .tcp_flags = 0x10)
+              == TC_ACT_UNSPEC, "no extended list: passes");
+    mfw_check(stat(MFW_STAT_REPLY) == before, "and isn't looked up");
+
+    /* without sw_flowd's table: "established", TCP only */
+    reset();
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    commit();
+    set_no_flow_table(1);
+    before = stat(MFW_STAT_REPLY_ESTABLISHED);
+
+    mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40020, .tcp_flags = 0x10)
+              == TC_ACT_UNSPEC, "no table: an ACK passes");
+    mfw_check(stat(MFW_STAT_REPLY_ESTABLISHED) > before,
+              "counted as established");
+    mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40020, .tcp_flags = 0x04)
+              == TC_ACT_UNSPEC, "no table: a RST passes");
+    mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40020, .tcp_flags = 0x02)
+              == TC_ACT_SHOT, "no table: a SYN doesn't");
+    mfw_check(mfw_tc(.src = "9.9.9.9", .dst = "10.0.0.5", MFW_ICMP,
+                     .icmp_type = 3, .icmp_code = 4,
+                     .in_src = "10.0.0.5", .in_dst = "1.1.1.9",
+                     .in_proto = IPPROTO_TCP, .in_sport = 22,
+                     .in_dport = 50000)
+              == TC_ACT_SHOT, "no table: frag needed goes to the lists");
+    mfw_check(mfw_tc(.src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
+                     .echo_reply = 1, .icmp_id = 0x77)
+              == TC_ACT_SHOT, "no table: an echo reply goes to the lists");
+    mfw_check(mfw_tc(.src = "8.8.8.8", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 53, .dport = 50000)
+              == TC_ACT_SHOT, "no table: UDP goes to the lists");
+
+    set_no_flow_table(0);
+    flows_clear(table);
 }
 
 

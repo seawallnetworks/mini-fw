@@ -13,7 +13,7 @@
  *   STATUS                   OK generation=N drop-ipv4-fragments=0|1
  *                            attached=a,b missing=c
  *                            degraded=d (at TC: another program holds XDP)
- *                            flows=sw_flowd|none (what "reply" ACEs read)
+ *                            flows=sw_flowd|none (where replies are read)
  *   STATS                    OK xdp_pass=N xdp_drop=N ...
  *   SHOW                     OK <n>, then the applied policy in n lines
  *   APPLY                    OK <generation>[ missing=a,b]

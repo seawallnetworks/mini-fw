@@ -8,8 +8,8 @@ ARCH      ?= $(shell uname -m | sed -e 's/x86_64/x86/' -e 's/aarch64/arm64/')
 MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
 # shared by the Seawall stack (libcli-plus, sw_authd, sw_configd)
 PREFIX    ?= /usr/local/seawall
-# sw_flowd's header, <sw_flowd/sw_flowd.h>: the flow table "reply" ACEs
-# read (sw_flowd's "make install-header" puts it there). Only mfwd and
+# sw_flowd's header, <sw_flowd/sw_flowd.h>: the flow table replies are
+# read from (sw_flowd's "make install-header" puts it there). Only mfwd and
 # its program need it, not libmfw.a.
 SW_FLOWD_PREFIX ?= $(PREFIX)
 SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
@@ -76,8 +76,10 @@ build/%.o: src/%.c | build $(LIBSW_A)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # SW_FLOWD_PREFIX's header before the stack prefix's in CFLAGS, which
-# holds an installed sw_flowd.h too
-build/dataplane.o: CFLAGS := -I$(SW_FLOWD_PREFIX)/include $(CFLAGS)
+# holds an installed sw_flowd.h too; this repo's headers before both: the
+# stack prefix holds an installed mfw.h
+MFW_SW_FLOWD_INC := -Iinclude -Isrc -I$(SW_FLOWD_PREFIX)/include
+build/dataplane.o: CFLAGS := $(MFW_SW_FLOWD_INC) $(CFLAGS)
 build/dataplane.o: $(SW_FLOWD_H)
 
 # the skeleton embeds the BPF object
@@ -100,7 +102,7 @@ tests/test_policy: tests/test_policy.c libmfw.a $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $< libmfw.a $(LIBSW_A)
 
 tests/test_bpf: tests/test_bpf.c src/mfw.skel.h libmfw.a $(LIBSW_A)
-	$(CC) -I$(SW_FLOWD_PREFIX)/include $(CFLAGS) -o $@ $< libmfw.a \
+	$(CC) $(MFW_SW_FLOWD_INC) $(CFLAGS) -o $@ $< libmfw.a \
 	    $(LIBSW_A) $(LIBBPF)
 
 # no privileges needed

@@ -10,8 +10,9 @@
 # directory, so this runs next to a live mini-fw without touching it. The
 # second veth pair checks that each interface enforces only its own lists.
 # Needs root and xdp-tools (xdp-loader); MFW_NO_XDP=1 filters at TC only,
-# and needs no xdp-tools. "reply" ACEs are tested with sw_flowd recording
-# fw's flows (SW_FLOWD, or ../sw_flowd/sw_flowd), and skipped without it.
+# and needs no xdp-tools. Replies to fw's own flows, which pass with no
+# rule, are tested with sw_flowd recording them (SW_FLOWD, or
+# ../sw_flowd/sw_flowd), and skipped without it.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -106,6 +107,7 @@ policy() { printf '%s\n' "$@" | mfw apply >/dev/null; }
 
 ping_fw()  { in_cli ping -c1 -W1 "$FW_IP"; }
 ping_fw2() { in_cli ping -c1 -W1 "$FW_IP2"; }
+ping_cli() { in_fw  ping -c1 -W1 "$CLI_IP"; }
 tcp_to_fw()  { in_cli nc -z -w1 "$FW_IP" "$1"; }
 tcp_to_cli() { in_fw  nc -z -w1 "$CLI_IP" "$1"; }
 udp_echo_fw() { in_cli bash -c "echo hi | nc -u -w1 $FW_IP $1 | grep -q hi"; }
@@ -191,8 +193,11 @@ expect ok   "tcp 8080 permitted" tcp_to_fw 8080
 expect fail "tcp 8081 implicit deny" tcp_to_fw 8081
 expect ok   "ping permitted" ping_fw
 expect ok   "udp 5353 echo (egress never filtered)" udp_echo_fw 5353
-expect fail "outbound tcp: SYN-ACK hits implicit deny (stateless)" \
+# no sw_flowd: replies fall back to "established", TCP only
+expect ok   "outbound tcp: without sw_flowd, its replies pass as established" \
     tcp_to_cli 9090
+expect fail "outbound udp: without sw_flowd, its replies hit implicit deny" \
+    udp_echo_cli 5354
 expect ok   "ext_implicit_deny counted" \
     test "$(stat_of ext_implicit_deny)" -gt 0
 policy "${EXT[@]}" "acl 100 40 permit tcp any any established" \
@@ -223,44 +228,58 @@ expect ok   "policy kept" \
     bash -c "$MFW -s $SOCK show | grep -q 'bind veth-fw2 in 20'"
 policy
 
-echo "== reply: replies to the flows fw opened (sw_flowd)"
+echo "== replies: fw's own flows pass, with no rule (sw_flowd)"
 if [[ -x $FLOWD ]]; then
-    REPLY=("acl 100 10 permit tcp any host $FW_IP eq 8080"
-           "acl 100 20 permit tcp any any reply"
-           "acl 100 30 permit udp any any reply"
-           "bind veth-fw in 100")
-    policy "${REPLY[@]}"
+    # who may connect in, and nothing else
+    INBOUND=("acl 100 10 permit tcp any host $FW_IP eq 8080"
+             "bind veth-fw in 100")
+    policy "${INBOUND[@]}"
     expect ok   "flows: none before sw_flowd" flows_is none
-    expect fail "outbound tcp: reply matches nothing without sw_flowd" \
+    expect ok   "without sw_flowd: outbound tcp passes as established" \
         tcp_to_cli 9090
+    expect fail "without sw_flowd: outbound udp doesn't" udp_echo_cli 5354
     start_flowd
     sleep 0.5   # sw_flowd's pins, and its first sync: the ephemeral port range
     expect ok   "flows: none until mfwd restarts" flows_is none
     stop_mfwd; start_mfwd   # mfwd binds sw_flowd's table when it starts
     expect ok   "flows: sw_flowd once mfwd starts after it" flows_is sw_flowd
-    expect ok   "outbound tcp with 'reply'" tcp_to_cli 9090
-    expect ok   "outbound udp with 'reply'" udp_echo_cli 5354
+    expect ok   "outbound tcp, no rule for its replies" tcp_to_cli 9090
+    expect ok   "outbound udp, no rule for its replies" udp_echo_cli 5354
+    expect ok   "ping out, no ICMP permit" ping_cli
+    expect fail "a ping in: no ICMP permit" ping_fw
     expect fail "inbound SYN to 8081 still denied" tcp_to_fw 8081
     expect ok   "inbound tcp 8080 still permitted" tcp_to_fw 8080
+    expect ok   "replies counted" test "$(stat_of reply)" -gt 0
+    # UDP to a closed port: cli's port unreachable, an ICMP error about it
+    before=$(stat_of reply)
+    in_fw bash -c "echo hi | nc -u -w1 $CLI_IP 5999" >/dev/null 2>&1
+    expect ok   "an ICMP error about fw's own UDP passes" \
+        test $(( $(stat_of reply) - before )) -ge 1
     before=$(stat_of ext_implicit_deny)
     acks_to_fw 8081 100
     expect ok   "an ACK flood is dropped" \
         test $(( $(stat_of ext_implicit_deny) - before )) -ge 100
-    policy "${REPLY[@]}" "acl 100 40 permit tcp any any established"
+    policy "${INBOUND[@]}" "acl 100 40 permit tcp any any established"
     before=$(stat_of ext_permit)
     acks_to_fw 8081 100
     expect ok   "('established' lets the same flood in)" \
         test $(( $(stat_of ext_permit) - before )) -ge 100
-    policy "${REPLY[@]}"
+    # the blacklist stops replies; the extended list's denies don't
+    policy "${INBOUND[@]}" "acl 10 10 deny host $CLI_IP" "bind veth-fw in 10"
+    expect fail "a blacklisted address's replies are dropped" tcp_to_cli 9090
+    policy "acl 100 5 deny ip host $CLI_IP any" "${INBOUND[@]}"
+    expect ok   "an extended deny of it doesn't stop them" tcp_to_cli 9090
+    policy "${INBOUND[@]}"
     stop_flowd
     expect ok   "sw_flowd stopped: its pinned link still records" \
         tcp_to_cli 9090
     # mfwd keeps the table it bound, whose flows match until idle, until
-    # it restarts: a layout change restarts the readers (0009)
+    # it restarts: a layout change restarts the readers (0015)
     nsenter --net=/var/run/netns/$FW "$FLOWD" -P >/dev/null 2>&1
     stop_mfwd; start_mfwd
     expect ok   "flows: none for an mfwd started without sw_flowd" flows_is none
-    expect fail "replies denied again" tcp_to_cli 9090
+    expect ok   "replies fall back to established: tcp" tcp_to_cli 9090
+    expect fail "and udp hits implicit deny again" udp_echo_cli 5354
     policy
 else
     echo "  skip: no sw_flowd at $FLOWD (set SW_FLOWD)"

@@ -3,8 +3,9 @@ Description=mini-fw daemon (eBPF inbound firewall at XDP, else TC)
 Documentation=https://github.com/seawallnetworks/mini-fw
 # Front ends such as sw_configd send the policy once mfwd is up.
 Before=sw_configd.service
-# "reply" ACEs read sw_flowd's flow table, which mfwd binds when it starts
-# (Seawall proposal 0009). Without sw_flowd installed, Wants= does nothing.
+# Replies to the host's own flows are read from sw_flowd's flow table,
+# which mfwd binds when it starts (Seawall proposal 0015). Without sw_flowd
+# installed, Wants= does nothing.
 After=sw_flowd.service
 Wants=sw_flowd.service
 

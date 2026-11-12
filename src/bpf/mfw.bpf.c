@@ -8,16 +8,18 @@
  *
  *   1. standard ACL (1–99): source-only blacklist; explicit deny → DROP,
  *      permit or miss → continue.
- *   2. extended ACL (100–199): permit → PASS; deny or no match → DROP
+ *   2. replies, where an extended list is bound: a reply to a flow the
+ *      host opened, in sw_flowd's table (Seawall proposal 0015 §4) →
+ *      PASS, with no rule. Without the table, TCP with ACK or RST, as
+ *      "established" would.
+ *   3. extended ACL (100–199): permit → PASS; deny or no match → DROP
  *      (implicit deny when bound).
  *
  * Egress is not filtered. With no extended list bound there is no implicit
  * deny: whatever the standard list does not deny passes, and an interface
  * without a ruleset gets only the header checks. This is the default, not
- * a failure mode. Non-IPv4 always passes. No conntrack of its own: return
- * traffic is permitted explicitly, with "established", or with "reply":
- * a reply to a flow the host opened, in sw_flowd's table (Seawall
- * proposal 0015). Without the table, "reply" matches nothing.
+ * a failure mode. Non-IPv4 always passes. No conntrack of its own: the
+ * host's own flows are sw_flowd's, which records them at egress.
  *
  * Two entries share mfw_judge(): mfw_xdp, run by libxdp's dispatcher after
  * a DDoS gate such as voidgate, and mfw_tc, at TC ingress when another
@@ -42,12 +44,23 @@
 #include <linux/bpf.h>
 #include <linux/in.h>
 #include <linux/pkt_cls.h>
+/* sw_flowd's ICMP error check, SF_DEFINE_ICMP_ERR_REPLY() */
+#define SF_ICMP_ERR_REPLY
 #include <sw_flowd/sw_flowd.h>
 #include <xdp/xdp_helpers.h>
 
 
-/* reply_idle is in seconds, bpf_ktime_get_coarse_ns() in ns */
+/* the replies' idle limits are in seconds, bpf_ktime_get_coarse_ns() in ns */
 #define MFW_NSEC_PER_SEC  1000000000ULL
+
+/* which entry mfw_judge() runs in: a constant, so each keeps its own call */
+#define MFW_HOOK_XDP  0
+#define MFW_HOOK_TC   1
+
+/* mfw_reply()'s answers */
+#define MFW_REPLY_NO           0
+#define MFW_REPLY_YES          1
+#define MFW_REPLY_ESTABLISHED  2   /* no table: TCP with ACK or RST */
 
 
 /* mfw_judge()'s verdict; each entry turns it into its hook's */
@@ -67,14 +80,13 @@ typedef enum {
 
 static __always_inline void stat_inc(__u32 id);
 static __always_inline int cfg_drop_ipv4_fragments(void);
+static __always_inline int cfg_no_flow_table(void);
 
 static __always_inline __be32 ipv4_addr(const __u8 *a);
 static __always_inline int cidr_match(__be32 addr, const struct mfw_cidr *c);
 static __always_inline int port_in_range(__u16 port,
     const struct mfw_port_range *r);
 
-static __always_inline int is_reply(const struct mfw_rule *r,
-    const struct pkt_meta *p);
 __noinline int mfw_ext_ace_match(const struct mfw_rule *r,
     const struct pkt_meta *p);
 
@@ -84,8 +96,11 @@ static __always_inline mfw_match_e match_ext(const struct mfw_ruleset *rs,
     const struct pkt_meta *p);
 
 static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex);
+static __always_inline int reply_checked(__u32 ifindex);
+static __always_inline int mfw_reply(const struct mfw_ruleset *rs,
+    const struct pkt_meta *p, void *ctx, int hook);
 static __always_inline mfw_verdict_e mfw_judge(int rc,
-    const struct pkt_meta *p, __u32 ifindex);
+    const struct pkt_meta *p, __u32 ifindex, void *ctx, int hook);
 
 int mfw_xdp(struct xdp_md *ctx);
 int mfw_tc(struct __sk_buff *ctx);
@@ -153,6 +168,14 @@ struct {
 
 
 /*
+ * sw_flowd's ICMP error check on the table, for each entry: global
+ * functions, which the verifier walks once, not once a path (sw_flowd.h)
+ */
+SF_DEFINE_ICMP_ERR_REPLY(mfw_icmp_err_xdp, struct xdp_md, flows)
+SF_DEFINE_ICMP_ERR_REPLY(mfw_icmp_err_tc, struct __sk_buff, flows)
+
+
+/*
  * libxdp's dispatcher runs mini-fw after voidgate (priority 10), and only
  * a pass goes on to the next program.
  */
@@ -187,6 +210,20 @@ cfg_drop_ipv4_fragments(void)
     cfg = bpf_map_lookup_elem(&config, &k);
 
     return cfg != NULL && cfg->drop_ipv4_fragments;
+}
+
+
+/* did mfwd start without sw_flowd's table? */
+static __always_inline int
+cfg_no_flow_table(void)
+{
+    __u32               k;
+    struct mfw_config  *cfg;
+
+    k = 0;
+    cfg = bpf_map_lookup_elem(&config, &k);
+
+    return cfg != NULL && cfg->no_flow_table;
 }
 
 
@@ -235,26 +272,6 @@ port_in_range(__u16 port, const struct mfw_port_range *r)
 
 
 /*
- * Is p a reply to a flow the host opened, as sw_flowd's sf_is_reply()
- * defines one (Seawall proposal 0015 §2), within the ACE's idle limit?
- * mfw_ext_ace_match() only asks for TCP and UDP: TCP with ACK or RST, UDP
- * to a port in the ephemeral range, of a flow sw_flowd recorded, closed
- * by the host no longer than SF_FIN_NS or SF_RST_NS ago. sf_is_reply()
- * takes no packet pointer, so this global function can call it.
- */
-static __always_inline int
-is_reply(const struct mfw_rule *r, const struct pkt_meta *p)
-{
-    struct sf_idle  idle;
-
-    idle.tcp_ns = r->reply_idle * MFW_NSEC_PER_SEC;
-    idle.udp_ns = idle.tcp_ns;
-
-    return sf_is_reply(&flows, &flows_config, p, &idle) == SF_REPLY;
-}
-
-
-/*
  * L3/L4 fields of one extended ACE vs the packet. A global (non-static)
  * function is verified once on its own, which keeps the 128-ACE loop below
  * from multiplying verifier states by every branch in here.
@@ -290,11 +307,6 @@ mfw_ext_ace_match(const struct mfw_rule *r, const struct pkt_meta *p)
     if ((r->flags & MFW_RULE_F_ESTABLISHED)
         && !(p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)))
     {
-        return 0;
-    }
-
-    /* last: the one lookup, only for a packet the rest matched */
-    if ((r->flags & MFW_RULE_F_REPLY) && !is_reply(r, p)) {
         return 0;
     }
 
@@ -381,12 +393,78 @@ ruleset_of(__u32 ifindex)
 
 
 /*
+ * Does mfw_judge() look replies up on ifindex: an extended list bound,
+ * and sw_flowd's table read? Else an ICMP error's embedded header isn't
+ * read, and mfw_tc doesn't pull it.
+ */
+static __always_inline int
+reply_checked(__u32 ifindex)
+{
+    const struct mfw_ruleset  *rs;
+
+    rs = ruleset_of(ifindex);
+
+    return rs != NULL && rs->ext_acl != 0 && !cfg_no_flow_table();
+}
+
+
+/*
+ * Is p, parsed PKT_OK, a reply to a flow the host opened (Seawall proposal
+ * 0015 §2 and §4)? What sw_flowd's sf_is_reply() says is one, within rs's
+ * idle limits: TCP with ACK or RST, UDP to the ephemeral range, an echo
+ * reply. Or an ICMP error about a packet the host sent: of a flow in the
+ * table, or a path MTU error, which passes without one, since it may be
+ * about a connection the host accepted (a client of its own web server
+ * across a tunnel), and the table holds only the host's own. Without
+ * sw_flowd's table, MFW_REPLY_ESTABLISHED for TCP with ACK or RST: the
+ * protection "established" gave, weaker than the table's, better than
+ * cutting the host off.
+ */
+static __always_inline int
+mfw_reply(const struct mfw_ruleset *rs, const struct pkt_meta *p, void *ctx,
+    int hook)
+{
+    int             r;
+    struct sf_idle  idle;
+
+    if (cfg_no_flow_table()) {
+        return p->l4_proto == IPPROTO_TCP
+               && (p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST))
+               ? MFW_REPLY_ESTABLISHED : MFW_REPLY_NO;
+    }
+
+    idle.tcp_ns = rs->reply_idle_tcp * MFW_NSEC_PER_SEC;
+    idle.udp_ns = rs->reply_idle_udp * MFW_NSEC_PER_SEC;
+
+    if (sf_is_reply(&flows, &flows_config, p, &idle) == SF_REPLY) {
+        return MFW_REPLY_YES;
+    }
+
+    if (!sf_is_icmp_err(p)) {
+        return MFW_REPLY_NO;
+    }
+
+    if (hook == MFW_HOOK_XDP) {
+        r = mfw_icmp_err_xdp(ctx, &idle);
+
+    } else {
+        r = mfw_icmp_err_tc(ctx, &idle);
+    }
+
+    /* SF_REPLY, or SF_PMTU_NO_FLOW */
+    return r != SF_MISS ? MFW_REPLY_YES : MFW_REPLY_NO;
+}
+
+
+/*
  * The verdict on a packet that arrived on ifindex, from what pkt_parse()
  * returned for it: rc, and p. The entries parse, each from its own
- * context; nothing here reads the packet.
+ * context, of hook's kind; only an ICMP error's reply check reads the
+ * packet again, from ctx, in a global function (mfw_reply()).
  */
 static __always_inline mfw_verdict_e
-mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex)
+mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex, void *ctx,
+    int hook)
 {
     int                        nonfirst;
     mfw_match_e                std;
@@ -451,7 +529,24 @@ mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex)
         goto pass;
     }
 
-    /* 2. Extended list decides everything else. */
+    /*
+     * 2. Replies to the host's own flows, before the extended list, which
+     * then says only who may connect in; where none is bound, everything
+     * passes anyway, and nothing is looked up.
+     */
+    if (rc == PKT_OK && rs != NULL && rs->ext_acl != 0) {
+        switch (mfw_reply(rs, p, ctx, hook)) {
+        case MFW_REPLY_YES:
+            stat_inc(MFW_STAT_REPLY);
+            goto pass;
+
+        case MFW_REPLY_ESTABLISHED:
+            stat_inc(MFW_STAT_REPLY_ESTABLISHED);
+            goto pass;
+        }
+    }
+
+    /* 3. Extended list decides everything else. */
     switch (match_ext(rs, p)) {
     case mfw_match_permit:
         stat_inc(MFW_STAT_EXT_PERMIT);
@@ -506,7 +601,7 @@ mfw_xdp(struct xdp_md *ctx)
 
     rc = pkt_parse(data, data_end, &p);
 
-    v = mfw_judge(rc, &p, ctx->ingress_ifindex);
+    v = mfw_judge(rc, &p, ctx->ingress_ifindex, ctx, MFW_HOOK_XDP);
     if (v == mfw_drop) {
         return XDP_DROP;
     }
@@ -552,7 +647,26 @@ mfw_tc(struct __sk_buff *ctx)
         }
     }
 
-    v = mfw_judge(rc, &p, ctx->ingress_ifindex);
+    /*
+     * An ICMP error's embedded header lies past PKT_HDR_MAX, and the
+     * reply check reads it from the skb as it is: pull that far for one,
+     * where the check runs. A pull makes the skb writable, copying a
+     * cloned skb's head: not for errors nothing will read.
+     */
+    if (rc == PKT_OK && sf_is_icmp_err(&p)
+        && reply_checked(ctx->ingress_ifindex))
+    {
+        want = ctx->len < PKT_ICMP_ERR_MAX ? ctx->len : PKT_ICMP_ERR_MAX;
+
+        if (data + want > data_end) {
+            bpf_skb_pull_data(ctx, want);
+            data = (void *) (long) ctx->data;
+            data_end = (void *) (long) ctx->data_end;
+            rc = pkt_parse(data, data_end, &p);
+        }
+    }
+
+    v = mfw_judge(rc, &p, ctx->ingress_ifindex, ctx, MFW_HOOK_TC);
     if (v == mfw_drop) {
         return TC_ACT_SHOT;
     }

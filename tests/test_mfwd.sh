@@ -73,10 +73,14 @@ tc_on() {
 on() { [[ -z ${MFW_NO_XDP:-} && $(xdp_in "$1") == 1 ]] || tc_on "$1"; }
 field() { mfw status | awk -v k="$1" '$1 == k { print $2 }'; }
 # STATS names every counter
+# every counter of mfw.h's enum, MFW_STAT_PASS up to MFW_STAT_MAX
 all_stats() {
-    mfw stats --json | python3 -c '
+    local n
+    n=$(sed -n '/^enum mfw_stat_id/,/MFW_STAT_MAX/p' "$ROOT/include/mfw.h" \
+        | grep -c '^    MFW_STAT_[A-Z0-9_]*[ ,=]' )
+    mfw stats --json | python3 -c "
 import json, sys
-assert len(json.load(sys.stdin)) == 11'
+assert len(json.load(sys.stdin)) == $n - 1"
 }
 
 start() {
@@ -342,12 +346,19 @@ print(" ".join(str(m) for p in json.load(sys.stdin)
                if p.get("name") in ("mfw_tc", "mfw_xdp")
                for m in p.get("map_ids", [])))'
 }
+# mini-fw's config: no_flow_table, its third byte, as BPF reads it
+no_flow_table() {
+    bpftool -j map lookup pinned "$PINS/maps/config" key 0 0 0 0 \
+        | python3 -c 'import json, sys
+print(int(json.load(sys.stdin)["value"][2], 16))'
+}
 map_id() {
     bpftool -j map show pinned "$1" \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])'
 }
 logged "log: no table" 'no sw_flowd flow table'
 same "flows: none" "$(field flows)" none
+same "no table: replies fall back to established" "$(no_flow_table)" 1
 mkdir -p "$FLOWS"
 bpftool map create "$FLOWS/outbound" type lru_hash key 24 value 8 \
     entries 1024 name outbound
@@ -362,6 +373,7 @@ bpftool map create "$FLOWS/config" type array key 4 value 4 \
 stop
 start
 same "flows: sw_flowd after a restart" "$(field flows)" sw_flowd
+same "the table: no fallback" "$(no_flow_table)" 0
 logged "log: reading" "reading sw_flowd's flow table (1024 flows)"
 id=$(map_id "$FLOWS/outbound")
 if [[ -n $id ]]; then

@@ -13,20 +13,23 @@ a daemon.** The target is protecting a local VM, so there is no router or
 forwarding mode, and **egress is never filtered**. In the dispatcher a DDoS
 gate such as [voidgate](https://github.com/seawallnetworks/voidgate) runs
 first. There is no conntrack or fragment tracking yet (design PR5a–c):
-replies to the host's own connections are matched with `reply`, from
+replies to the host's own connections pass with no rule, found in
 [sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table of the
 flows the host opened (Seawall proposal 0015).
 
 | List | Numbers | Matches | End of list |
 |------|---------|---------|-------------|
 | Standard | 1–99 | source IP | **pass** (blacklist) |
-| Extended | 100–199 | proto, src, dst, ports, `established` or `reply` | **deny** (implicit) |
+| Extended | 100–199 | proto, src, dst, ports, `established` | **deny** (implicit) |
 
 Each interface has its own lists: one standard and one extended list. Each
 inbound IPv4 packet is checked against the lists of the interface it
 arrived on, the **standard list first**. An explicit `deny` drops it. A
-`permit` or no match moves on to the **extended list**, which then permits
-or drops it. A standard `permit` does **not** bypass the extended list.
+`permit` or no match moves on. Where an extended list is bound, a **reply
+to a flow the host opened** then passes, with no rule; anything else goes
+to the **extended list**, which permits or drops it. So the extended list
+says only who may connect in. A standard `permit` does **not** bypass the
+extended list.
 
 - First match wins, in sequence order.
 - An interface with no list bound is fail-open.
@@ -45,21 +48,22 @@ A **policy** is the whole desired state, one item per line, sent at once:
 
 ```text
 acl 10 10 deny host 203.0.113.66
-acl 100 10 permit tcp any host 10.0.0.5 eq 22
-acl 100 20 permit tcp any any reply          # replies to our outbound TCP
-acl 100 30 permit udp any any reply          # and UDP (DNS, NTP...)
-acl 100 40 permit icmp any any               # ping, and path MTU discovery
+acl 100 10 permit tcp any host 10.0.0.5 eq 22  # who may connect in
 bind eth0 in 10
 bind eth0 in 100
 set drop-ipv4-fragments 0
-set reply-idle-tcp 86400                     # the defaults
-set reply-idle-udp 180
+set reply-idle-tcp 86400                     # the defaults: how long a flow
+set reply-idle-udp 180                       # the host opened may be idle
 ```
 
-Keep ICMP permitted: once an extended list is bound, everything it doesn't
-permit is dropped, "fragmentation needed" included, and without that a
-connection whose path has a smaller MTU, such as from a VPC's jumbo frames
-to the internet, hangs on the first full-size packet the VM sends.
+The host's own traffic needs no rule: replies to the flows it opened
+pass before the extended list, ICMP errors about them too, and
+"fragmentation needed" whatever connection it is about, so path MTU
+discovery works for the services the host offers as well. Without
+sw_flowd's table, only TCP with ACK or RST passes so: then permit what
+else the host needs, ICMP included, or a connection whose path has a
+smaller MTU, such as from a VPC's jumbo frames to the internet, hangs on
+the first full-size packet the VM sends.
 
 mfwd checks all of it first, so a bad line changes nothing. Then it
 attaches every interface that gets a list, swaps in each one's ruleset
@@ -93,7 +97,7 @@ make                  # mfwd, mfw, libmfw.a (objects in build/)
 make test             # ACE and policy parser tests
 make test-bpf         # the BPF program on crafted packets (BPF_PROG_TEST_RUN, sudo)
 make test-mfwd        # mfwd on dummy interfaces: protocol, attach/detach, restarts, sharing XDP (sudo)
-make smoke            # real traffic through mfwd in two network namespaces (sudo); "reply"
+make smoke            # real traffic through mfwd in two network namespaces (sudo); replies
                       # with sw_flowd (SW_FLOWD, or ../sw_flowd/sw_flowd), else skipped
 sudo make install     # PREFIX=/usr/local/seawall; also installs mfwd.service
 ```
@@ -137,7 +141,7 @@ One request per connection on the Unix socket; mfwd replies and closes.
 | Request | Reply |
 |---------|-------|
 | `PING` | `OK` |
-| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` (`degraded`: at TC, another program holds XDP; `flows`: whether `reply` ACEs read sw_flowd's table) |
+| `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` (`degraded`: at TC, another program holds XDP; `flows`: whether replies are read from sw_flowd's table, or fall back to `established`) |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …` (every counter) |
 | `SHOW` | `OK <n>`, then the running policy in n lines |
 | `APPLY`, policy lines, `END` | `OK <generation>[ missing=a,b]` |
@@ -150,19 +154,27 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
 
 ## Stateless caveats (until conntrack lands)
 
-- **Outbound traffic always leaves, but its replies are inbound and get
-  filtered.** If you bind an extended list, also permit those replies:
-  `permit tcp any any reply` and `permit udp any any reply`, with sw_flowd
-  running. `reply` matches only a reply to a flow the host opened, as
-  sw_flowd's `sf_is_reply()` defines it (Seawall proposal 0015): TCP with
-  ACK or RST, or UDP to a port in the ephemeral range, of a flow that
-  last left within `reply-idle-tcp` or `reply-idle-udp` seconds, and no
-  more than 120 s after the host's FIN or 10 s after its RST, so an ACK
-  flood doesn't pass it. Without sw_flowd when mfwd started, `reply`
-  matches nothing (fails closed), and so do connections opened before sw_flowd's first
-  start, and flows its full table evicted. `established` (TCP with ACK or
-  RST) and source-port ACEs (`permit udp any eq 53 any`) work without it,
-  but let in anything that looks like a reply.
+- **Replies to the host's own traffic pass with no rule** where an
+  extended list is bound, after the standard list and before the
+  extended one (Seawall proposal 0015 §4), as sw_flowd's `sf_is_reply()`
+  and ICMP error check define them: TCP with ACK or RST, or UDP to a port
+  in the ephemeral range, of a flow that last left within
+  `reply-idle-tcp` or `reply-idle-udp` seconds, and no more than 120 s
+  after the host's FIN or 10 s after its RST, so an ACK flood doesn't
+  pass; echo replies to its pings; ICMP errors about its packets, and
+  path MTU errors (fragmentation needed) even without a flow, which may
+  be about a connection the host accepted. Counter `reply`. There is no
+  switch to turn it off.
+- **Block an address in the standard list.** Its denies stop replies too.
+  A `deny` in the extended list doesn't: replies pass before it, so
+  `deny ip host 203.0.113.9 any` there still lets that host's replies in.
+- **Without sw_flowd's table** (sw_flowd not running when mfwd started,
+  or a table of another layout), replies fall back to `established`: TCP
+  with ACK or RST passes (counter `reply_established`), and UDP goes to
+  the lists, so DNS needs a source-port ACE (`permit udp any eq 53 any`).
+  That is weaker than the table: an ACK flood passes. Connections opened
+  before sw_flowd's first start, and flows its full table evicted, are
+  dropped unless the extended list permits them.
 - **Non-first IPv4 fragments skip the extended list** and go to the kernel;
   the standard list, which needs only the source, still applies. The first
   fragment carries the ports and is filtered as usual; if it is dropped,
@@ -202,19 +214,20 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   takes no ACE slot, so an extended list holds 128 ACEs.
 - **`established` keyword.** Added (Cisco-compatible) as the stateless way to
   allow TCP replies. It uses the spare `mfw_rule.flags` byte.
-- **`reply` keyword, instead of the design's conntrack.** mini-fw reads
+- **Replies by default, instead of the design's conntrack.** mini-fw reads
   sw_flowd's pinned table and its config (Seawall proposal 0015), which
   record the flows the host opens at TC egress and the ephemeral range;
   it never writes them. sw_flowd starts first (`mfwd.service` is `After=`
   and `Wants=sw_flowd.service`): mfwd opens both pins when it starts, and
   every program it loads binds them (`bpf_map__reuse_fd`); a table
-  without its config isn't read. An mfwd started without it warns, and `reply`
-  matches nothing until mfwd restarts; a restart of sw_flowd changes
-  nothing for mfwd. The idle limits travel in the rules: each compiled
-  `reply` ACE holds its protocol's, in `mfw_rule.reply_idle` (the spare
-  word it had), so there is no map for them and the rule's layout is
-  unchanged. The lookup is the last check of an ACE, so only a packet the
-  rest of the ACE matched pays for it. A table of another layout (a sw_flowd built from another
+  without its config isn't read. An mfwd started without them warns, and
+  sets `no_flow_table` in its config: replies fall back to `established`
+  until mfwd restarts; a restart of sw_flowd changes nothing for mfwd.
+  The idle limits travel in the ruleset, with the rules, so there is no
+  map for them. The ICMP error check is a global function, walked once
+  by the verifier (sw_flowd.h says why). A `reply` at the end of an ACE,
+  the keyword of before, is a parse error saying replies pass without
+  it. A table of another layout (a sw_flowd built from another
   `sw_flowd.h`) is refused.
 - **Attach.** The XDP entry in the interface's libxdp dispatcher, made or
   joined, in its mode (native, else skb, for a new one), loaded by libxdp

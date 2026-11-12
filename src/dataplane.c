@@ -11,10 +11,12 @@
  *   maps/config     array: flags, generation
  *   maps/stats      per-CPU counters
  *
- * "reply" ACEs look up sw_flowd's table, /sys/fs/bpf/seawall/flows/outbound
- * (Seawall proposal 0015), which every program mfwd loads binds at load:
- * sw_flowd starts first. Without it, a program gets an empty map of its
- * own, and keeps it until an mfwd started with the table replaces it.
+ * Replies to the host's own flows are looked up in sw_flowd's table and
+ * config, /sys/fs/bpf/seawall/flows/outbound and config (Seawall proposal
+ * 0015), which every program mfwd loads binds at load: sw_flowd starts
+ * first. Without them, a program gets empty maps of its own, and config's
+ * no_flow_table says so: replies fall back to "established" until an
+ * mfwd started with the table replaces it.
  *
  * Each attached interface has one pin in attach/, by how it is attached:
  *
@@ -76,7 +78,8 @@ typedef enum {
 
 static const char *pin_ifname(const char *pin, mfw_pin_e *kind);
 static int name_cmp(const void *a, const void *b);
-static int init_config(int config_fd, char *err, size_t len);
+static int init_config(int config_fd, int no_flow_table, char *err,
+    size_t len);
 static int detach_pinned(const char *root, char *err, size_t errlen);
 static int flow_table_open(int *config_fd);
 
@@ -183,9 +186,12 @@ mfw_dp_list_attached(const mfw_dp_t *dp, char names[][IF_NAMESIZE],
 }
 
 
-/* The config map, config_fd, is new (all zeros): give it the defaults. */
+/*
+ * The config map, config_fd, is new (all zeros): give it the defaults,
+ * and say whether this mfwd has sw_flowd's table.
+ */
 static int
-init_config(int config_fd, char *err, size_t len)
+init_config(int config_fd, int no_flow_table, char *err, size_t len)
 {
     __u32              k;
     struct mfw_config  cfg;
@@ -194,6 +200,7 @@ init_config(int config_fd, char *err, size_t len)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.abi_version = MFW_ABI_VERSION;
+    cfg.no_flow_table = !!no_flow_table;
 
     if (bpf_map_update_elem(config_fd, &k, &cfg, BPF_ANY) != 0) {
         return sw_fail(err, len, "init config: %s", strerror(errno));
@@ -276,7 +283,7 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
     dp->tcx = sw_bpf_have_tcx();
     dp->no_xdp = getenv("MFW_NO_XDP") != NULL;
 
-    if (init_config(dp->config_fd, err, errlen) != 0) {
+    if (init_config(dp->config_fd, dp->flows_fd < 0, err, errlen) != 0) {
         goto failed;
     }
 
@@ -493,8 +500,8 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
  * sw_flowd's flow table and its config, for every program this mfwd
  * loads to bind: both, or neither. sf_outbound_open() and
  * sf_config_open() refuse maps of another layout, a sw_flowd built from
- * another sw_flowd.h than mini-fw was. Without them, "reply" ACEs match
- * nothing until mfwd restarts with the right ones. Returns the table's
+ * another sw_flowd.h than mini-fw was. Without them, replies fall back to
+ * "established" until mfwd restarts with the right ones. Returns the table's
  * fd, the config's in *config_fd, or -errno (the reason logged).
  */
 static int
@@ -520,21 +527,22 @@ flow_table_open(int *config_fd)
     }
 
     if (fd == -ENOENT) {
-        sw_log_warn("no sw_flowd flow table under %s: \"reply\" ACEs match "
-                    "nothing until mfwd restarts with it (start sw_flowd "
-                    "first)", SF_PIN_ROOT);
+        sw_log_warn("no sw_flowd flow table under %s: replies fall back to "
+                    "\"established\" until mfwd restarts with it (start "
+                    "sw_flowd first)", SF_PIN_ROOT);
 
     } else if (fd == -EPROTO) {
         sw_log_warn("sw_flowd's flow table under %s is not the layout this "
-                    "mfwd reads: \"reply\" ACEs match nothing", SF_PIN_ROOT);
+                    "mfwd reads: replies fall back to \"established\"",
+                    SF_PIN_ROOT);
 
     } else if (fd < 0) {
-        sw_log_warn("sw_flowd's flow table under %s: %s: \"reply\" ACEs "
-                    "match nothing", SF_PIN_ROOT, strerror(-fd));
+        sw_log_warn("sw_flowd's flow table under %s: %s: replies fall back "
+                    "to \"established\"", SF_PIN_ROOT, strerror(-fd));
 
     } else {
-        sw_log_info("reading sw_flowd's flow table (%u flows): \"reply\" "
-                    "ACEs match replies to the host's own flows", size);
+        sw_log_info("reading sw_flowd's flow table (%u flows): replies to "
+                    "the host's own flows pass", size);
     }
 
     return fd;

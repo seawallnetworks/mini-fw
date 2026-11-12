@@ -43,8 +43,8 @@ see [`implementation.md`](implementation.md).
   lists to.
 - **Never touches outbound traffic.** Everything the VM sends leaves normally.
 - Is **stateless**: each packet is judged on its own, with no memory of
-  connections. This matters for reply traffic (§3.4): with sw_flowd
-  running, `reply` rules let in only replies to the flows the VM opened.
+  connections of its own. Replies to the connections the VM opens are
+  let in with no rule, from sw_flowd's record of them (§3.4).
 - **Passes all non-IPv4 traffic** untouched: ARP, IPv6, LLDP and so on.
 - **Keeps filtering when mfwd stops.** The kernel side is pinned; mfwd is
   only needed to change or inspect the policy.
@@ -60,7 +60,7 @@ see [`implementation.md`](implementation.md).
 | To build: clang, make, bpftool, libbpf-dev, libxdp-dev | `clang --version`, `bpftool version` |
 | To build: libsw (`libsw.a`, `libsw_bpf.a`) and libpkt's headers | `ls /usr/local/seawall/lib/libsw.a /usr/local/seawall/include/libpkt/parse.h`; `make install` in each puts them there |
 | To build: sw_flowd's header | `ls /usr/local/seawall/include/sw_flowd/sw_flowd.h`; sw_flowd's `make install-header` puts it there |
-| For `reply` rules: sw_flowd running | `sudo mfw status` shows `flows sw_flowd` |
+| For replies to pass with no rule: sw_flowd running | `sudo mfw status` shows `flows sw_flowd` |
 
 If bpffs is not mounted:
 
@@ -146,7 +146,7 @@ make smoke       # real traffic between two network namespaces
 | | Standard list | Extended list |
 |--|---------------|---------------|
 | Numbers | **1–99** | **100–199** |
-| Matches on | source IP only | protocol, source, destination, ports, TCP `established`, `reply` |
+| Matches on | source IP only | protocol, source, destination, ports, TCP `established` |
 | Purpose | **blacklist**: block specific sources early | **allowlist**: say exactly what may come in |
 | If no rule matches | packet **continues** | packet is **dropped** (implicit deny) |
 
@@ -200,41 +200,35 @@ UI, and use `mfw` for `show`, `status` and `stats`.
 Each interface can have **one standard and one extended list** bound, and
 different interfaces can have different lists.
 
-### 3.4 Replies are inbound too
+### 3.4 Replies pass with no rule
 
-Because mini-fw is stateless, it doesn't know that a packet is a reply to a
-connection your VM opened. When the VM browses the web, resolves DNS or
-pings, the replies are ordinary inbound packets and must be permitted by the
-extended list:
+When the VM browses the web, resolves DNS or pings, the replies are
+inbound packets. With sw_flowd (it ships in the Seawall stack), mini-fw
+lets them in with no rule: sw_flowd records each connection the VM
+opens as it leaves, and on an interface with an extended list a packet
+back on such a connection passes before the list. So the extended list
+only says who may connect in.
 
-| Your VM does | The reply looks like | Rule that lets it in |
-|--------------|---------------------|----------------------|
-| opens TCP connections | TCP with ACK set | `permit tcp any any established` |
-| DNS lookups | UDP from port 53 | `permit udp any eq 53 any` |
-| NTP time sync | UDP from port 123 | `permit udp any eq 123 any` |
-| DHCP lease renewal | UDP 67 → 68 | `permit udp any eq 67 any eq 68` |
-| ping | ICMP echo reply | `permit icmp any any` |
-| sends a packet larger than the path's MTU | ICMP "fragmentation needed" | `permit icmp any any` |
+| Your VM does | Its replies pass |
+|--------------|------------------|
+| opens TCP connections | TCP back on the connection, with ACK or RST |
+| DNS, NTP, other UDP from an ephemeral port | UDP back to that port |
+| ping | the echo replies to its pings |
+| sends a packet larger than the path's MTU | ICMP "fragmentation needed", for its own connections and the ones it accepted |
+| reaches an unreachable port or host, or a traceroute | the ICMP errors about its own packets |
 
-With sw_flowd (it ships in the Seawall stack) the first rows have a
-better rule. sw_flowd records each flow the VM opens as it leaves, and
-`reply` matches only a packet back on such a flow:
+A forged packet has to guess the connection's address and both ports,
+so an ACK flood doesn't pass. §5.5 has the details: idle limits, what
+sw_flowd doesn't record (DHCP, which needs its own rule), and what
+happens without sw_flowd.
 
-| Your VM does | Rule that lets the replies in |
-|--------------|-------------------------------|
-| opens TCP connections | `permit tcp any any reply` |
-| DNS lookups, NTP, other UDP from an ephemeral port | `permit udp any any reply` |
+**Block an address in the standard list.** Its denies stop replies too.
+A `deny` in the extended list doesn't stop them: replies pass before
+it, so `deny ip host 203.0.113.9 any` there still lets that host's
+replies in.
 
-`established` lets in any TCP packet with ACK set, so an ACK flood passes
-it; `reply` doesn't. §5.5 has the details. `reply` covers TCP and UDP only:
-keep `permit icmp any any`. Without it, path MTU discovery breaks: a
-router on a path with a smaller MTU, such as a VPC's 9001-byte jumbo frames
-meeting the internet's 1500, answers a full-size packet from the VM with
-"fragmentation needed", the list drops that, and the connection hangs as
-soon as the VM sends more than a small answer.
-
-**Forgetting these is the most common mistake.** Section 6.1 has a ready-made
-baseline.
+**Without sw_flowd, replies need rules**, and forgetting them is the most
+common mistake. Section 6.1 has a ready-made baseline.
 
 ---
 
@@ -251,11 +245,7 @@ acl 10 10 deny host 203.0.113.66
 
 # what may come in
 acl 100 10 permit tcp any any eq 22            # SSH
-acl 100 20 permit tcp any any established      # TCP replies
-acl 100 30 permit udp any eq 53 any            # DNS replies
-acl 100 40 permit udp any eq 123 any           # NTP replies
-acl 100 50 permit udp any eq 67 any eq 68      # DHCP
-acl 100 60 permit icmp any any                 # ping, path MTU discovery
+acl 100 20 permit udp any eq 67 any eq 68      # DHCP
 
 bind eth0 in 10
 bind eth0 in 100
@@ -296,15 +286,15 @@ lines are ignored.
 acl <list> <seq> permit|deny ...        one rule (§5.2)
 bind <interface> in <list>              enforce a list on an interface (§5.7)
 set drop-ipv4-fragments 0|1             1 drops every IPv4 fragment; default 0
-set reply-idle-tcp <seconds>            how long an idle TCP flow's replies match; default 86400
-set reply-idle-udp <seconds>            the same for UDP; default 180
+set reply-idle-tcp <seconds>            how long an idle TCP flow's replies pass; default 86400
+set reply-idle-udp <seconds>            the same for UDP and ping; default 180
 ```
 
 `acl` rules:
 
 ```text
 acl <1-99>    <seq> permit|deny <source>
-acl <100-199> <seq> permit|deny <protocol> <source> [<port>] <destination> [<port>] [established|reply]
+acl <100-199> <seq> permit|deny <protocol> <source> [<port>] <destination> [<port>] [established]
 ```
 
 Numbers (list, sequence, prefix length, port, protocol, seconds) are
@@ -360,36 +350,40 @@ Remember that a **source** port comes right after the source address:
 
 Port 0 cannot be used.
 
-### 5.5 `established` (tcp only) and `reply` (tcp and udp)
+### 5.5 `established` (tcp only), and replies
 
 `established` matches TCP packets with the ACK or RST flag set, which means
-everything except the opening SYN of a new connection. Use it to let in
-replies to connections your VM started, while still blocking new inbound
-connections. It must be the last word of the rule.
+everything except the opening SYN of a new connection. It must be the
+last word of the rule. It is a stateless approximation: a forged packet
+with ACK set will also pass. The receiving kernel rejects such packets
+for unknown connections, but they do reach it. With sw_flowd running,
+you don't need it: replies to the VM's connections pass with no rule.
 
-It is a stateless approximation: a forged packet with ACK set will also
-pass. The receiving kernel rejects such packets for unknown connections,
-but they do reach it.
+Replies pass on an interface with an extended list, after its standard
+list and before the extended one. sw_flowd records each TCP connection
+the VM starts, each UDP flow it sends from an ephemeral port, and each
+ping, as they leave; a packet back on one of them passes. A TCP reply
+must have ACK or RST set. ICMP errors about the VM's own packets pass
+too, and "fragmentation needed" even about a connection the VM accepted.
+The counter is `reply`. The old `reply` keyword at the end of a rule is
+now an error: replies need no rule.
 
-`reply` matches only a reply to a flow your VM opened: sw_flowd records
-each TCP connection the VM starts and each UDP flow it sends from an
-ephemeral port, as they leave, and `reply` looks the packet up there by
-its addresses and ports. A TCP reply must also have ACK or RST set. It
-must be the last word of the rule, and can't be combined with
-`established`.
-
-- **Idle limits.** A flow's replies match while it last sent within
+- **Idle limits.** A flow's replies pass while it last sent within
   `reply-idle-tcp` seconds (default 86400, a day: well past TCP's 2-hour
-  keepalive) or `reply-idle-udp` (default 180). A connection that stays
-  silent longer loses its replies; it must reconnect.
-- **It fails closed.** mfwd takes sw_flowd's table when it starts, so
+  keepalive) or `reply-idle-udp` (default 180, for UDP and ping). A
+  connection that stays silent longer loses its replies; it must
+  reconnect. Once the VM closes a TCP connection, its replies pass for
+  120 s more after its FIN, 10 s after a RST.
+- **Without sw_flowd.** mfwd takes sw_flowd's table when it starts, so
   sw_flowd starts first (the units say so). An mfwd started without it
-  (`mfw status` shows `flows none`) matches nothing with `reply` until it
-  is restarted, so replies hit the implicit deny. Restarting sw_flowd
-  needs no restart of mfwd; `sw_flowd -P` does. The replies of
-  connections opened before sw_flowd first started are dropped too, and
-  so are those of flows its table evicted when full (`sw_flowd -S` counts
-  them as `evicted`).
+  (`mfw status` shows `flows none`) falls back to `established` until it
+  is restarted: TCP with ACK or RST passes (counter `reply_established`),
+  and other replies, UDP and ICMP included, need rules (§6.1).
+  Restarting sw_flowd needs no restart of mfwd; `sw_flowd -P` does.
+- **Connections sw_flowd never saw.** The replies of connections opened
+  before sw_flowd first started are dropped unless a rule permits them,
+  and so are those of flows its table evicted when full (`sw_flowd -S`
+  counts them as `evicted`).
 - **What sw_flowd doesn't record** isn't matched either: UDP sent from a
   fixed port (DHCP's 68, a server's own port) or from a port a local UDP
   service listens on. Permit those by port, as in §6.1.
@@ -446,16 +440,15 @@ Each recipe shows lines to add to the policy file. They assume
 
 ### 6.1 Baseline for a VM that needs the internet
 
-Start every extended list with these, then add your services:
+With sw_flowd running, replies need no rule; only DHCP does, since the
+VM sends it from a fixed port, which sw_flowd doesn't record:
 
 ```text
-acl 100 10 permit tcp any any reply
-acl 100 20 permit udp any any reply
-acl 100 30 permit udp any eq 67 any eq 68
-acl 100 40 permit icmp any any
+acl 100 10 permit udp any eq 67 any eq 68
 ```
 
-The `reply` lines need sw_flowd (§5.5). Without it:
+Then add your services. Without sw_flowd, start every extended list with
+these:
 
 ```text
 acl 100 10 permit tcp any any established
@@ -633,7 +626,7 @@ total packet count. Counters are cumulative and are only reset by
 a restart of mfwd, or `mfwd -P`. To measure a period, take two readings and subtract.
 
 **Rising `ext_implicit_deny` right after a change** usually means a missing
-reply rule (§3.4).
+rule: for a service, or, without sw_flowd, for replies (§3.4).
 
 ### 8.2 Seeing the current policy
 
@@ -659,8 +652,8 @@ flows                sw_flowd
 - **degraded**: interfaces filtered at TC ingress, because a program that
   isn't libxdp's dispatcher holds their XDP hook (§2). They are filtered
   the same, at a higher cost per dropped packet.
-- **flows**: `sw_flowd` while `reply` rules read sw_flowd's table, `none`
-  without it (they match nothing then).
+- **flows**: `sw_flowd` while replies are read from sw_flowd's table,
+  `none` without it (replies fall back to `established` then, §5.5).
 
 ---
 
@@ -677,7 +670,7 @@ mfw [-s socket] <command>
 | `mfw apply [file]` | Replace the whole policy with the file (stdin if no file or `-`). Attaches and detaches interfaces to match. |
 | `mfw check [file]` | Check a policy without sending it. Uses the same rules as mfwd and needs no access to mfwd. |
 | `mfw show` | Print the running policy. |
-| `mfw status` | Generation, attached, missing and degraded interfaces, fragment setting, whether `reply` reads sw_flowd's table. |
+| `mfw status` | Generation, attached, missing and degraded interfaces, fragment setting, whether replies are read from sw_flowd's table. |
 | `mfw stats [--json]` | Print counters. |
 | `mfw ping` | Check that mfwd answers. |
 | `mfw version` | Print version. |
@@ -784,10 +777,10 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | `saved policy not applied again: …` (mfwd log, at start) | the policy saved before the restart was refused this time, for example an interface's attach failed | fix the cause the log names, then apply the policy again; sw_configd sends its own again by itself. Until then every interface passes everything |
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
-| DNS, updates or web browsing stopped working | extended list lacks reply rules | add the §6.1 baseline |
-| `reply` rules let nothing in; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`) | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release |
+| DNS stopped working, web browsing works; `mfw status` shows `flows none` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`): replies fell back to `established`, which lets in TCP only | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release. Meanwhile, the §6.1 baseline without sw_flowd |
+| `apply` refuses a rule ending in `reply` | the keyword is gone: replies pass with no rule | delete the rule |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
-| connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped | `permit icmp any any` (§3.4) |
+| connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped: without sw_flowd, it needs a rule | start sw_flowd and restart mfwd, or `permit icmp any any` (§3.4) |
 | VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |

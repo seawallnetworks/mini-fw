@@ -8,9 +8,9 @@
  * one program, at XDP in libxdp's dispatcher or at TC ingress. Egress is
  * not filtered (local-VM protection only). Each interface has its own
  * ruleset (struct mfw_ruleset), found by the ifindex the packet arrived
- * on. "reply" ACEs look the packet up in sw_flowd's table of the flows the
- * host opened (Seawall proposal 0015); mfw.h itself doesn't need
- * sw_flowd.h, so front ends build without it.
+ * on. Replies to the flows the host opened, in sw_flowd's table, pass
+ * before the extended list, with no rule (Seawall proposal 0015 §4);
+ * mfw.h itself doesn't need sw_flowd.h, so front ends build without it.
  */
 
 
@@ -31,17 +31,16 @@
 /*
  * Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
  * the pins, of any version. 2: per-interface rulesets; 3: no unused
- * fields
+ * fields; 4: replies pass by default, the idle limits in the ruleset
  */
-#define MFW_ABI_VERSION  3
+#define MFW_ABI_VERSION  4
 
 /* mfw_rule.flags */
 #define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
-#define MFW_RULE_F_REPLY        (1 << 1)  /* reply to a flow the host opened */
 
 /*
- * "reply" ACEs' idle limits, in seconds: how long after a flow last left
- * its replies still match ("set reply-idle-tcp|reply-idle-udp N")
+ * The idle limits of replies, in seconds: how long after a flow last left
+ * its replies still pass ("set reply-idle-tcp|reply-idle-udp N")
  */
 #define MFW_REPLY_IDLE_TCP  86400
 #define MFW_REPLY_IDLE_UDP  180
@@ -101,11 +100,6 @@ struct mfw_rule {
     struct mfw_cidr        dst;       /* any for standard */
     struct mfw_port_range  sport;     /* any for standard */
     struct mfw_port_range  dport;
-    /*
-     * "reply" ACEs: the policy's reply-idle-tcp or -udp, in seconds, set
-     * by mfw_policy_compile()
-     */
-    __u32                  reply_idle;
 };
 
 
@@ -116,13 +110,17 @@ struct mfw_rule {
  * fills a new inner map and swaps it in, so a packet sees either the old
  * ruleset or the new one, never a mix. A packet no ACE of a bound
  * extended list matches is dropped (implicit deny); with none bound, it
- * passes.
+ * passes. Where one is bound, a reply to a flow the host opened passes
+ * before it, within the policy's idle limits, which travel here with
+ * the rules.
  */
 struct mfw_ruleset {
     __u16                  std_acl;   /* bound standard list, 0 = none */
     __u16                  ext_acl;   /* bound extended list, 0 = none */
     __u16                  n_std;     /* std[0 .. n_std) in use */
     __u16                  n_ext;     /* ext[0 .. n_ext) in use */
+    __u32                  reply_idle_tcp;  /* seconds: set reply-idle-tcp */
+    __u32                  reply_idle_udp;  /* seconds: set reply-idle-udp */
     struct mfw_rule        std[MFW_MAX_STD_ACES];
     struct mfw_rule        ext[MFW_MAX_EXT_ACES];
 };
@@ -130,13 +128,19 @@ struct mfw_ruleset {
 
 /*
  * Settings for every interface: the single entry (key 0) of the "config"
- * array map. mfwd writes it; BPF reads only drop_ipv4_fragments. All
- * zeros is a new map that mfwd has yet to set up: abi_version is 0.
+ * array map. mfwd writes it; BPF reads drop_ipv4_fragments and
+ * no_flow_table. All zeros is a new map that mfwd has yet to set up:
+ * abi_version is 0.
  */
 struct mfw_config {
     __u8                   drop_ipv4_fragments;  /* 1: drop all fragments */
     __u8                   abi_version;          /* MFW_ABI_VERSION */
-    __u8                   pad0[2];
+    /*
+     * 1: mfwd started without sw_flowd's table, and replies fall back to
+     * "established": TCP with ACK or RST passes, UDP goes to the lists
+     */
+    __u8                   no_flow_table;
+    __u8                   pad0;
     __u32                  generation;           /* bumped on every apply */
 };
 
@@ -161,6 +165,8 @@ enum mfw_stat_id {
     MFW_STAT_FRAG_DROP,         /* drop_ipv4_fragments=1 */
     MFW_STAT_NON_IPV4,          /* passed untouched */
     MFW_STAT_TCP_FRAG_OFF1,     /* TCP fragment at offset 1 (RFC 1858) */
+    MFW_STAT_REPLY,             /* a reply to a flow the host opened */
+    MFW_STAT_REPLY_ESTABLISHED, /* no sw_flowd table: TCP with ACK or RST */
     MFW_STAT_MAX,
 };
 

@@ -452,8 +452,6 @@ void
 mfw_policy_compile(const struct mfw_policy *p, int i,
     struct mfw_ruleset *rs)
 {
-    int                     j;
-    struct mfw_rule        *r;
     const struct mfw_bind  *b;
 
     b = &p->binds[i];
@@ -471,15 +469,9 @@ mfw_policy_compile(const struct mfw_policy *p, int i,
         rs->n_ext = copy_list(p, b->ext_acl, rs->ext, MFW_MAX_EXT_ACES);
     }
 
-    /* each "reply" ACE carries its protocol's idle limit: no map for it */
-    for (j = 0; j < rs->n_ext; j++) {
-        r = &rs->ext[j];
-
-        if (r->flags & MFW_RULE_F_REPLY) {
-            r->reply_idle = r->proto == MFW_PROTO_TCP ? p->reply_idle_tcp
-                                                      : p->reply_idle_udp;
-        }
-    }
+    /* the replies' idle limits travel with the rules: no map for them */
+    rs->reply_idle_tcp = p->reply_idle_tcp;
+    rs->reply_idle_udp = p->reply_idle_udp;
 }
 
 

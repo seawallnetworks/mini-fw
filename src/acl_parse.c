@@ -269,7 +269,7 @@ int
 mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
     size_t errlen)
 {
-    int                  i, ports_ok, rc;
+    int                  i, j, ports_ok, rc;
     unsigned long long   acl, seq;
 
     memset(out, 0, sizeof(*out));
@@ -358,6 +358,15 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
         return rc;
     }
 
+    /* anywhere at the end, "established reply" included: say why */
+    for (j = i; j < argc; j++) {
+        if (strcmp(argv[j], "reply") == 0) {
+            return sw_fail(err, errlen,
+                           "'reply' is gone: replies to the host's own "
+                           "flows pass without a rule");
+        }
+    }
+
     if (i < argc && strcmp(argv[i], "established") == 0) {
         if (out->proto != MFW_PROTO_TCP) {
             return sw_fail(err, errlen,
@@ -367,14 +376,6 @@ mfw_parse_ace(int argc, char **argv, struct mfw_rule *out, char *err,
         out->flags |= MFW_RULE_F_ESTABLISHED;
         i++;
 
-    } else if (i < argc && strcmp(argv[i], "reply") == 0) {
-        if (out->proto != MFW_PROTO_TCP && out->proto != MFW_PROTO_UDP) {
-            return sw_fail(err, errlen,
-                           "'reply' is only valid with tcp or udp");
-        }
-
-        out->flags |= MFW_RULE_F_REPLY;
-        i++;
     }
 
     if (i < argc) {
@@ -506,7 +507,6 @@ mfw_format_ace(const struct mfw_rule *r, char *buf, size_t len)
         break;
     }
 
-    snprintf(buf, len, "%s %s %s%s %s%s%s%s", act, proto, src, sp, dst, dp,
-             (r->flags & MFW_RULE_F_ESTABLISHED) ? " established" : "",
-             (r->flags & MFW_RULE_F_REPLY) ? " reply" : "");
+    snprintf(buf, len, "%s %s %s%s %s%s%s", act, proto, src, sp, dst, dp,
+             (r->flags & MFW_RULE_F_ESTABLISHED) ? " established" : "");
 }

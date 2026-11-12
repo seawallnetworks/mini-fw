@@ -111,7 +111,7 @@ test_parse_and_format(void)
            "bind eth0 in 100\n"
            "bind eth0 in 10\n"
            "acl 110 5 permit icmp any any\n"
-           "acl 110 10 permit tcp any any reply\n"
+           "acl 110 10 permit tcp any any established\n"
            "set reply-idle-udp 60\n"
            "set drop-ipv4-fragments 1";        /* no final newline */
 
@@ -119,7 +119,7 @@ test_parse_and_format(void)
             "acl 100 10 permit tcp any host 10.0.0.5 eq 22\n"
             "acl 100 20 permit udp any eq 53 any\n"
             "acl 110 5 permit icmp any any\n"
-            "acl 110 10 permit tcp any any reply\n"
+            "acl 110 10 permit tcp any any established\n"
             "bind eth0 in 10\n"
             "bind eth0 in 100\n"
             "bind eth1 in 110\n"
@@ -208,6 +208,9 @@ test_rejections(void)
     reject("set reply-idle-udp 31536001\n",
            "line 1: reply-idle-udp must be 1-31536000 seconds");
     reject("set reply-idle-udp\n", MFW_SET_USAGE);
+    reject("acl 100 10 permit tcp any any reply\n",
+           "line 1: 'reply' is gone: replies to the host's own flows pass "
+           "without a rule");
     reject("acl 100 +10 permit ip any any\n",
            "line 1: sequence number must be 1-65535, got '+10'");
     reject("bind eth0 in +10\n",
@@ -288,9 +291,8 @@ test_compile(void)
            "acl 10 10 deny host 192.0.2.1\n"
            "acl 100 10 permit tcp any any eq 22\n"
            "acl 20 10 deny any\n"
-           "acl 102 10 permit tcp any any reply\n"
-           "acl 102 20 permit udp any any reply\n"
-           "acl 102 30 permit udp any any\n"
+           "acl 102 10 permit tcp any any established\n"
+           "acl 102 20 permit udp any any\n"
            "bind eth0 in 10\n"
            "bind eth0 in 100\n"
            "bind eth1 in 101\n"        /* bound but no ACEs */
@@ -317,11 +319,10 @@ test_compile(void)
               "eth1: an empty bound extended list stays bound");
 
     mfw_policy_compile(&p, 2, &rs);
-    mfw_check(rs.n_ext == 3 && rs.ext[0].reply_idle == MFW_REPLY_IDLE_TCP
-              && rs.ext[1].reply_idle == 60 && rs.ext[2].reply_idle == 0,
-              "eth2: each reply ACE carries its protocol's idle limit: "
-              "%u %u %u", rs.ext[0].reply_idle, rs.ext[1].reply_idle,
-              rs.ext[2].reply_idle);
+    mfw_check(rs.n_ext == 2 && rs.reply_idle_tcp == MFW_REPLY_IDLE_TCP
+              && rs.reply_idle_udp == 60,
+              "eth2: the ruleset carries the replies' idle limits: %u %u",
+              rs.reply_idle_tcp, rs.reply_idle_udp);
 
     mfw_policy_free(&p);
 }

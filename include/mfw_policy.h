@@ -19,11 +19,15 @@
  *
  * "acl <list> <seq> <ACE>" defines one ACE in Cisco syntax; "bind <if> in
  * <list>" puts a list on an interface (one standard and one extended list
- * per interface); the "set" items are global. An extended tcp or udp ACE
- * that ends in "reply" matches only replies to flows the host opened, as
- * sw_flowd recorded them, that last left within reply-idle-tcp or
- * reply-idle-udp seconds (default 86400 and 180); without sw_flowd it
- * matches nothing. '#' starts a comment, to the end of the line; blank
+ * per interface); the "set" items are global. On an interface with an
+ * extended list, replies to flows the host opened, as sw_flowd recorded
+ * them, pass before the list, with no rule (Seawall proposal 0015 §4):
+ * TCP and UDP within reply-idle-tcp or reply-idle-udp seconds of the
+ * flow's last packet out (default 86400 and 180), echo replies, and ICMP
+ * errors about them; the standard list's denies still apply to them.
+ * Without sw_flowd's table, TCP with ACK or RST passes, as "established"
+ * would. "reply" at the end of an ACE is an error: it is no longer
+ * needed. '#' starts a comment, to the end of the line; blank
  * lines are ignored. Lists that are not bound are kept but enforce
  * nothing.
  */

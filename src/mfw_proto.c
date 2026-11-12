@@ -56,6 +56,8 @@ static const char *const  mfw_stat_names[MFW_STAT_MAX] = {
     [MFW_STAT_FRAG_DROP]         = "frag_drop",
     [MFW_STAT_NON_IPV4]          = "non_ipv4",
     [MFW_STAT_TCP_FRAG_OFF1]     = "tcp_frag_off1",
+    [MFW_STAT_REPLY]             = "reply",
+    [MFW_STAT_REPLY_ESTABLISHED] = "reply_established",
 };
 
 static const mfw_err_code_t  mfw_err_codes[] = {

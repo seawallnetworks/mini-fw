@@ -50,8 +50,9 @@ typedef struct {
 /*
  * STATUS. generation is the last APPLY's, 0 if none since mfwd started.
  * degraded lists interfaces attached at TC ingress, not XDP, because
- * another program holds their XDP hook. flows is "sw_flowd" when "reply"
- * ACEs read its table, "none" without it.
+ * another program holds their XDP hook. flows is "sw_flowd" while replies
+ * are read from its table, "none" without it, when they fall back to
+ * "established".
  */
 struct mfw_status {
     __u32             generation;
