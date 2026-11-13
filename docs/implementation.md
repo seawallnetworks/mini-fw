@@ -349,12 +349,11 @@ Everything one interface enforces, compiled from its bindings:
 when it starts, refuses maps whose type, key or value size is not
 `sw_flowd.h`'s, and a table without its config, and binds both to every
 program it loads, the TC entry and each XDP copy, with
-`bpf_map__reuse_fd()`. An
-mfwd started without them warns, its programs get empty maps of their
-own, and it sets `no_flow_table` in its config: replies fall back to
-`established` until an mfwd started with the table replaces them
-(§5.1). The programs hold the table, so a restart of
-sw_flowd changes nothing; `sw_flowd -P` makes a new one, which a restart
+`bpf_map__reuse_fd()`. An mfwd started without them logs at crit,
+naming the pin, its programs get empty maps of their own, and it sets
+`no_flow_table` in its config: replies fall back to `established` until
+an mfwd started with the table replaces them (§5.1). The programs hold
+the table, so a restart of sw_flowd changes nothing; `sw_flowd -P` makes a new one, which a restart
 of mfwd picks up. mini-fw only looks the table up. Its layout comes from
 sw_flowd's installed header, `<sw_flowd/sw_flowd.h>`, which mfwd and the
 BPF program build against (`SW_FLOWD_PREFIX`); libmfw does not need it.

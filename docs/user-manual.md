@@ -462,8 +462,9 @@ acl 100 50 permit icmp any any
 ```
 
 Drop the DHCP line if the VM has a static address. Drop the NTP line if it
-doesn't sync time over the network. Keep the ICMP line: it lets in path MTU
-discovery's "fragmentation needed" as well as ping (§3.4).
+doesn't sync time over the network. Keep the ICMP line if the VM should
+answer ping; path MTU discovery's "fragmentation needed" about the VM's
+packets passes without it (§3.4).
 
 ### 6.2 SSH only from an admin network
 

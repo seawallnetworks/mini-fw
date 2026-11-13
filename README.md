@@ -223,8 +223,8 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   it never writes them. sw_flowd starts first (`mfwd.service` is `After=`
   and `Wants=sw_flowd.service`): mfwd opens both pins when it starts, and
   every program it loads binds them (`bpf_map__reuse_fd`); a table
-  without its config isn't read. An mfwd started without them warns, and
-  sets `no_flow_table` in its config: replies fall back to `established`
+  without its config isn't read. An mfwd started without them logs at
+  crit, and sets `no_flow_table` in its config: replies fall back to `established`
   until mfwd restarts; a restart of sw_flowd changes nothing for mfwd.
   The idle limits travel in the ruleset, with the rules, so there is no
   map for them. The ICMP error check is a global function, walked once

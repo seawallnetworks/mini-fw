@@ -356,7 +356,7 @@ map_id() {
     bpftool -j map show pinned "$1" \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])'
 }
-logged "log: no table, at crit" '\[CRIT\] no sw_flowd flow table'
+logged "log: no table, at crit" '\[CRIT\] no sw_flowd pin /sys/fs/bpf/seawall/flows/outbound'
 same "flows: none" "$(field flows)" none
 # a broken install: mfw status says so first (Seawall proposal 0015 §6)
 same "status: CRITICAL first" "$(mfw status | head -1 | cut -d' ' -f1)" \

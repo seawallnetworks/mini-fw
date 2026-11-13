@@ -875,6 +875,18 @@ test_reply(void)
               == TC_ACT_UNSPEC, "no extended list: passes");
     mfw_check(stat(MFW_STAT_REPLY) == before, "and isn't looked up");
 
+    /* an extended list bound with no entry yet: replies only */
+    reset();
+    mfw_rs.ext_acl = 100;
+    commit();
+
+    mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 40000, .tcp_flags = 0x10)
+              == TC_ACT_UNSPEC, "an empty extended list: a reply passes");
+    mfw_check(mfw_tc(.src = "1.1.1.1", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 443, .dport = 22, .tcp_flags = 0x02)
+              == TC_ACT_SHOT, "and nothing else");
+
     /* without sw_flowd's table: "established", TCP only */
     reset();
     add("100 permit tcp any host 10.0.0.5 eq 22");
@@ -882,11 +894,18 @@ test_reply(void)
     set_no_flow_table(1);
     before = stat(MFW_STAT_REPLY_ESTABLISHED);
 
-    mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
-                     .sport = 443, .dport = 40020, .tcp_flags = 0x10)
-              == TC_ACT_UNSPEC, "no table: an ACK passes");
-    mfw_check(stat(MFW_STAT_REPLY_ESTABLISHED) > before,
-              "counted as established");
+    {
+        __u64  permit = stat(MFW_STAT_EXT_PERMIT);
+        __u64  deny = stat(MFW_STAT_EXT_IMPLICIT_DENY);
+
+        mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
+                         .sport = 443, .dport = 40020, .tcp_flags = 0x10)
+                  == TC_ACT_UNSPEC, "no table: an ACK passes");
+        mfw_check(stat(MFW_STAT_REPLY_ESTABLISHED) == before + 1
+                  && stat(MFW_STAT_EXT_PERMIT) == permit
+                  && stat(MFW_STAT_EXT_IMPLICIT_DENY) == deny,
+                  "counted as established only");
+    }
     mfw_check(mfw_tc(.src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
                      .sport = 443, .dport = 40020, .tcp_flags = 0x04)
               == TC_ACT_UNSPEC, "no table: a RST passes");

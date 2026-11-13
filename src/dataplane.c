@@ -509,11 +509,13 @@ mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments, __u32 generation)
 static int
 flow_table_open(int *config_fd)
 {
-    int    fd, cfd;
-    __u32  size;
+    int          fd, cfd;
+    __u32        size;
+    const char  *pin;
 
     *config_fd = -1;
     size = 0;
+    pin = SF_PIN_ROOT "/" SF_PIN_OUTBOUND;
     fd = sf_outbound_open(&size);
 
     if (fd >= 0) {
@@ -522,6 +524,7 @@ flow_table_open(int *config_fd)
         if (cfd < 0) {
             close(fd);
             fd = cfd;
+            pin = SF_PIN_ROOT "/" SF_PIN_CONFIG;
 
         } else {
             *config_fd = cfd;
@@ -529,18 +532,20 @@ flow_table_open(int *config_fd)
     }
 
     if (fd == -ENOENT) {
-        sw_log_crit("no sw_flowd flow table under %s: replies fall back to "
+        sw_log_crit("no sw_flowd pin %s: replies fall back to "
                     "\"established\" until mfwd restarts with it (start "
-                    "sw_flowd first)", SF_PIN_ROOT);
+                    "sw_flowd, then restart mfwd)", pin);
 
     } else if (fd == -EPROTO) {
-        sw_log_crit("sw_flowd's flow table under %s is not the layout this "
-                    "mfwd reads: replies fall back to \"established\"",
-                    SF_PIN_ROOT);
+        sw_log_crit("sw_flowd's pin %s is not the layout this mfwd reads: "
+                    "replies fall back to \"established\" (install "
+                    "sw_flowd and mini-fw of one release, stop sw_flowd, "
+                    "run sw_flowd -P, start it, then restart mfwd)", pin);
 
     } else if (fd < 0) {
-        sw_log_crit("sw_flowd's flow table under %s: %s: replies fall back "
-                    "to \"established\"", SF_PIN_ROOT, strerror(-fd));
+        sw_log_crit("sw_flowd's pin %s: %s: replies fall back to "
+                    "\"established\" until mfwd restarts with it", pin,
+                    strerror(-fd));
 
     } else {
         sw_log_info("reading sw_flowd's flow table (%u flows): replies to "
