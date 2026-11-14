@@ -285,6 +285,61 @@ else
     echo "  skip: no sw_flowd at $FLOWD (set SW_FLOWD)"
 fi
 
+echo "== DHCP: the server's answers pass with no rule (0015 §7)"
+# udhcpd on cli, udhcpc on fw behind an allow-list of SSH alone. The
+# first exchange is read by udhcpc's packet socket, which at TC sees a
+# packet before mini-fw drops it; a renewal is read by its UDP socket on
+# 68, after TC: the check that holds at both hooks, with a blacklisted
+# server as its control.
+cat >"$TMP/udhcpd.conf" <<EOF
+start 10.200.0.50
+end 10.200.0.60
+interface veth-cli
+lease_file $TMP/udhcpd.leases
+pidfile $TMP/udhcpd.pid
+option subnet 255.255.255.0
+option lease 600
+EOF
+touch "$TMP/udhcpd.leases"
+cat >"$TMP/dhcp.sh" <<EOF
+#!/bin/sh
+echo "\$1 \$ip" >>"$TMP/dhcp.events"
+[ "\$1" = bound ] && ip addr add "\$ip/24" dev "\$interface"
+exit 0
+EOF
+chmod +x "$TMP/dhcp.sh"
+dhcp_event() {  # dhcp_event bound|renew n: the nth such event, within 5 s
+    for _ in $(seq 50); do
+        [[ $(grep -c "^$1 " "$TMP/dhcp.events" 2>/dev/null) -ge $2 ]] \
+            && return 0
+        sleep 0.1
+    done
+    return 1
+}
+policy "acl 10 10 deny host 1.1.1.1" "acl 100 10 permit tcp any any eq 22" \
+    "bind veth-fw in 10" "bind veth-fw in 100"
+# ip netns exec, not in_cli: a function run in the background is a
+# subshell, and $! would be its pid, not the daemon's
+ip netns exec "$CLI" busybox udhcpd -f "$TMP/udhcpd.conf" \
+    >>"$TMP/dhcp.log" 2>&1 &
+DHCPD_PID=$!
+ip netns exec "$FW" busybox udhcpc -f -i veth-fw -s "$TMP/dhcp.sh" \
+    -t 5 -T 1 -n >>"$TMP/dhcp.log" 2>&1 &
+DHCPC_PID=$!
+expect ok   "a lease is obtained" dhcp_event bound 1
+kill -USR1 "$DHCPC_PID"
+expect ok   "and renewed" dhcp_event renew 1
+expect ok   "counted as reply_dhcp" test "$(stat_of reply_dhcp)" -gt 0
+policy "acl 10 10 deny host 10.200.0.1" "acl 100 10 permit tcp any any eq 22" \
+    "bind veth-fw in 10" "bind veth-fw in 100"
+kill -USR1 "$DHCPC_PID"
+expect fail "a blacklisted server's renewal is dropped" dhcp_event renew 2
+kill "$DHCPC_PID" "$DHCPD_PID" 2>/dev/null
+wait "$DHCPC_PID" "$DHCPD_PID" 2>/dev/null
+in_fw ip addr flush dev veth-fw
+in_fw ip addr add $FW_IP/24 dev veth-fw
+policy
+
 echo "== ingress only; egress is never filtered"
 policy "acl 100 10 permit ip any any" "bind veth-fw in 100"
 expect fail "nothing at TC egress" tcx_on veth-fw egress

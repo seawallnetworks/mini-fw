@@ -216,11 +216,14 @@ only says who may connect in.
 | ping | the echo replies to its pings |
 | sends a packet larger than the path's MTU | ICMP "fragmentation needed", for its own connections and the ones it accepted |
 | reaches an unreachable port or host, or a traceroute | the ICMP errors about its own packets |
+| gets its address by DHCP | the DHCP server's answers, UDP from port 67 to 68, broadcast ones too, with no flow |
 
 A forged packet has to guess the connection's address and both ports,
-so an ACK flood doesn't pass. §5.5 has the details: idle limits, what
-sw_flowd doesn't record (DHCP, which needs its own rule), and what
-happens without sw_flowd.
+so an ACK flood doesn't pass. DHCP's answers pass without a recorded
+flow: only the VM's DHCP client listens on port 68, and it drops an
+answer to a request it didn't send. Counter `reply_dhcp`. §5.5 has the
+details: idle limits, what sw_flowd doesn't record, and what happens
+without sw_flowd.
 
 **Block an address in the standard list.** Its denies stop replies too.
 A `deny` in the extended list doesn't stop them: replies pass before
@@ -245,7 +248,6 @@ acl 10 10 deny host 203.0.113.66
 
 # what may come in
 acl 100 10 permit tcp any any eq 22            # SSH
-acl 100 20 permit udp any eq 67 any eq 68      # DHCP
 
 bind eth0 in 10
 bind eth0 in 100
@@ -380,7 +382,8 @@ now an error: replies need no rule.
   that at `crit`, `mfw status` starts with a `CRITICAL` line and shows
   `flows none`, and it falls back to `established` until it
   is restarted: TCP with ACK or RST passes (counter `reply_established`),
-  and so does "fragmentation needed", which needs no table; other
+  and so do "fragmentation needed" and DHCP's answers, which need no
+  table; other
   replies, UDP and other ICMP included, need rules (§6.1).
   Restarting sw_flowd needs no restart of mfwd; `sw_flowd -P` does.
 - **Connections sw_flowd never saw.** The replies of connections opened
@@ -388,8 +391,10 @@ now an error: replies need no rule.
   and so are those of flows its table evicted when full (`sw_flowd -S`
   counts them as `evicted`).
 - **What sw_flowd doesn't record** isn't matched either: UDP sent from a
-  fixed port (DHCP's 68, a server's own port) or from a port a local UDP
-  service listens on. Permit those by port, as in §6.1.
+  fixed port that isn't in sw_flowd's `record_udp_ports` (by default 123,
+  classic `ntpd`'s) or from a port a local UDP service listens on. Permit
+  those by port, as in §6.1. DHCP needs nothing: its answers pass on
+  their own, with or without sw_flowd.
 
 ### 5.6 Sequence numbers
 
@@ -443,26 +448,18 @@ Each recipe shows lines to add to the policy file. They assume
 
 ### 6.1 Baseline for a VM that needs the internet
 
-With sw_flowd running, replies need no rule; only DHCP does, since the
-VM sends it from a fixed port, which sw_flowd doesn't record:
-
-```text
-acl 100 10 permit udp any eq 67 any eq 68
-```
-
-Then add your services. Without sw_flowd, start every extended list with
-these:
+With sw_flowd running, replies need no rule, and DHCP's answers pass on
+their own: add your services. Without sw_flowd, start every extended
+list with these:
 
 ```text
 acl 100 10 permit tcp any any established
 acl 100 20 permit udp any eq 53 any
 acl 100 30 permit udp any eq 123 any
-acl 100 40 permit udp any eq 67 any eq 68
-acl 100 50 permit icmp any any
+acl 100 40 permit icmp any any
 ```
 
-Drop the DHCP line if the VM has a static address. Drop the NTP line if it
-doesn't sync time over the network. Keep the ICMP line if the VM should
+Drop the NTP line if the VM doesn't sync time over the network. Keep the ICMP line if the VM should
 answer ping; path MTU discovery's "fragmentation needed" about the VM's
 packets passes without it (§3.4).
 
@@ -785,7 +782,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | `apply` refuses a rule ending in `reply` | the keyword is gone: replies pass with no rule | delete the rule |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
 | connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped before mini-fw (a router, a cloud security group), or by a standard-list deny of the router that sends it | let ICMP type 3 code 4 through there; don't blacklist the router (§3.4) |
-| VM lost its IP address after some hours | DHCP renewal replies blocked | `permit udp any eq 67 any eq 68` |
+| VM lost its IP address after some hours | the DHCP server's answers were dropped before mini-fw, or by a standard-list deny of the server; mini-fw passes them otherwise (`reply_dhcp` rises at each renewal) | don't blacklist the DHCP server; check the network in front of the VM |
 | A service is unreachable | no permit rule, or a deny rule above it | `mfw show`; watch `ext_implicit_deny` / `ext_deny` while testing |
 | Everything blocked | a bound extended list is empty or lacks your rules | fix the file, or `mfw apply /dev/null` |
 | Large UDP transfers fail | `drop-ipv4-fragments 1`, or the first fragment is not permitted | §6.7 |

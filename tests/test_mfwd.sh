@@ -371,7 +371,8 @@ same "a table that comes later is not picked up" "$(field flows)" none
 stop
 start
 same "a table without its config is not read" "$(field flows)" none
-bpftool map create "$FLOWS/config" type array key 4 value 4 \
+# struct sf_config: port_lo, port_hi, record[SF_RECORD_PORTS_MAX = 8]
+bpftool map create "$FLOWS/config" type array key 4 value 20 \
     entries 1 name config
 stop
 start

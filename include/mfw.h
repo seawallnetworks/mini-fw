@@ -31,9 +31,10 @@
 /*
  * Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
  * the pins, of any version. 2: per-interface rulesets; 3: no unused
- * fields; 4: replies pass by default, the idle limits in the ruleset
+ * fields; 4: replies pass by default, the idle limits in the ruleset;
+ * 5: reply_dhcp
  */
-#define MFW_ABI_VERSION  4
+#define MFW_ABI_VERSION  5
 
 /* mfw_rule.flags */
 #define MFW_RULE_F_ESTABLISHED  (1 << 0)  /* established: ACK or RST set */
@@ -168,6 +169,7 @@ enum mfw_stat_id {
     MFW_STAT_TCP_FRAG_OFF1,     /* TCP fragment at offset 1 (RFC 1858) */
     MFW_STAT_REPLY,             /* a reply to a flow the host opened */
     MFW_STAT_REPLY_ESTABLISHED, /* no sw_flowd table: TCP with ACK or RST */
+    MFW_STAT_REPLY_DHCP,        /* UDP from 67 to 68, a DHCP server's */
     MFW_STAT_MAX,
 };
 

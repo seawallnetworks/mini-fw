@@ -166,13 +166,17 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   path MTU errors (fragmentation needed) even without a flow, which may
   be about a connection the host accepted. Counter `reply`. There is no
   switch to turn it off.
+- **DHCP's answers pass too**, UDP from 67 to 68, broadcast ones
+  included, with no flow and with or without sw_flowd's table: a host
+  whose lease can't renew loses its address. Counter `reply_dhcp`.
 - **Block an address in the standard list.** Its denies stop replies too.
   A `deny` in the extended list doesn't: replies pass before it, so
   `deny ip host 203.0.113.9 any` there still lets that host's replies in.
 - **Without sw_flowd's table** (sw_flowd not running when mfwd started,
   or a table of another layout), replies fall back to `established`: TCP
   with ACK or RST passes (counter `reply_established`); "fragmentation
-  needed" about the host's packets still passes, since it needs no table;
+  needed" about the host's packets still passes, since it needs no table,
+  and so do DHCP's answers;
   UDP and other ICMP go to the lists, so DNS needs a source-port ACE
   (`permit udp any eq 53 any`).
   That is weaker than the table: an ACK flood passes. Connections opened

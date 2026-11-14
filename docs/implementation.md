@@ -156,6 +156,7 @@ frame
   ├─ non-first fragment (offset ≠ 0) .................... PASS   (§8.2)
   │
   ├─ 2. replies, where an extended list is bound (§8.1)
+  │     ├─ UDP from 67 to 68, a DHCP server's answer ..... PASS   (reply_dhcp)
   │     ├─ a reply to a flow the host opened, or an ICMP
   │     │  error about one, or fragmentation needed ...... PASS   (reply)
   │     ├─ no sw_flowd table: TCP with ACK or RST ........ PASS   (reply_established)
@@ -396,6 +397,7 @@ Each packet increments **exactly one outcome** and **at most one reason**.
 | 10 | `tcp_frag_off1` | reason | TCP fragment at offset 1 (§3.2) |
 | 11 | `reply` | reason | a reply to a flow the host opened, passed before the extended list |
 | 12 | `reply_established` | reason | no sw_flowd table: TCP with ACK or RST passed as `established` would |
+| 13 | `reply_dhcp` | reason | UDP from 67 to 68, a DHCP server's answer, passed before the extended list with no flow |
 
 Packets passed with no list deciding (both unbound, a standard miss with
 extended unbound, or a non-first fragment) get an outcome but no reason.
@@ -693,6 +695,14 @@ flow, which may be about a connection the host accepted (a client of
 its own web server across a tunnel). A forged reply needs the flow's
 address and both ports, so an ACK flood doesn't pass. There is no
 switch to turn it off.
+
+A DHCP server's answers, UDP from 67 to 68, pass there too, before the
+lookup, with or without the table (counter `reply_dhcp`; 0015 §7): a
+first exchange is broadcast and a server may answer by broadcast, so no
+flow can hold it, and a host whose lease can't renew loses its address.
+The hole is small: only the DHCP client listens on 68, and it drops an
+answer whose transaction ID isn't the one it sent. A standard-list deny
+of the server still drops them.
 
 - **Block addresses in the standard list.** Its denies stop replies too.
   An extended `deny ip host X any` doesn't: replies pass before it.

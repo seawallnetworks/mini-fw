@@ -865,6 +865,43 @@ test_reply(void)
                      .sport = 443, .dport = 40000, .tcp_flags = 0x10)
               == TC_ACT_UNSPEC, "an extended deny doesn't stop replies");
 
+    /* a DHCP server's answers pass with no flow, unicast or broadcast */
+    reset();
+    add("10 deny host 9.9.9.8");
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    commit();
+
+    {
+        __u64  dhcp = stat(MFW_STAT_REPLY_DHCP);
+        __u64  reply = stat(MFW_STAT_REPLY);
+
+        mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "10.0.0.5", MFW_UDP,
+                         .sport = 67, .dport = 68)
+                  == TC_ACT_UNSPEC, "dhcp: a server's unicast answer");
+        mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "255.255.255.255",
+                         MFW_UDP, .sport = 67, .dport = 68)
+                  == TC_ACT_UNSPEC, "dhcp: a broadcast answer");
+        mfw_check(stat(MFW_STAT_REPLY_DHCP) == dhcp + 2
+                  && stat(MFW_STAT_REPLY) == reply,
+                  "dhcp: counted as reply_dhcp only");
+    }
+
+    mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 66, .dport = 68)
+              == TC_ACT_SHOT, "dhcp: not from 67");
+    mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 67, .dport = 69)
+              == TC_ACT_SHOT, "dhcp: not to 68");
+    mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 68, .dport = 67)
+              == TC_ACT_SHOT, "dhcp: a client's request in");
+    mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "10.0.0.5", MFW_TCP,
+                     .sport = 67, .dport = 68, .tcp_flags = 0x02)
+              == TC_ACT_SHOT, "dhcp: TCP from 67 to 68");
+    mfw_check(mfw_tc(.src = "9.9.9.8", .dst = "10.0.0.5", MFW_UDP,
+                     .sport = 67, .dport = 68)
+              == TC_ACT_SHOT, "dhcp: a blacklisted server's");
+
     /* no extended list: everything passes, and nothing is looked up */
     reset();
     commit();
@@ -937,6 +974,9 @@ test_reply(void)
     mfw_check(mfw_tc(.src = "8.8.8.8", .dst = "10.0.0.5", MFW_UDP,
                      .sport = 53, .dport = 50000)
               == TC_ACT_SHOT, "no table: UDP goes to the lists");
+    mfw_check(mfw_tc(.src = "10.0.0.1", .dst = "255.255.255.255", MFW_UDP,
+                     .sport = 67, .dport = 68)
+              == TC_ACT_UNSPEC, "no table: DHCP still passes");
 
     set_no_flow_table(0);
     flows_clear(table);

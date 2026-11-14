@@ -557,6 +557,21 @@ mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex, void *ctx,
      * passes anyway, and nothing is looked up.
      */
     if (rc == PKT_OK && rs != NULL && rs->ext_acl != 0) {
+        /*
+         * A DHCP server's answers, UDP from 67 to 68, with or without the
+         * table: a first exchange is broadcast, and a server may answer
+         * by broadcast, so no flow holds it, and a host whose lease can't
+         * renew loses its address (Seawall proposal 0015 §7). Only the
+         * DHCP client listens on 68, and it drops an answer whose
+         * transaction ID isn't the one it sent.
+         */
+        if (p->l4_proto == IPPROTO_UDP && p->sport == bpf_htons(67)
+            && p->dport == bpf_htons(68))
+        {
+            stat_inc(MFW_STAT_REPLY_DHCP);
+            goto pass;
+        }
+
         switch (mfw_reply(rs, p, ctx, hook)) {
         case MFW_REPLY_YES:
             stat_inc(MFW_STAT_REPLY);
