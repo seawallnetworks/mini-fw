@@ -277,6 +277,15 @@ list says so.
   recorded, the later ones aren't, and their replies stop passing once
   the flow is idle for `reply-idle-udp`. Connected sockets, which most
   resolvers and QUIC clients use, aren't affected.
+- **A connection silent longer than its idle limit**, `reply-idle-tcp`
+  (a day) or `reply-idle-udp` (180 s), loses its replies until it sends
+  again, and so does a flow sw_flowd's full table evicted (`sw_flowd -S`
+  counts them as `evicted`).
+- **A VM that serves NTP to clients it doesn't trust** should set
+  sw_flowd's `record_udp_ports = none`: its answers from 123 are
+  recorded too, so spoofed queries would fill sw_flowd's table and evict
+  the VM's own flows. Then permit the upstream servers' answers:
+  `permit udp host <server> eq 123 any eq 123`.
 - **Without sw_flowd**, replies fall back to `established` (§5.5).
 
 **When a tool on the VM stopped working**, run `sudo mfw misses`
@@ -511,9 +520,9 @@ acl 100 30 permit udp any eq 123 any
 acl 100 40 permit icmp any any
 ```
 
-Drop the NTP line if the VM doesn't sync time over the network. Keep the ICMP line if the VM should
-answer ping; path MTU discovery's "fragmentation needed" about the VM's
-packets passes without it (§3.4).
+Drop the NTP line if the VM doesn't sync time over the network. Keep the
+ICMP line if the VM should answer ping; path MTU discovery's
+"fragmentation needed" about the VM's packets passes without it (§3.4).
 
 ### 6.2 SSH only from an admin network
 

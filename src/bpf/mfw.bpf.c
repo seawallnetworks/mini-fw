@@ -548,7 +548,9 @@ miss_record(const struct pkt_meta *p, __u32 ifindex)
     m->next = i + 1;
     s = &m->s[i];
 
-    s->time_ns = bpf_ktime_get_ns();
+    /* the time last: a sample read while it is written is less likely to
+     * show a new time on old fields */
+    s->time_ns = 0;
     s->ifindex = ifindex;
     s->saddr = ipv4_addr(p->addr_src);
     s->daddr = ipv4_addr(p->addr_dst);
@@ -568,6 +570,8 @@ miss_record(const struct pkt_meta *p, __u32 ifindex)
         s->icmp_type = p->icmp_type;
         s->icmp_code = p->icmp_code;
     }
+
+    s->time_ns = bpf_ktime_get_ns();
 }
 
 
@@ -656,7 +660,8 @@ mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex, void *ctx,
          * by broadcast, so no flow holds it, and a host whose lease can't
          * renew loses its address (Seawall proposal 0015 §7). Only the
          * DHCP client listens on 68, and it drops an answer whose
-         * transaction ID isn't the one it sent.
+         * transaction ID isn't the one it sent. To any address: mini-fw
+         * has no list of local ones, as voidgate's own DHCP pass has.
          */
         if (p->l4_proto == IPPROTO_UDP && p->sport == bpf_htons(67)
             && p->dport == bpf_htons(68))

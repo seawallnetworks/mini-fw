@@ -148,12 +148,6 @@ struct mfw_config {
 
 
 /*
- * Stats: every packet increments exactly one OUTCOME and at most one
- * REASON. STATS names each counter, and libmfw reads them by name; its
- * mfw_stats() fills an array indexed by these ids, so a front end must
- * be built against the mfw.h of the libmfw.a it links.
- */
-/*
  * reply_miss's samples (Seawall proposal 0015 §7): a packet that looked
  * like a reply (TCP with ACK or RST, UDP to a port sw_flowd's replies come
  * back to, an echo reply, an ICMP error) found no flow, and the extended
@@ -186,6 +180,13 @@ struct mfw_misses {
 };
 
 
+/*
+ * Stats: every packet increments exactly one OUTCOME and at most one
+ * REASON; reply_miss, a diagnostic, comes on top of ext_deny's or
+ * ext_implicit_deny's. STATS names each counter, and libmfw reads them by
+ * name; its mfw_stats() fills an array indexed by these ids, so a front
+ * end must be built against the mfw.h of the libmfw.a it links.
+ */
 enum mfw_stat_id {
     /* Outcomes; named xdp_pass and xdp_drop in STATS, whichever the hook */
     MFW_STAT_PASS = 0,
