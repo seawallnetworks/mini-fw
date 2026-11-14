@@ -606,6 +606,10 @@ parse_err          0
 frag_drop          0
 non_ipv4           223
 tcp_frag_off1      0
+reply              5120
+reply_established  0
+reply_dhcp         4
+reply_miss         7
 ```
 
 | Counter | Meaning |
@@ -621,6 +625,10 @@ tcp_frag_off1      0
 | `frag_drop` | dropped fragments (`drop-ipv4-fragments` is 1) |
 | `non_ipv4` | non-IPv4 packets passed through unchecked |
 | `tcp_frag_off1` | dropped TCP fragments at offset 1 (an attack, RFC 1858) |
+| `reply` | replies to the VM's own connections, passed with no rule (§3.4) |
+| `reply_established` | without sw_flowd's table: TCP with ACK or RST, passed as `established` would |
+| `reply_dhcp` | DHCP's answers, UDP from 67 to 68, passed with no rule |
+| `reply_miss` | packets that looked like replies but matched no connection of the VM's, and that the extended list dropped; also counted in `ext_deny` or `ext_implicit_deny`. `mfw misses` shows the last ones (below) |
 
 The counters cover all interfaces together. `xdp_pass + xdp_drop` is the
 total packet count. Counters are cumulative and are only reset by
@@ -628,6 +636,28 @@ a restart of mfwd, or `mfwd -P`. To measure a period, take two readings and subt
 
 **Rising `ext_implicit_deny` right after a change** usually means a missing
 rule: for a service, or, without sw_flowd, for replies (§3.4).
+
+**When a tool on the VM stopped working**, look at `reply_miss` and the
+packets behind it:
+
+```bash
+sudo mfw misses
+```
+
+```text
+time                     interface  proto from                   to
+2026-11-13 21:04:07.512  eth0       udp   203.0.113.5:123        10.0.0.5:123
+2026-11-13 21:03:58.004  eth0       tcp   198.51.100.7:443       10.0.0.5:41022         A
+```
+
+These looked like replies to the VM but matched no connection it opened,
+and the extended list dropped them: the newest 16, from every CPU. A
+line for the tool's server means its replies are why: the connection was
+opened before sw_flowd started, left by an interface sw_flowd doesn't
+record on, or was sent from a fixed UDP port sw_flowd doesn't record
+(§5.5). Lines from addresses the VM never talked to are just scans and
+forged packets, dropped as they should be. A restart of mfwd starts the
+list afresh.
 
 ### 8.2 Seeing the current policy
 
@@ -673,6 +703,7 @@ mfw [-s socket] <command>
 | `mfw show` | Print the running policy. |
 | `mfw status` | Generation, attached, missing and degraded interfaces, fragment setting, whether replies are read from sw_flowd's table. |
 | `mfw stats [--json]` | Print counters. |
+| `mfw misses` | The last packets that looked like replies but matched no connection of the VM's, and that the extended list dropped, newest first (§8.1). |
 | `mfw ping` | Check that mfwd answers. |
 | `mfw version` | Print version. |
 | `mfw help` | Print usage. |

@@ -17,6 +17,8 @@
 
 #include "mfw.h"
 
+#include <net/if.h>
+#include <netinet/in.h>
 #include <stddef.h>
 
 
@@ -83,6 +85,30 @@ int mfw_status(const mfw_client_t *c, struct mfw_status *st);
 int mfw_stats(const mfw_client_t *c, __u64 counters[MFW_STAT_MAX]);
 /* The name of a counter ("xdp_pass", ...), or NULL. */
 const char *mfw_stat_name(int id);
+
+/*
+ * MISSES: reply_miss's samples, newest first. A packet that looked like a
+ * reply found no flow, and the extended list dropped it (Seawall proposal
+ * 0015 §7). time_ms is Unix time in ms; ifname the interface's name, or
+ * its index if it is gone; ports for TCP and UDP, tcp_flags PKT_TCP_*'s
+ * bits, the ICMP type and code for ICMP.
+ */
+struct mfw_miss {
+    unsigned long long  time_ms;
+    char                ifname[IF_NAMESIZE];
+    __u8                proto;
+    char                src[INET_ADDRSTRLEN];
+    char                dst[INET_ADDRSTRLEN];
+    __u16               sport;
+    __u16               dport;
+    __u8                tcp_flags;
+    __u8                icmp_type;
+    __u8                icmp_code;
+};
+
+/* At most MFW_MISS_SAMPLES into out; *n says how many. */
+int mfw_misses(const mfw_client_t *c, struct mfw_miss out[MFW_MISS_SAMPLES],
+    int *n);
 
 /* The applied policy in canonical form; malloc'd, free() it. */
 int mfw_show(const mfw_client_t *c, char **policy);

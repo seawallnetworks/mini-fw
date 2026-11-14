@@ -28,6 +28,7 @@ typedef struct {
     int              rulesets_fd;
     int              config_fd;
     int              stats_fd;
+    int              misses_fd;
     int              flows_fd;      /* sw_flowd's table, bound at load, or -1 */
     int              flows_config_fd;   /* and its config, or -1 with it */
     int              tcx;           /* attach with tcx links (6.6+), not
@@ -85,6 +86,12 @@ int mfw_dp_get_config(const mfw_dp_t *dp, struct mfw_config *cfg);
 int mfw_dp_set_config(mfw_dp_t *dp, int drop_ipv4_fragments,
     __u32 generation);
 int mfw_dp_stats(const mfw_dp_t *dp, __u64 out[MFW_STAT_MAX]);
+
+/*
+ * reply_miss's samples from every CPU's ring, newest first, at most max.
+ * Returns how many, or -1 with errno.
+ */
+int mfw_dp_misses(const mfw_dp_t *dp, struct mfw_miss_sample *out, int max);
 
 /*
  * Detach every interface and remove all pins under MFW_PIN_PATH. Returns

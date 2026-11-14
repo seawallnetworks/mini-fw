@@ -125,6 +125,7 @@ sudo mfw apply policy.txt      # replace the running policy
 sudo mfw show                  # the running policy, normalized
 sudo mfw status                # generation, attached and missing interfaces
 sudo mfw stats [--json]
+sudo mfw misses                # the last replies dropped for want of a flow
 sudo mfw apply /dev/null       # unbind everything, detach every interface
 sudo mfwd -P                   # remove mini-fw completely (pins, saved policy)
 ```
@@ -144,6 +145,7 @@ One request per connection on the Unix socket; mfwd replies and closes.
 | `PING` | `OK` |
 | `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` (`degraded`: at TC, another program holds XDP; `flows`: whether replies are read from sw_flowd's table, or fall back to `established`) |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …` (every counter) |
+| `MISSES` | `OK <n>`, then n lines, newest first: `time=<Unix ms> if=<name> proto=N src=A sport=N dst=A dport=N tcp_flags=N icmp_type=N icmp_code=N` |
 | `SHOW` | `OK <n>`, then the running policy in n lines |
 | `APPLY`, policy lines, `END` | `OK <generation>[ missing=a,b]` |
 
@@ -166,6 +168,12 @@ The shipped unit gives it to the group `mfw`, mode `0660`.
   path MTU errors (fragmentation needed) even without a flow, which may
   be about a connection the host accepted. Counter `reply`. There is no
   switch to turn it off.
+- **A miss is visible.** A packet that looks like a reply (TCP with ACK
+  or RST, UDP to a port sw_flowd's replies come back to, an echo reply,
+  an ICMP error) but finds no flow, and that the extended list then
+  drops, is counted as `reply_miss`, and each CPU keeps its last 16;
+  `mfw misses` shows the newest 16 of them. When a tool of the host's
+  stops working, it says whether replies are why, with no capture.
 - **DHCP's answers pass too**, UDP from 67 to 68, broadcast ones
   included, with no flow and with or without sw_flowd's table: a host
   whose lease can't renew loses its address. Counter `reply_dhcp`.

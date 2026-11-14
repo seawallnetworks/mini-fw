@@ -112,6 +112,7 @@ static void test_extended(void);
 static void test_combined(void);
 static void test_established(void);
 static void test_reply(void);
+static void test_reply_miss(void);
 static void test_fragments(void);
 static void test_full_tables(void);
 static void test_per_interface(void);
@@ -983,6 +984,122 @@ test_reply(void)
 }
 
 
+/* The newest reply_miss sample, from every CPU's ring; 0 if none. */
+static int
+miss_newest(struct mfw_miss_sample *out)
+{
+    int                 c, i, ncpu;
+    __u32               k = 0;
+    struct mfw_misses  *r;
+
+    ncpu = libbpf_num_possible_cpus();
+    r = calloc(ncpu, sizeof(*r));
+
+    if (r == NULL
+        || bpf_map_lookup_elem(bpf_map__fd(mfw_skel->maps.misses), &k, r) != 0)
+    {
+        free(r);
+        return 0;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    for (c = 0; c < ncpu; c++) {
+        for (i = 0; i < MFW_MISS_SAMPLES; i++) {
+            if (r[c].s[i].time_ns > out->time_ns) {
+                *out = r[c].s[i];
+            }
+        }
+    }
+
+    free(r);
+
+    return out->time_ns != 0;
+}
+
+
+/*
+ * reply_miss (Seawall proposal 0015 §7): a packet that looks like a reply
+ * finds no flow and the extended list drops it: counted and sampled.
+ * What doesn't look like one, or passes, isn't.
+ */
+static void
+test_reply_miss(void)
+{
+    __u64                   miss;
+    struct mfw_miss_sample  s;
+
+    reset();
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    add("100 permit udp any any eq 5353");
+    add("100 deny ip host 1.1.1.66 any");
+    commit();
+
+#define MISSED(want, desc, ...)                                            \
+    do {                                                                   \
+        miss = stat(MFW_STAT_REPLY_MISS);                                  \
+        mfw_tc(__VA_ARGS__);                                               \
+        mfw_check(stat(MFW_STAT_REPLY_MISS) - miss == (want), "%s", desc);  \
+    } while (0)
+
+    MISSED(1, "a bare ACK with no flow", .src = "1.1.1.7", .dst = "10.0.0.5",
+           MFW_TCP, .sport = 443, .dport = 40007, .tcp_flags = 0x10);
+    mfw_check(miss_newest(&s) && s.proto == IPPROTO_TCP
+              && s.saddr == inet_addr("1.1.1.7")
+              && s.daddr == inet_addr("10.0.0.5")
+              && ntohs(s.sport) == 443 && ntohs(s.dport) == 40007
+              && s.tcp_flags == 0x10 && s.ifindex == mfw_if0,
+              "and sampled: addresses, ports, flags, interface");
+    MISSED(1, "a RST", .src = "1.1.1.7", .dst = "10.0.0.5", MFW_TCP,
+           .sport = 443, .dport = 40007, .tcp_flags = 0x04);
+    MISSED(1, "dropped by an extended deny too", .src = "1.1.1.66",
+           .dst = "10.0.0.5", MFW_TCP, .sport = 443, .dport = 40007,
+           .tcp_flags = 0x10);
+    MISSED(0, "a SYN doesn't look like a reply", .src = "1.1.1.7",
+           .dst = "10.0.0.5", MFW_TCP, .sport = 443, .dport = 40007,
+           .tcp_flags = 0x02);
+    MISSED(1, "UDP to an ephemeral port", .src = "8.8.8.8", .dst = "10.0.0.5",
+           MFW_UDP, .sport = 53, .dport = 50099);
+    MISSED(1, "UDP to a recorded port", .src = "8.8.8.8", .dst = "10.0.0.5",
+           MFW_UDP, .sport = 123, .dport = 123);
+    MISSED(0, "UDP to another port doesn't", .src = "8.8.8.8",
+           .dst = "10.0.0.5", MFW_UDP, .sport = 53, .dport = 5000);
+    MISSED(1, "an echo reply", .src = "1.1.1.5", .dst = "10.0.0.5", MFW_ICMP,
+           .echo_reply = 1, .icmp_id = 0x99);
+    mfw_check(miss_newest(&s) && s.proto == IPPROTO_ICMP
+              && s.icmp_type == 0 && s.sport == 0,
+              "sampled with its ICMP type");
+    MISSED(1, "an ICMP error about no flow", .src = "9.9.9.9",
+           .dst = "10.0.0.5", MFW_ICMP, .icmp_type = 3, .icmp_code = 3,
+           .in_src = "10.0.0.5", .in_dst = "8.8.8.8",
+           .in_proto = IPPROTO_UDP, .in_sport = 50098, .in_dport = 53);
+    MISSED(0, "a ping in doesn't", .src = "1.1.1.5", .dst = "10.0.0.5",
+           MFW_ICMP, .icmp_type = 8, .icmp_id = 0x99);
+    MISSED(0, "one the list permits isn't a miss", .src = "8.8.8.8",
+           .dst = "10.0.0.5", MFW_UDP, .sport = 53, .dport = 5353);
+
+    /* no extended list: nothing is dropped, nothing missed */
+    reset();
+    commit();
+    MISSED(0, "no extended list", .src = "1.1.1.7", .dst = "10.0.0.5",
+           MFW_TCP, .sport = 443, .dport = 40007, .tcp_flags = 0x10);
+
+    /* without the table: UDP by Linux's default range */
+    reset();
+    add("100 permit tcp any host 10.0.0.5 eq 22");
+    commit();
+    set_no_flow_table(1);
+    MISSED(1, "no table: UDP to an ephemeral port", .src = "8.8.8.8",
+           .dst = "10.0.0.5", MFW_UDP, .sport = 53, .dport = 50000);
+    MISSED(0, "no table: an ACK passes as established", .src = "1.1.1.7",
+           .dst = "10.0.0.5", MFW_TCP, .sport = 443, .dport = 40007,
+           .tcp_flags = 0x10);
+    set_no_flow_table(0);
+
+#undef MISSED
+}
+
+
 static void
 test_fragments(void)
 {
@@ -1206,10 +1323,11 @@ main(void)
         return 1;
     }
 
-    /* and its config: the default ephemeral range */
+    /* and its config: the default ephemeral range, and ntpd's 123 */
     {
         int               zero = 0, cfd;
-        struct sf_config  c = { .port_lo = 32768, .port_hi = 60999 };
+        struct sf_config  c = { .port_lo = 32768, .port_hi = 60999,
+                                .record = { 123 } };
 
         cfd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "config", sizeof(__u32),
                              sizeof(struct sf_config), 1, NULL);
@@ -1234,6 +1352,7 @@ main(void)
     test_combined();
     test_established();
     test_reply();
+    test_reply_miss();
     test_fragments();
     test_full_tables();
     test_per_interface();

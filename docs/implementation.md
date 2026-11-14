@@ -67,7 +67,9 @@ does today.** Where the two disagree, §10 explains why.
    maps/rulesets     HASH_OF_MAPS  ifindex → that  ─┐
                      interface's compiled lists     │ read by mfw_tc
    maps/config       ARRAY  flags, generation      ─┤
-   maps/stats        PERCPU counters               ─┘ written by mfw_tc
+   maps/stats        PERCPU counters               ─┤ written by mfw_tc
+   maps/misses       PERCPU rings of reply_miss's   ─┘
+                     samples
    attach/xdp_<if>   the program in the interface's libxdp dispatcher
    attach/tcx_<if>   or, degraded, a pinned bpf_link (keeps mfw_tc attached)
    attach/tc_<if>    or, degraded before 6.6, mfw_tc: attached by classic TC
@@ -167,6 +169,7 @@ frame
         ├─ explicit permit ............................... PASS   (ext_permit)
         ├─ explicit deny ................................. DROP   (ext_deny)
         ├─ reached implicit deny ......................... DROP   (ext_implicit_deny)
+        │     either drop of what looks like a reply ..... + reply_miss, sampled
         └─ unbound ....................................... PASS   (std_permit if the
                                                                     standard list permitted)
 ```
@@ -342,6 +345,7 @@ Everything one interface enforces, compiled from its bindings:
 | (inner, not pinned) | ARRAY | `0` → `mfw_ruleset` | 1 | mfwd, once | mfw_tc |
 | `maps/config` | ARRAY | `0` → `mfw_config` | 1 | mfwd | mfw_tc |
 | `maps/stats` | PERCPU_ARRAY | stat id → `u64` | `MFW_STAT_MAX` | mfw_tc | mfwd |
+| `maps/misses` | PERCPU_ARRAY | `0` → `mfw_misses`, a ring of 16 `mfw_miss_sample` | 1 | mfw_tc | mfwd |
 | `flows` (sw_flowd's `outbound`) | LRU_HASH | `sf_flow_key` → `sf_flow` | sw_flowd's | sw_flowd | mfw_tc |
 
 `flows` and `flows_config` are sw_flowd's pinned table and config,
@@ -398,6 +402,7 @@ Each packet increments **exactly one outcome** and **at most one reason**.
 | 11 | `reply` | reason | a reply to a flow the host opened, passed before the extended list |
 | 12 | `reply_established` | reason | no sw_flowd table: TCP with ACK or RST passed as `established` would |
 | 13 | `reply_dhcp` | reason | UDP from 67 to 68, a DHCP server's answer, passed before the extended list with no flow |
+| 14 | `reply_miss` | diagnostic | looked like a reply, found no flow, and the extended list dropped it; counted with `ext_deny` or `ext_implicit_deny`, and sampled in `maps/misses` |
 
 Packets passed with no list deciding (both unbound, a standard miss with
 extended unbound, or a non-first fragment) get an outcome but no reason.
@@ -599,6 +604,7 @@ case-sensitive.
 | `PING` | `OK` |
 | `STATUS` | `OK generation=N drop-ipv4-fragments=0\|1 attached=a,b missing=c degraded=d flows=sw_flowd\|none` |
 | `STATS` | `OK xdp_pass=N xdp_drop=N …`, every counter by name |
+| `MISSES` | `OK <n>` then n lines, newest first, of reply_miss's samples: `time=<Unix ms> if=<name> proto=N src=A sport=N dst=A dport=N tcp_flags=N icmp_type=N icmp_code=N` |
 | `SHOW` | `OK <n>` then the applied policy, n lines, canonical form |
 | `APPLY`, the policy lines, `END` | `OK <generation>[ missing=a,b]` |
 
@@ -695,6 +701,19 @@ flow, which may be about a connection the host accepted (a client of
 its own web server across a tunnel). A forged reply needs the flow's
 address and both ports, so an ACK flood doesn't pass. There is no
 switch to turn it off.
+
+A packet that looks like a reply but finds no flow goes on to the
+extended list; if the list drops it, it is counted as `reply_miss` too
+and sampled (0015 §7). It looks like one when it is TCP with ACK or RST,
+UDP to a port `sf_udp_reply_port()` accepts (the ephemeral range, or
+`record_udp_ports`; without the table, Linux's default 32768-60999), an
+echo reply, or an ICMP error. Each CPU writes its own ring of the last
+16 (`maps/misses`): a flood of them writes no cache line another CPU
+shares. A sample holds the time (`bpf_ktime_get_ns()`, CLOCK_MONOTONIC),
+the interface, addresses, ports, TCP flags or ICMP type and code; mfwd
+merges every CPU's ring for `MISSES`, newest first, keeping 16, with the
+time as Unix time. A restart of mfwd starts them afresh, as the
+counters.
 
 A DHCP server's answers, UDP from 67 to 68, pass there too, before the
 lookup, with or without the table (counter `reply_dhcp`; 0015 §7): a

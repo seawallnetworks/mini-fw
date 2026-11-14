@@ -59,6 +59,7 @@ static const char *const  mfw_stat_names[MFW_STAT_MAX] = {
     [MFW_STAT_REPLY]             = "reply",
     [MFW_STAT_REPLY_ESTABLISHED] = "reply_established",
     [MFW_STAT_REPLY_DHCP]        = "reply_dhcp",
+    [MFW_STAT_REPLY_MISS]        = "reply_miss",
 };
 
 static const mfw_err_code_t  mfw_err_codes[] = {
@@ -476,6 +477,105 @@ mfw_stats(const mfw_client_t *c, __u64 counters[MFW_STAT_MAX])
     }
 
     free(reply);
+
+    return rc;
+}
+
+
+/* one MISSES line's fields into m */
+static int
+miss_parse(const char *line, struct mfw_miss *m)
+{
+    char           v[24];
+    unsigned long  n[7];
+    size_t         i;
+
+    static const char  *keys[] = { "proto", "sport", "dport", "tcp_flags",
+                                   "icmp_type", "icmp_code", "time" };
+    static const unsigned long  max[] = { 255, 65535, 65535, 255, 255, 255,
+                                          ~0UL };
+
+    for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (field(line, keys[i], v, sizeof(v)) != 0 || v[0] < '0'
+            || v[0] > '9')
+        {
+            return -1;
+        }
+
+        n[i] = strtoul(v, NULL, 10);
+
+        if (n[i] > max[i]) {
+            return -1;
+        }
+    }
+
+    if (field(line, "if", m->ifname, sizeof(m->ifname)) != 0
+        || field(line, "src", m->src, sizeof(m->src)) != 0
+        || field(line, "dst", m->dst, sizeof(m->dst)) != 0)
+    {
+        return -1;
+    }
+
+    m->proto = (__u8) n[0];
+    m->sport = (__u16) n[1];
+    m->dport = (__u16) n[2];
+    m->tcp_flags = (__u8) n[3];
+    m->icmp_type = (__u8) n[4];
+    m->icmp_code = (__u8) n[5];
+    m->time_ms = n[6];
+
+    return 0;
+}
+
+
+int
+mfw_misses(const mfw_client_t *c, struct mfw_miss out[MFW_MISS_SAMPLES],
+    int *n)
+{
+    int             rc;
+    char           *end, *line, *nl, *reply;
+    unsigned long   count;
+
+    *n = 0;
+
+    rc = mfw_request(c, "MISSES\n", &reply, NULL, 0);
+    if (rc != 0) {
+        return rc;
+    }
+
+    /* OK <n>\n then n lines */
+    count = strtoul(reply + 3, &end, 10);
+
+    if (reply[2] != ' ' || end == reply + 3 || *end != '\n'
+        || count > MFW_MISS_SAMPLES)
+    {
+        free(reply);
+        return mfw_err_reply;
+    }
+
+    for (line = end + 1; *line != '\0'; line = nl + 1) {
+        nl = strchr(line, '\n');
+
+        if (nl == NULL || (unsigned long) *n == count) {
+            break;
+        }
+
+        *nl = '\0';
+
+        if (miss_parse(line, &out[*n]) != 0) {
+            break;
+        }
+
+        (*n)++;
+    }
+
+    rc = (unsigned long) *n == count && *line == '\0' ? mfw_ok
+                                                       : mfw_err_reply;
+    free(reply);
+
+    if (rc != mfw_ok) {
+        *n = 0;
+    }
 
     return rc;
 }

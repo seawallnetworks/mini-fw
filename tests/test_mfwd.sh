@@ -254,6 +254,7 @@ start
 same "generation 1" "$(field generation)" 1
 expect ok "stays on d0" on d0
 expect ok "stats has every id" all_stats
+same "misses: none in fresh pins" "$(mfw misses)" "no reply missed"
 
 echo "== lost pins: the saved policy is applied again"
 stop

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 
@@ -36,6 +37,7 @@ static int cmd_apply(const mfw_client_t *c, int argc, char **argv);
 static int cmd_show(const mfw_client_t *c);
 static int cmd_status(const mfw_client_t *c);
 static int cmd_stats(const mfw_client_t *c, int argc, char **argv);
+static int cmd_misses(const mfw_client_t *c);
 
 
 static void
@@ -53,6 +55,9 @@ usage(FILE *f)
         "                     flows: sw_flowd while replies are read from its\n"
         "                     table, none when they fall back to established\n"
         "  stats [--json]     packet counters\n"
+        "  misses             the last packets that looked like replies but\n"
+        "                     matched no flow of sw_flowd's, and that the\n"
+        "                     extended list dropped (counter reply_miss)\n"
         "  ping\n"
         "  version\n"
         "\n"
@@ -330,6 +335,81 @@ cmd_stats(const mfw_client_t *c, int argc, char **argv)
 }
 
 
+/* reply_miss's samples, newest first: when a tool stopped working,
+ * whether replies are why */
+static int
+cmd_misses(const mfw_client_t *c)
+{
+    int              i, n, rc;
+    char             when[48], what[24], from[32], to[32];
+    time_t           t;
+    struct tm        tm;
+    struct mfw_miss  m[MFW_MISS_SAMPLES];
+
+    rc = mfw_misses(c, m, &n);
+    if (rc != 0) {
+        return failed(rc, NULL);
+    }
+
+    if (n == 0) {
+        printf("no reply missed\n");
+        return MFW_EXIT_OK;
+    }
+
+    printf("%-23s  %-10s %-5s %-21s  %s\n", "time", "interface", "proto",
+           "from", "to");
+
+    for (i = 0; i < n; i++) {
+        t = (time_t) (m[i].time_ms / 1000);
+        localtime_r(&t, &tm);
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+        snprintf(when + strlen(when), sizeof(when) - strlen(when), ".%03u",
+                 (unsigned) (m[i].time_ms % 1000));
+
+        what[0] = '\0';
+
+        if (m[i].proto == IPPROTO_TCP || m[i].proto == IPPROTO_UDP) {
+            snprintf(from, sizeof(from), "%s:%u", m[i].src, m[i].sport);
+            snprintf(to, sizeof(to), "%s:%u", m[i].dst, m[i].dport);
+
+            if (m[i].proto == IPPROTO_TCP) {
+                snprintf(what, sizeof(what), "%s%s%s%s%s",
+                         m[i].tcp_flags & 0x02 ? "S" : "",
+                         m[i].tcp_flags & 0x10 ? "A" : "",
+                         m[i].tcp_flags & 0x08 ? "P" : "",
+                         m[i].tcp_flags & 0x01 ? "F" : "",
+                         m[i].tcp_flags & 0x04 ? "R" : "");
+            }
+
+        } else {
+            snprintf(from, sizeof(from), "%s", m[i].src);
+            snprintf(to, sizeof(to), "%s", m[i].dst);
+
+            if (m[i].proto == IPPROTO_ICMP) {
+                snprintf(what, sizeof(what), "type %u code %u",
+                         m[i].icmp_type, m[i].icmp_code);
+            }
+        }
+
+        printf("%-23s  %-10s %-5s %-21s  ", when, m[i].ifname,
+               m[i].proto == IPPROTO_TCP ? "tcp"
+               : m[i].proto == IPPROTO_UDP ? "udp"
+               : m[i].proto == IPPROTO_ICMP ? "icmp" : "other",
+               from);
+
+        /* no trailing blanks when there is nothing more to say */
+        if (what[0] != '\0') {
+            printf("%-21s  %s\n", to, what);
+
+        } else {
+            printf("%s\n", to);
+        }
+    }
+
+    return MFW_EXIT_OK;
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -390,6 +470,10 @@ main(int argc, char **argv)
 
     if (strcmp(cmd, "stats") == 0) {
         return cmd_stats(&c, n, rest);
+    }
+
+    if (strcmp(cmd, "misses") == 0 && n == 0) {
+        return cmd_misses(&c);
     }
 
     if (strcmp(cmd, "ping") == 0 && n == 0) {

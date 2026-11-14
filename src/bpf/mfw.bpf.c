@@ -97,6 +97,9 @@ static __always_inline mfw_match_e match_ext(const struct mfw_ruleset *rs,
 
 static __always_inline const struct mfw_ruleset *ruleset_of(__u32 ifindex);
 static __always_inline int is_pmtu_err(const struct pkt_meta *p);
+static __always_inline int looks_like_reply(const struct pkt_meta *p);
+static __always_inline void miss_record(const struct pkt_meta *p,
+    __u32 ifindex);
 static __always_inline int reply_checked(__u32 ifindex,
     const struct pkt_meta *p);
 static __always_inline int mfw_reply(const struct mfw_ruleset *rs,
@@ -145,6 +148,16 @@ struct {
     __type(value, struct mfw_stat_value);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } stats SEC(".maps");
+
+
+/* reply_miss's samples: a ring per CPU (mfw.h) */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct mfw_misses);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} misses SEC(".maps");
 
 
 /*
@@ -479,6 +492,86 @@ mfw_reply(const struct mfw_ruleset *rs, const struct pkt_meta *p, void *ctx,
 
 
 /*
+ * Does p, which mfw_reply() didn't pass, look like a reply: TCP with ACK
+ * or RST, UDP to a port sw_flowd's replies come back to, an echo reply,
+ * an ICMP error? Then a drop of it is counted as reply_miss, and sampled:
+ * what tells, when a tool of the host's stops working, whether replies
+ * are why (Seawall proposal 0015 §7). Without sw_flowd's table its config
+ * is empty, and UDP is judged by Linux's default ephemeral range.
+ */
+static __always_inline int
+looks_like_reply(const struct pkt_meta *p)
+{
+    __u16                    port;
+    __u32                    k;
+    const struct sf_config  *c;
+
+    switch (p->l4_proto) {
+    case IPPROTO_TCP:
+        return (p->tcp_flags & (PKT_TCP_ACK | PKT_TCP_RST)) != 0;
+
+    case IPPROTO_UDP:
+        k = 0;
+        c = bpf_map_lookup_elem(&flows_config, &k);
+        port = bpf_ntohs(p->dport);
+
+        if (c == NULL || c->port_hi == 0) {
+            return port >= 32768 && port <= 60999;
+        }
+
+        return sf_udp_reply_port(c, port);
+
+    case IPPROTO_ICMP:
+        return p->icmp_type == 0 || sf_is_icmp_err(p);
+    }
+
+    return 0;
+}
+
+
+/* p into this CPU's ring of reply_miss samples */
+static __always_inline void
+miss_record(const struct pkt_meta *p, __u32 ifindex)
+{
+    __u32                    k, i;
+    struct mfw_misses       *m;
+    struct mfw_miss_sample  *s;
+
+    k = 0;
+    m = bpf_map_lookup_elem(&misses, &k);
+
+    if (m == NULL) {
+        return;
+    }
+
+    i = m->next % MFW_MISS_SAMPLES;
+    m->next = i + 1;
+    s = &m->s[i];
+
+    s->time_ns = bpf_ktime_get_ns();
+    s->ifindex = ifindex;
+    s->saddr = ipv4_addr(p->addr_src);
+    s->daddr = ipv4_addr(p->addr_dst);
+    s->proto = p->l4_proto;
+    s->sport = 0;
+    s->dport = 0;
+    s->tcp_flags = 0;
+    s->icmp_type = 0;
+    s->icmp_code = 0;
+
+    if (p->l4_proto == IPPROTO_TCP || p->l4_proto == IPPROTO_UDP) {
+        s->sport = p->sport;
+        s->dport = p->dport;
+        s->tcp_flags = p->l4_proto == IPPROTO_TCP ? p->tcp_flags : 0;
+
+    } else if (p->l4_proto == IPPROTO_ICMP) {
+        s->icmp_type = p->icmp_type;
+        s->icmp_code = p->icmp_code;
+    }
+}
+
+
+/*
  * The verdict on a packet that arrived on ifindex, from what pkt_parse()
  * returned for it: rc, and p. The entries parse, each from its own
  * context, of hook's kind; only an ICMP error's reply check reads the
@@ -591,11 +684,11 @@ mfw_judge(int rc, const struct pkt_meta *p, __u32 ifindex, void *ctx,
 
     case mfw_match_deny:
         stat_inc(MFW_STAT_EXT_DENY);
-        goto drop;
+        goto ext_drop;
 
     case mfw_match_miss:
         stat_inc(MFW_STAT_EXT_IMPLICIT_DENY);
-        goto drop;
+        goto ext_drop;
 
     default:
         /* extended unbound: fail-open */
@@ -611,6 +704,18 @@ pass:
     stat_inc(MFW_STAT_PASS);
 
     return mfw_pass;
+
+ext_drop:
+
+    /*
+     * The extended list dropped it, so it was no reply: if it looks like
+     * one, a miss to count and sample. Asked only here, on a drop, so
+     * what passes pays nothing for it.
+     */
+    if (rc == PKT_OK && looks_like_reply(p)) {
+        stat_inc(MFW_STAT_REPLY_MISS);
+        miss_record(p, ifindex);
+    }
 
 drop:
 

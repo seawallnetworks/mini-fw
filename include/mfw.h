@@ -32,7 +32,7 @@
  * Layout of the pinned maps, shown by mfwd -V; a starting mfwd replaces
  * the pins, of any version. 2: per-interface rulesets; 3: no unused
  * fields; 4: replies pass by default, the idle limits in the ruleset;
- * 5: reply_dhcp
+ * 5: reply_dhcp, reply_miss and its samples
  */
 #define MFW_ABI_VERSION  5
 
@@ -153,6 +153,39 @@ struct mfw_config {
  * mfw_stats() fills an array indexed by these ids, so a front end must
  * be built against the mfw.h of the libmfw.a it links.
  */
+/*
+ * reply_miss's samples (Seawall proposal 0015 §7): a packet that looked
+ * like a reply (TCP with ACK or RST, UDP to a port sw_flowd's replies come
+ * back to, an echo reply, an ICMP error) found no flow, and the extended
+ * list dropped it. Each CPU keeps its last MFW_MISS_SAMPLES in a ring of
+ * its own, so a flood writes no line another CPU shares; mfwd merges them
+ * and keeps the newest.
+ */
+#define MFW_MISS_SAMPLES  16
+
+struct mfw_miss_sample {
+    __u64                  time_ns;     /* CLOCK_MONOTONIC; 0: an empty slot */
+    __u32                  ifindex;
+    __be32                 saddr;
+    __be32                 daddr;
+    __be16                 sport;       /* TCP and UDP */
+    __be16                 dport;
+    __u8                   proto;       /* IPPROTO_* */
+    __u8                   tcp_flags;   /* PKT_TCP_* */
+    __u8                   icmp_type;
+    __u8                   icmp_code;
+    __u32                  pad;
+};
+
+/* PERCPU_ARRAY[1], pinned as maps/misses: s[next % MFW_MISS_SAMPLES] is
+ * written next */
+struct mfw_misses {
+    __u32                  next;
+    __u32                  pad;
+    struct mfw_miss_sample s[MFW_MISS_SAMPLES];
+};
+
+
 enum mfw_stat_id {
     /* Outcomes; named xdp_pass and xdp_drop in STATS, whichever the hook */
     MFW_STAT_PASS = 0,
@@ -170,6 +203,7 @@ enum mfw_stat_id {
     MFW_STAT_REPLY,             /* a reply to a flow the host opened */
     MFW_STAT_REPLY_ESTABLISHED, /* no sw_flowd table: TCP with ACK or RST */
     MFW_STAT_REPLY_DHCP,        /* UDP from 67 to 68, a DHCP server's */
+    MFW_STAT_REPLY_MISS,        /* looked like a reply, no flow, dropped */
     MFW_STAT_MAX,
 };
 

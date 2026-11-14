@@ -256,9 +256,18 @@ if [[ -x $FLOWD ]]; then
     expect ok   "an ICMP error about fw's own UDP passes" \
         test $(( $(stat_of reply) - before )) -ge 1
     before=$(stat_of ext_implicit_deny)
+    misses=$(stat_of reply_miss)
     acks_to_fw 8081 100
     expect ok   "an ACK flood is dropped" \
         test $(( $(stat_of ext_implicit_deny) - before )) -ge 100
+    # it looked like replies: counted as missed, and sampled (0015 §7)
+    expect ok   "counted as reply_miss" \
+        test $(( $(stat_of reply_miss) - misses )) -ge 100
+    expect ok   "mfw misses shows them, newest first" \
+        bash -c "$MFW -s $SOCK misses | sed -n 2p \
+                 | grep -Eq ' veth-fw +tcp +$CLI_IP:40099 +$FW_IP:8081 +A\$'"
+    expect ok   "16 at most" \
+        test "$(mfw misses | tail -n +2 | wc -l)" -eq 16
     policy "${INBOUND[@]}" "acl 100 40 permit tcp any any established"
     before=$(stat_of ext_permit)
     acks_to_fw 8081 100

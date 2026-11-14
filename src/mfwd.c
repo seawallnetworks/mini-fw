@@ -15,6 +15,10 @@
  *                            degraded=d (at TC: another program holds XDP)
  *                            flows=sw_flowd|none (where replies are read)
  *   STATS                    OK xdp_pass=N xdp_drop=N ...
+ *   MISSES                   OK <n>, then n lines, newest first, of
+ *                            reply_miss's samples: time=<Unix ms>
+ *                            if=<name> proto=N src=A sport=N dst=A
+ *                            dport=N tcp_flags=N icmp_type=N icmp_code=N
  *   SHOW                     OK <n>, then the applied policy in n lines
  *   APPLY                    OK <generation>[ missing=a,b]
  *   <policy lines>
@@ -51,8 +55,10 @@
 #include <sw/notify.h>
 #include <sw/sock.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <getopt.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -513,6 +519,67 @@ stats(mfwd_t *d, char **reply)
 }
 
 
+/* reply_miss's samples, newest first (mfw_dp_misses()) */
+static void
+misses(mfwd_t *d, char **reply)
+{
+    int                     i, n, failed;
+    FILE                   *f;
+    char                    ifname[IF_NAMESIZE], src[INET_ADDRSTRLEN];
+    char                    dst[INET_ADDRSTRLEN];
+    size_t                  len;
+    __u64                   mono, real, ms;
+    struct timespec         ts;
+    struct mfw_miss_sample  s[MFW_MISS_SAMPLES];
+
+    n = mfw_dp_misses(&d->dp, s, MFW_MISS_SAMPLES);
+
+    if (n < 0) {
+        error_reply(reply, "kernel", "read samples: %s", strerror(errno));
+        return;
+    }
+
+    /* a sample's time is CLOCK_MONOTONIC: as Unix time, by now's */
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    mono = (__u64) ts.tv_sec * 1000000000ULL + (__u64) ts.tv_nsec;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    real = (__u64) ts.tv_sec * 1000000000ULL + (__u64) ts.tv_nsec;
+
+    f = open_memstream(reply, &len);
+    if (f == NULL) {
+        *reply = NULL;
+        return;
+    }
+
+    fprintf(f, "OK %d\n", n);
+
+    for (i = 0; i < n; i++) {
+        ms = (real - (mono > s[i].time_ns ? mono - s[i].time_ns : 0))
+             / 1000000ULL;
+
+        if (if_indextoname(s[i].ifindex, ifname) == NULL) {
+            snprintf(ifname, sizeof(ifname), "%u", s[i].ifindex);
+        }
+
+        inet_ntop(AF_INET, &s[i].saddr, src, sizeof(src));
+        inet_ntop(AF_INET, &s[i].daddr, dst, sizeof(dst));
+
+        fprintf(f, "time=%llu if=%s proto=%u src=%s sport=%u dst=%s "
+                "dport=%u tcp_flags=%u icmp_type=%u icmp_code=%u\n",
+                (unsigned long long) ms, ifname, s[i].proto, src,
+                ntohs(s[i].sport), dst, ntohs(s[i].dport), s[i].tcp_flags,
+                s[i].icmp_type, s[i].icmp_code);
+    }
+
+    failed = ferror(f);
+
+    if (fclose(f) != 0 || failed) {
+        free(*reply);
+        *reply = NULL;
+    }
+}
+
+
 static void
 show(mfwd_t *d, char **reply)
 {
@@ -548,6 +615,9 @@ handle(mfwd_t *d, char *req, uid_t uid, char **reply)
 
     } else if (strcmp(req, "STATS") == 0) {
         stats(d, reply);
+
+    } else if (strcmp(req, "MISSES") == 0) {
+        misses(d, reply);
 
     } else if (strcmp(req, "SHOW") == 0) {
         show(d, reply);

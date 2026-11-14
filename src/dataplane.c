@@ -10,6 +10,7 @@
  *                   interface's mfw_ruleset
  *   maps/config     array: flags, generation
  *   maps/stats      per-CPU counters
+ *   maps/misses     per-CPU rings of reply_miss's samples
  *
  * Replies to the host's own flows are looked up in sw_flowd's table and
  * config, /sys/fs/bpf/seawall/flows/outbound and config (Seawall proposal
@@ -221,6 +222,7 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
     dp->rulesets_fd = -1;
     dp->config_fd = -1;
     dp->stats_fd = -1;
+    dp->misses_fd = -1;
     dp->flows_fd = -1;
     dp->flows_config_fd = -1;
 
@@ -280,6 +282,7 @@ mfw_dp_open(mfw_dp_t *dp, char *err, size_t errlen)
     dp->rulesets_fd = bpf_map__fd(dp->skel->maps.rulesets);
     dp->config_fd = bpf_map__fd(dp->skel->maps.config);
     dp->stats_fd = bpf_map__fd(dp->skel->maps.stats);
+    dp->misses_fd = bpf_map__fd(dp->skel->maps.misses);
     dp->tcx = sw_bpf_have_tcx();
     dp->no_xdp = getenv("MFW_NO_XDP") != NULL;
 
@@ -588,6 +591,65 @@ mfw_dp_stats(const mfw_dp_t *dp, __u64 out[MFW_STAT_MAX])
     free(vals);
 
     return 0;
+}
+
+
+static int
+miss_newer(const void *a, const void *b)
+{
+    const struct mfw_miss_sample  *x = a, *y = b;
+
+    return x->time_ns < y->time_ns ? 1 : x->time_ns > y->time_ns ? -1 : 0;
+}
+
+
+int
+mfw_dp_misses(const mfw_dp_t *dp, struct mfw_miss_sample *out, int max)
+{
+    int                      c, i, n, ncpu;
+    __u32                    k;
+    struct mfw_misses       *rings;
+    struct mfw_miss_sample  *all;
+
+    ncpu = libbpf_num_possible_cpus();
+    if (ncpu < 1) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    rings = calloc(ncpu, sizeof(*rings));
+    all = calloc((size_t) ncpu * MFW_MISS_SAMPLES, sizeof(*all));
+    k = 0;
+
+    if (rings == NULL || all == NULL
+        || bpf_map_lookup_elem(dp->misses_fd, &k, rings) != 0)
+    {
+        free(rings);
+        free(all);
+        return -1;
+    }
+
+    n = 0;
+
+    for (c = 0; c < ncpu; c++) {
+        for (i = 0; i < MFW_MISS_SAMPLES; i++) {
+            if (rings[c].s[i].time_ns != 0) {
+                all[n++] = rings[c].s[i];
+            }
+        }
+    }
+
+    qsort(all, n, sizeof(*all), miss_newer);
+
+    if (n > max) {
+        n = max;
+    }
+
+    memcpy(out, all, (size_t) n * sizeof(*all));
+    free(rings);
+    free(all);
+
+    return n;
 }
 
 
