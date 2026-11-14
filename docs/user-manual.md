@@ -247,7 +247,7 @@ runs. Nothing outbound needs a rule:
 | `chronyd`, `systemd-timesyncd` | UDP from an ephemeral port, recorded |
 | classic `ntpd` | UDP from port 123: sw_flowd's `record_udp_ports` (default 123) |
 | `ping` | its echo request is recorded |
-| `traceroute`, `mtr`, in UDP, ICMP and TCP modes | "time exceeded" carries the VM's packet, which is matched |
+| `traceroute` in UDP, ICMP and TCP modes; `mtr` in ICMP and TCP modes | "time exceeded" carries the VM's packet, which is matched |
 | path MTU discovery | "fragmentation needed": matched by the packet it carries, or passed with no connection |
 | the DHCP client, at boot and at each renewal | the server's answers pass with no connection (§3.4) |
 
@@ -268,6 +268,12 @@ list says so.
   configuration names. A connection the VM opens through one of them,
   to a container over `docker0` for one, isn't recorded: if a list is
   bound where its replies come in, they need a rule.
+- **`mtr` in UDP mode (`mtr -u`)** sends every probe from one fixed port
+  of its own, outside the ephemeral range, and from a raw socket, so
+  sw_flowd records none of them and the routers' "time exceeded" is
+  dropped. Give it a source port inside the range: `mtr -u -L 45000`
+  (any free port from 32768 to 60999), or use `traceroute`, or `mtr`'s
+  ICMP or TCP mode.
 - **UDP clients on a fixed port** outside the ephemeral range: add the
   port to `record_udp_ports` in sw_flowd's configuration (at most 8),
   or permit the server's port (`permit udp host <server> eq <port>
