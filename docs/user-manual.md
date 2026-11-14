@@ -212,7 +212,7 @@ only says who may connect in.
 | Your VM does | Its replies pass |
 |--------------|------------------|
 | opens TCP connections | TCP back on the connection, with ACK or RST |
-| DNS, NTP, other UDP from an ephemeral port | UDP back to that port |
+| DNS, NTP, other UDP from an ephemeral port, or classic `ntpd` from 123 | UDP back to that port |
 | ping | the echo replies to its pings |
 | sends a packet larger than the path's MTU | ICMP "fragmentation needed", for its own connections and the ones it accepted |
 | reaches an unreachable port or host, or a traceroute | the ICMP errors about its own packets |
@@ -232,6 +232,57 @@ replies in.
 
 **Without sw_flowd, replies need rules**, and forgetting them is the most
 common mistake. Section 6.1 has a ready-made baseline.
+
+### 3.5 What keeps working, and what needs a rule
+
+What the VM's own tools do without mini-fw, they do the same with it,
+behind an extended list that lets in SSH alone, as long as sw_flowd
+runs. Nothing outbound needs a rule:
+
+| Tool | Why its replies pass |
+|------|----------------------|
+| `apt`, `dnf`, `curl`, `git clone`, `docker pull`, `ssh` out, cloud CLIs | TCP: sw_flowd records each connection the VM opens |
+| the cloud's instance metadata (169.254.169.254) | TCP, recorded |
+| `dig`, the system resolver | UDP from an ephemeral port, recorded |
+| `chronyd`, `systemd-timesyncd` | UDP from an ephemeral port, recorded |
+| classic `ntpd` | UDP from port 123: sw_flowd's `record_udp_ports` (default 123) |
+| `ping` | its echo request is recorded |
+| `traceroute`, `mtr`, in UDP, ICMP and TCP modes | "time exceeded" carries the VM's packet, which is matched |
+| path MTU discovery | "fragmentation needed": matched by the packet it carries, or passed with no connection |
+| the DHCP client, at boot and at each renewal | the server's answers pass with no connection (§3.4) |
+
+**Anything inbound needs a rule**: each service the VM offers, and a
+ping to the VM (`acl 100 50 permit icmp any any`, or only from where
+you monitor it). mini-fw doesn't know what the VM serves; the extended
+list says so.
+
+**The known exceptions**, where a reply the VM asked for is dropped:
+
+- **Connections open when sw_flowd first started** were never seen
+  leaving, so their replies are dropped: a long-lived connection opened
+  before install (a database pool, a WebSocket) breaks once and
+  reconnects. After that, restarts and upgrades keep sw_flowd's table.
+- **Flows that leave by an interface sw_flowd doesn't record on**: by
+  default veths, bridge ports, bridges only containers are behind
+  (`docker0`, `cni0`), and what `exclude_interfaces` in sw_flowd's
+  configuration names. A connection the VM opens through one of them,
+  to a container over `docker0` for one, isn't recorded: if a list is
+  bound where its replies come in, they need a rule.
+- **UDP clients on a fixed port** outside the ephemeral range: add the
+  port to `record_udp_ports` in sw_flowd's configuration (at most 8),
+  or permit the server's port (`permit udp host <server> eq <port>
+  any`).
+- **An unconnected UDP socket kept open** looks to sw_flowd like a
+  service listening on its port: the first datagrams it sends are
+  recorded, the later ones aren't, and their replies stop passing once
+  the flow is idle for `reply-idle-udp`. Connected sockets, which most
+  resolvers and QUIC clients use, aren't affected.
+- **Without sw_flowd**, replies fall back to `established` (§5.5).
+
+**When a tool on the VM stopped working**, run `sudo mfw misses`
+(§8.1). A line for the tool's server means its replies are dropped: one
+of the exceptions above. No such line means the cause is elsewhere: a
+rule for something inbound, or the network in front of the VM.
 
 ---
 
@@ -363,8 +414,9 @@ you don't need it: replies to the VM's connections pass with no rule.
 
 Replies pass on an interface with an extended list, after its standard
 list and before the extended one. sw_flowd records each TCP connection
-the VM starts, each UDP flow it sends from an ephemeral port, and each
-ping, as they leave; a packet back on one of them passes. A TCP reply
+the VM starts, each UDP flow it sends from an ephemeral port or from one
+of its `record_udp_ports` (by default 123), and each ping, as they
+leave; a packet back on one of them passes. A TCP reply
 must have ACK or RST set. ICMP errors about the VM's own packets pass
 too, and "fragmentation needed" even about a connection the VM accepted.
 The counter is `reply`. The old `reply` keyword at the end of a rule is
@@ -810,6 +862,7 @@ sudo rm -r /sys/fs/bpf/seawall/mfw
 | `line N: …` | the policy has an error on that line | fix it; `mfw check` finds it without sending |
 | an interface listed as `missing` | it doesn't exist (yet) | apply the policy again once it does |
 | DNS stopped working, web browsing works; `mfw status` starts with `CRITICAL: sw_flowd's flow table not read` and shows `flows none`; the journal has it at `crit` | sw_flowd wasn't running when mfwd started, or its table is of another layout (mfwd log: `not the layout this mfwd reads`): replies fell back to `established`, which lets in TCP only | `sudo systemctl start sw_flowd`, then `sudo systemctl restart mfwd`; after an upgrade, the stack's sw_flowd and mini-fw must come from one release. Meanwhile, the §6.1 baseline without sw_flowd |
+| a tool on the VM stopped working (`apt`, NTP, a long-lived connection), others work | its replies matched no connection sw_flowd recorded: `sudo mfw misses` shows its server | §3.5's exceptions: reconnect, add the port to sw_flowd's `record_udp_ports`, or permit it |
 | `apply` refuses a rule ending in `reply` | the keyword is gone: replies pass with no rule | delete the rule |
 | one long-idle connection broke, others work | it was silent longer than `reply-idle-tcp`, or opened before sw_flowd started | raise `reply-idle-tcp`; reconnect |
 | connections open, then hang when the VM sends a large response or upload (a TLS handshake, a big page) | path MTU discovery's ICMP "fragmentation needed" is dropped before mini-fw (a router, a cloud security group), or by a standard-list deny of the router that sends it | let ICMP type 3 code 4 through there; don't blacklist the router (§3.4) |
