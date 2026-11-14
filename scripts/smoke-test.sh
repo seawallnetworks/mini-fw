@@ -112,6 +112,15 @@ tcp_to_fw()  { in_cli nc -z -w1 "$FW_IP" "$1"; }
 tcp_to_cli() { in_fw  nc -z -w1 "$CLI_IP" "$1"; }
 udp_echo_fw() { in_cli bash -c "echo hi | nc -u -w1 $FW_IP $1 | grep -q hi"; }
 udp_echo_cli() { in_fw bash -c "echo hi | nc -u -w1 $CLI_IP $1 | grep -q hi"; }
+# ntp_from port: a query to cli's 123 from fw's port, held open first for
+# sw_flowd's tick to see it listening, as ntpd's socket is
+ntp_from() {
+    in_fw python3 -c "
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('$FW_IP', $1))
+time.sleep(0.6); s.settimeout(1)
+s.sendto(b'q', ('$CLI_IP', 123)); s.recv(16)"
+}
 # n bare ACKs from cli to fw's port: what an ACK flood sends
 acks_to_fw() {
     in_cli python3 -c "
@@ -150,6 +159,12 @@ while True:
 in_fw python3 -c "
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('$FW_IP', 5353))
+while True:
+    d, a = s.recvfrom(2048); s.sendto(d, a)" &
+# an NTP server's port on cli, answering from 123
+in_cli python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('$CLI_IP', 123))
 while True:
     d, a = s.recvfrom(2048); s.sendto(d, a)" &
 disown -a
@@ -255,6 +270,10 @@ if [[ -x $FLOWD ]]; then
     in_fw bash -c "echo hi | nc -u -w1 $CLI_IP 5999" >/dev/null 2>&1
     expect ok   "an ICMP error about fw's own UDP passes" \
         test $(( $(stat_of reply) - before )) -ge 1
+    # classic ntpd: it listens on 123 and queries from it, which
+    # sw_flowd's record_udp_ports (default 123) records; 124 isn't listed
+    expect ok   "ntpd querying from 123 gets its answer" ntp_from 123
+    expect fail "a client on another fixed port doesn't" ntp_from 124
     before=$(stat_of ext_implicit_deny)
     misses=$(stat_of reply_miss)
     acks_to_fw 8081 100
