@@ -28,6 +28,9 @@
 
 #define MFW_XDP_PROG  "mfw_xdp"
 
+/* looks at the hook again when it was taken between a look and the attach */
+#define MFW_XDP_TRIES  5
+
 
 static int xdp_load(const char *root, const char *ifname, int ifindex,
     enum xdp_attach_mode mode, int flows_fd, int flows_config_fd);
@@ -324,7 +327,7 @@ int
 mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
     int flows_fd, int flows_config_fd, char *holder, size_t len)
 {
-    int                   e, i, state;
+    int                   e, i, state, tries;
     enum xdp_attach_mode  mode;
 
     /*
@@ -335,49 +338,64 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
         return -ENOTSUP;
     }
 
-    mode = XDP_MODE_NATIVE;
+    for (tries = 1; ; tries++) {
+        mode = XDP_MODE_NATIVE;
 
-    state = mfw_xdp_state(ifindex, &mode, holder, len);
-    if (state < 0) {
-        return state;
+        state = mfw_xdp_state(ifindex, &mode, holder, len);
+        if (state < 0) {
+            return state;
+        }
+
+        if (state == mfw_xdp_held) {
+            return 1;
+        }
+
+        /*
+         * Take out copies of mfw_xdp left by a crash or a lost pin, which
+         * would otherwise run along with the new one.
+         */
+        for (i = 0; i < 10 && mfw_xdp_unload(ifindex, 0) > 0; i++) {
+            /* void */
+        }
+
+        e = xdp_load(root, ifname, ifindex, mode, flows_fd, flows_config_fd);
+
+        /*
+         * A new dispatcher was tried in native mode: if the driver
+         * refused, try skb mode, saying why, since it costs much more. A
+         * dispatcher that was there keeps its own mode.
+         */
+        if (e != 0
+            && state == mfw_xdp_free
+            && e != -EBUSY
+            && e != -EEXIST)
+        {
+            sw_log_warn("%s: native XDP refused: %s; trying skb (generic) "
+                        "mode", ifname, strerror(-e));
+
+            e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd,
+                         flows_config_fd);
+        }
+
+        if (e != -EBUSY && e != -EEXIST) {
+            return e;
+        }
+
+        /*
+         * Another program took the hook after mfw_xdp_state() looked.
+         * Most likely another libxdp user making its dispatcher, voidgate
+         * starting with mfwd, which mini-fw joins: look again. Only a
+         * program that isn't a dispatcher sends mini-fw to TC.
+         */
+        if (tries == MFW_XDP_TRIES) {
+            snprintf(holder, len, "another program");
+            return 1;
+        }
+
+        sw_log_info("%s: the XDP hook was taken meanwhile: looking again",
+                    ifname);
+        usleep(100000);
     }
-
-    if (state == mfw_xdp_held) {
-        return 1;
-    }
-
-    /*
-     * Take out copies of mfw_xdp left by a crash or a lost pin, which
-     * would otherwise run along with the new one.
-     */
-    for (i = 0; i < 10 && mfw_xdp_unload(ifindex, 0) > 0; i++) { /* void */ }
-
-    e = xdp_load(root, ifname, ifindex, mode, flows_fd, flows_config_fd);
-
-    /*
-     * A new dispatcher was tried in native mode: if the driver refused,
-     * try skb mode, saying why, since it costs much more. A dispatcher
-     * that was there keeps its own mode.
-     */
-    if (e != 0
-        && state == mfw_xdp_free
-        && e != -EBUSY
-        && e != -EEXIST)
-    {
-        sw_log_warn("%s: native XDP refused: %s; trying skb (generic) mode",
-                    ifname, strerror(-e));
-
-        e = xdp_load(root, ifname, ifindex, XDP_MODE_SKB, flows_fd,
-                     flows_config_fd);
-    }
-
-    /* another program took the hook after mfw_xdp_state() looked */
-    if (e == -EBUSY || e == -EEXIST) {
-        snprintf(holder, len, "another program");
-        return 1;
-    }
-
-    return e;
 }
 
 
