@@ -23,9 +23,19 @@
  *   APPLY                    OK <generation>[ missing=a,b]
  *   <policy lines>
  *   END
+ *   APPLIES [<epoch> <gen>]  OK epoch=<16 hex> generation=N gap=0|1 n=<n>,
+ *                            then n lines, oldest first, of the applies
+ *                            kept (the last 64), or of those after
+ *                            generation gen: generation=N
+ *                            time=<Unix ms> uid=N source=apply|restart
+ *
+ * A second socket, read-only (-r, -R), answers PING, STATUS, STATS,
+ * MISSES and APPLIES, and refuses the rest: ERR denied. Monitoring reads
+ * the firewall there without the power to replace its policy (Seawall
+ * proposal 0012 §2).
  *
  * Errors: ERR <code> <message>, code one of badreq, invalid, kernel,
- * internal. The policy format is described in mfw_policy.h.
+ * internal, denied. The policy format is described in mfw_policy.h.
  *
  * The applied policy is saved under the run directory (/run/mfwd), so a
  * restarted mfwd applies it again; the kernel side is pinned and keeps
@@ -58,12 +68,15 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <net/if.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -74,11 +87,24 @@
 #define MFWD_READ_SECS  3      /* a client must send its request in time */
 
 
+/* An apply that went through, for APPLIES. */
 typedef struct {
-    mfw_dp_t        dp;
-    char            run_dir[PATH_MAX - 32];
-    char           *policy;       /* applied, canonical; NULL: none yet */
-    __u32           generation;   /* of that policy */
+    __u32               generation;
+    unsigned long long  time_ms;      /* Unix time */
+    uid_t               uid;          /* the caller's; mfwd's for a restart */
+    int                 restart;      /* the saved policy, applied again */
+} mfwd_apply_t;
+
+
+typedef struct {
+    mfw_dp_t            dp;
+    char                run_dir[PATH_MAX - 32];
+    char               *policy;       /* applied, canonical; NULL: none yet */
+    __u32               generation;   /* of that policy */
+    uint64_t            epoch;        /* drawn at start, never 0 */
+    mfwd_apply_t        applies[MFW_APPLIES];   /* the last ones, a ring */
+    unsigned long       napplies;     /* recorded since start */
+    __u32               lost;         /* the newest one no longer kept */
 } mfwd_t;
 
 
@@ -102,9 +128,13 @@ static void apply(mfwd_t *d, const char *text, char **reply);
 static void status(mfwd_t *d, char **reply);
 static void stats(mfwd_t *d, char **reply);
 static void show(mfwd_t *d, char **reply);
-static void handle(mfwd_t *d, char *req, uid_t uid, char **reply);
+static uint64_t draw_epoch(void);
+static void record_apply(mfwd_t *d, uid_t uid, int restart);
+static void applies(mfwd_t *d, const char *args, char **reply);
+static int parse_u64(const char *s, size_t len, int base, uint64_t *out);
+static void handle(mfwd_t *d, char *req, uid_t uid, int ro, char **reply);
 static char *read_request(int fd, const char **why);
-static void serve(mfwd_t *d, int fd);
+static void serve(mfwd_t *d, int fd, int ro);
 static void restore(mfwd_t *d);
 static void usage(FILE *f);
 
@@ -599,13 +629,188 @@ show(mfwd_t *d, char **reply)
 }
 
 
+/* ---- the apply record ---- */
+
+
+/* Random, so a restarted mfwd's generations, which may start again, are
+ * never taken for the old ones; never 0.
+ */
+static uint64_t
+draw_epoch(void)
+{
+    uint64_t         e;
+    struct timespec  ts;
+
+    e = 0;
+
+    if (getrandom(&e, sizeof(e), 0) != (ssize_t) sizeof(e)) {
+        clock_gettime(CLOCK_REALTIME, &ts);
+        e = ((uint64_t) ts.tv_sec << 32) ^ (uint64_t) ts.tv_nsec
+            ^ ((uint64_t) getpid() << 16);
+    }
+
+    return e != 0 ? e : 1;
+}
+
+
+/* The apply just made, d->generation; the oldest kept is pushed out. */
 static void
-handle(mfwd_t *d, char *req, uid_t uid, char **reply)
+record_apply(mfwd_t *d, uid_t uid, int restart)
+{
+    struct timespec   ts;
+    mfwd_apply_t     *a;
+
+    a = &d->applies[d->napplies % MFW_APPLIES];
+
+    if (d->napplies >= MFW_APPLIES) {
+        d->lost = a->generation;
+    }
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    a->generation = d->generation;
+    a->time_ms = (unsigned long long) ts.tv_sec * 1000
+                 + (unsigned long long) ts.tv_nsec / 1000000;
+    a->uid = uid;
+    a->restart = restart;
+    d->napplies++;
+}
+
+
+/*
+ * "APPLIES": every apply kept, oldest first. "APPLIES <epoch> <gen>":
+ * the ones after generation gen. A cursor of another epoch (mfwd
+ * restarted), past the generation now, or older than the applies kept is
+ * a gap: none are sent, and the reader carries on from this generation.
+ */
+static void
+applies(mfwd_t *d, const char *args, char **reply)
+{
+    int                  gap, failed;
+    FILE                *f;
+    size_t               len;
+    __u32                now;
+    uint64_t             epoch, after;
+    const char          *sp;
+    unsigned long        i, first, n;
+    const mfwd_apply_t  *a;
+
+    now = d->policy != NULL ? d->generation : 0;
+    after = 0;
+    gap = 0;
+
+    if (*args != '\0') {
+        sp = *args == ' ' ? strchr(args + 1, ' ') : NULL;
+
+        if (sp == NULL
+            || parse_u64(args + 1, (size_t) (sp - args - 1), 16, &epoch) != 0
+            || parse_u64(sp + 1, strlen(sp + 1), 10, &after) != 0)
+        {
+            error_reply(reply, "badreq", "usage: APPLIES [<epoch> "
+                        "<generation>]");
+            return;
+        }
+
+        if (epoch != d->epoch || after > now || after < d->lost) {
+            gap = 1;
+            after = now;
+        }
+    }
+
+    first = d->napplies > MFW_APPLIES ? d->napplies - MFW_APPLIES : 0;
+    n = 0;
+
+    for (i = first; i < d->napplies; i++) {
+        n += d->applies[i % MFW_APPLIES].generation > after;
+    }
+
+    f = open_memstream(reply, &len);
+    if (f == NULL) {
+        *reply = NULL;
+        return;
+    }
+
+    fprintf(f, "OK epoch=%016" PRIx64 " generation=%u gap=%d n=%lu\n",
+            d->epoch, now, gap, n);
+
+    for (i = first; i < d->napplies; i++) {
+        a = &d->applies[i % MFW_APPLIES];
+
+        if (a->generation > after) {
+            fprintf(f, "generation=%u time=%llu uid=%u source=%s\n",
+                    a->generation, a->time_ms, (unsigned) a->uid,
+                    a->restart ? "restart" : "apply");
+        }
+    }
+
+    failed = ferror(f);
+
+    if (fclose(f) != 0 || failed) {
+        free(*reply);
+        *reply = NULL;
+    }
+}
+
+
+/* len digits, in base 10 or 16, at most 64 bits. */
+static int
+parse_u64(const char *s, size_t len, int base, uint64_t *out)
+{
+    int       c;
+    size_t    i;
+    uint64_t  v;
+
+    if (len == 0 || len > 20) {
+        return -1;
+    }
+
+    for (v = 0, i = 0; i < len; i++) {
+        c = s[i];
+
+        if (c >= '0' && c <= '9') {
+            c -= '0';
+
+        } else if (base == 16 && c >= 'a' && c <= 'f') {
+            c -= 'a' - 10;
+
+        } else if (base == 16 && c >= 'A' && c <= 'F') {
+            c -= 'A' - 10;
+
+        } else {
+            return -1;
+        }
+
+        if (v > (UINT64_MAX - (uint64_t) c) / (uint64_t) base) {
+            return -1;
+        }
+
+        v = v * (uint64_t) base + (uint64_t) c;
+    }
+
+    *out = v;
+
+    return 0;
+}
+
+
+/* ---- requests ---- */
+
+
+static void
+handle(mfwd_t *d, char *req, uid_t uid, int ro, char **reply)
 {
     char  *body, *end, *nl;
 
     nl = strchr(req, '\n');
     *nl = '\0';
+
+    if (ro && strcmp(req, "PING") != 0 && strcmp(req, "STATUS") != 0
+        && strcmp(req, "STATS") != 0 && strcmp(req, "MISSES") != 0
+        && strcmp(req, "APPLIES") != 0 && strncmp(req, "APPLIES ", 8) != 0)
+    {
+        error_reply(reply, "denied", "read-only socket: PING, STATUS, "
+                    "STATS, MISSES and APPLIES only");
+        return;
+    }
 
     if (strcmp(req, "PING") == 0) {
         *reply = strdup("OK\n");
@@ -622,6 +827,11 @@ handle(mfwd_t *d, char *req, uid_t uid, char **reply)
     } else if (strcmp(req, "SHOW") == 0) {
         show(d, reply);
 
+    } else if (strcmp(req, "APPLIES") == 0
+               || strncmp(req, "APPLIES ", 8) == 0)
+    {
+        applies(d, req + 7, reply);
+
     } else if (strcmp(req, "APPLY") == 0) {
         body = nl + 1;
         end = body + strlen(body) - 4;  /* "END\n" */
@@ -630,6 +840,7 @@ handle(mfwd_t *d, char *req, uid_t uid, char **reply)
         apply(d, body, reply);
 
         if (*reply != NULL && strncmp(*reply, "OK", 2) == 0) {
+            record_apply(d, uid, 0);
             sw_log_info("APPLY from uid %u: generation %u", uid,
                         d->generation);
 
@@ -745,7 +956,7 @@ failed:
 
 
 static void
-serve(mfwd_t *d, int fd)
+serve(mfwd_t *d, int fd, int ro)
 {
     char        *reply, *req;
     uid_t        uid;
@@ -760,7 +971,7 @@ serve(mfwd_t *d, int fd)
     req = read_request(fd, &why);
 
     if (req != NULL) {
-        handle(d, req, uid, &reply);
+        handle(d, req, uid, ro, &reply);
 
     } else {
         error_reply(&reply, "badreq", "%s", why);
@@ -818,10 +1029,12 @@ restore(mfwd_t *d)
                    (int) strcspn(why, "\n"), why);
 
     } else if (reply != NULL) {
+        record_apply(d, getuid(), 1);
         sw_log_info("saved policy applied again: %.*s",
                     (int) strcspn(reply, "\n"), reply);
 
     } else {
+        record_apply(d, getuid(), 1);
         sw_log_info("saved policy applied again: OK %u", d->generation);
     }
 
@@ -834,7 +1047,8 @@ static void
 usage(FILE *f)
 {
     fprintf(f,
-        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-d rundir]\n"
+        "usage: mfwd [-v] [-s socket] [-m mode] [-g group] [-r socket]\n"
+        "            [-R group] [-d rundir]\n"
         "       mfwd -P [-d rundir]\n"
         "\n"
         "  -v          debug logging, libbpf's and libxdp's info included\n"
@@ -842,6 +1056,10 @@ usage(FILE *f)
         "  -s socket   listen here (default " MFW_SOCKET ")\n"
         "  -m mode     socket permissions, octal (default 0600)\n"
         "  -g group    socket group, e.g. the one sw_configd runs as\n"
+        "  -r socket   also listen here, read-only: PING, STATUS, STATS,\n"
+        "              MISSES, APPLIES (default " MFW_MONITOR_SOCKET ",\n"
+        "              with -R)\n"
+        "  -R group    the read-only socket's group (mode 0660)\n"
         "  -d rundir   where the applied policy is saved\n"
         "              (default " MFWD_RUN_DIR ")\n"
         "  -P          detach every interface, remove all pins and the saved\n"
@@ -853,15 +1071,19 @@ usage(FILE *f)
 int
 main(int argc, char **argv)
 {
-    int                c, cfd, fd, purge;
+    int                c, cfd, fd, i, nfds, purge, rofd;
     mfwd_t             d = {};
     mode_t             mode;
-    const char        *group, *how, *sock;
+    const char        *group, *how, *rogroup, *rosock, *sock;
+    struct pollfd      pfd[2];
     struct sigaction   sa = {};
     char               err[PATH_MAX + 128], path[PATH_MAX];
 
     sock = MFW_SOCKET;
     group = NULL;
+    rosock = NULL;
+    rogroup = NULL;
+    rofd = -1;
     mode = 0600;
     purge = 0;
 
@@ -871,7 +1093,7 @@ main(int argc, char **argv)
 
     snprintf(d.run_dir, sizeof(d.run_dir), "%s", MFWD_RUN_DIR);
 
-    while ((c = getopt(argc, argv, "vs:m:g:d:PVh")) != -1) {
+    while ((c = getopt(argc, argv, "vs:m:g:r:R:d:PVh")) != -1) {
         switch (c) {
         case 'v':
             sw_log_set_level(SW_LOG_DEBUG);
@@ -892,6 +1114,14 @@ main(int argc, char **argv)
         case 'g':
             /* looked up when the socket is made, in /etc/group */
             group = optarg;
+            break;
+
+        case 'r':
+            rosock = optarg;
+            break;
+
+        case 'R':
+            rogroup = optarg;
             break;
 
         case 'd':
@@ -946,6 +1176,20 @@ main(int argc, char **argv)
         return 1;
     }
 
+    if (rosock != NULL || rogroup != NULL) {
+        if (rosock == NULL) {
+            rosock = MFW_MONITOR_SOCKET;
+        }
+
+        rofd = sw_sock_listen_unix(rosock, 0660, rogroup, err, sizeof(err));
+        if (rofd < 0) {
+            sw_log_err("read-only socket: %s", err);
+            goto failed;
+        }
+    }
+
+    d.epoch = draw_epoch();
+
     /*
      * No live update: start afresh, fail-open until restore() applies the
      * saved policy.
@@ -966,8 +1210,11 @@ main(int argc, char **argv)
     /* stderr may be a pipe; the socket's sends are MSG_NOSIGNAL */
     signal(SIGPIPE, SIG_IGN);
 
-    /* accept() wakes up every second, so a signal is never missed */
-    sw_sock_timeouts(fd, 1000);
+    pfd[0].fd = fd;
+    pfd[0].events = POLLIN;
+    pfd[1].fd = rofd;
+    pfd[1].events = POLLIN;
+    nfds = rofd >= 0 ? 2 : 1;
 
     if (d.dp.no_xdp) {
         how = d.dp.tcx ? "tcx (MFW_NO_XDP)" : "classic TC (MFW_NO_XDP)";
@@ -984,23 +1231,41 @@ main(int argc, char **argv)
                 "with %s", MFWD_VERSION, MFW_ABI_VERSION, sock, MFW_PIN_PATH,
                 how);
 
+    if (rofd >= 0) {
+        sw_log_info("read-only socket %s, group %s", rosock,
+                    rogroup != NULL ? rogroup : "root");
+    }
+
     if (sw_notify_ready() != 0) {
         sw_log_warn("tell systemd mfwd is ready: %s", strerror(errno));
     }
 
+    /* poll() wakes up every second, so a signal is never missed */
     while (!mfwd_stop) {
-        cfd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
-
-        if (cfd < 0) {
-            if (errno != EINTR && errno != EAGAIN && errno != ECONNABORTED) {
-                sw_log_warn("accept: %s", strerror(errno));
-            }
-
+        if (poll(pfd, (nfds_t) nfds, 1000) <= 0) {
             continue;
         }
 
-        serve(&d, cfd);
-        close(cfd);
+        for (i = 0; i < nfds; i++) {
+            if (!(pfd[i].revents & POLLIN)) {
+                continue;
+            }
+
+            cfd = accept4(pfd[i].fd, NULL, NULL, SOCK_CLOEXEC);
+
+            if (cfd < 0) {
+                if (errno != EINTR && errno != EAGAIN
+                    && errno != ECONNABORTED)
+                {
+                    sw_log_warn("accept: %s", strerror(errno));
+                }
+
+                continue;
+            }
+
+            serve(&d, cfd, i == 1);
+            close(cfd);
+        }
     }
 
     /* the pins keep filtering after we are gone */
@@ -1008,6 +1273,12 @@ main(int argc, char **argv)
 
     close(fd);
     unlink(sock);
+
+    if (rofd >= 0) {
+        close(rofd);
+        unlink(rosock);
+    }
+
     mfw_dp_close(&d.dp);
     free(d.policy);
 
@@ -1017,6 +1288,11 @@ failed:
 
     close(fd);
     unlink(sock);
+
+    if (rofd >= 0) {
+        close(rofd);
+        unlink(rosock);
+    }
 
     return 1;
 }

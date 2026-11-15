@@ -408,6 +408,78 @@ same "another layout is refused" "$(field flows)" none
 logged "log: refused" "is not the layout this mfwd reads"
 rm -rf "$FLOWS"
 
+echo "== the read-only socket and the apply record"
+# Seawall proposal 0012 §2: monitoring reads, and can't apply
+RO=$TMP/ro.sock
+ro() { "$MFW" -s "$RO" "$@"; }
+as_nobody() { setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"; }
+stop
+chmod 755 "$TMP"   # for nobody
+start -m 0660 -g nogroup -r "$RO" -R nogroup
+same "mode and group" "$(stat -c '%a %U %G' "$RO")" "660 root nogroup"
+expect ok "ping" ro ping
+same "status" "$(ro status | awk '$1 == "generation" { print $2 }')" 1
+expect ok "stats" ro stats
+expect ok "misses" ro misses
+out=$(ro apply /dev/null 2>&1)
+same "apply: exit 1" "$?" 1
+DENIED="read-only socket: PING, STATUS, STATS, MISSES and APPLIES only"
+same "apply: says why" "$out" "mfw: $DENIED"
+same "SHOW refused" "$(SOCK=$RO raw 'SHOW\n')" "ERR denied $DENIED"
+same "APPLY refused" "$(SOCK=$RO raw 'APPLY\nEND\n')" "ERR denied $DENIED"
+same "generation unchanged" "$(field generation)" 1
+# the saved policy, applied again at start, is the first record
+out=$(SOCK=$RO raw 'APPLIES\n')
+[[ $out =~ ^OK\ epoch=([0-9a-f]{16})\ generation=1\ gap=0\ n=1$'\n'generation=1\ time=[0-9]{13}\ uid=0\ source=restart$ ]] \
+    && ok "APPLIES: the restart" || bad "APPLIES: the restart: $out"
+epoch=${BASH_REMATCH[1]:-x}
+expect ok "apply as nobody" as_nobody "$MFW" -s "$SOCK" apply /dev/null
+out=$(SOCK=$RO raw "APPLIES $epoch 1\n")
+[[ $out =~ ^OK\ epoch=$epoch\ generation=2\ gap=0\ n=1$'\n'generation=2\ time=[0-9]+\ uid=65534\ source=apply$ ]] \
+    && ok "APPLIES after 1: nobody's" || bad "APPLIES after 1: $out"
+logged "log: by uid" "APPLY from uid 65534: generation 2"
+same "APPLIES: nothing new" "$(SOCK=$RO raw "APPLIES $epoch 2\n")" \
+    "OK epoch=$epoch generation=2 gap=0 n=0"
+same "another epoch: a gap" "$(SOCK=$RO raw 'APPLIES 1 1\n')" \
+    "OK epoch=$epoch generation=2 gap=1 n=0"
+same "not reached yet: a gap" "$(SOCK=$RO raw "APPLIES $epoch 9\n")" \
+    "OK epoch=$epoch generation=2 gap=1 n=0"
+same "bad cursor" "$(SOCK=$RO raw 'APPLIES zz 1\n')" \
+    "ERR badreq usage: APPLIES [<epoch> <generation>]"
+same "no generation" "$(SOCK=$RO raw "APPLIES $epoch\n")" \
+    "ERR badreq usage: APPLIES [<epoch> <generation>]"
+# 64 kept, 3 to 66: a cursor of 1 has missed 2, one of 2 nothing
+for _ in $(seq 64); do mfw apply /dev/null >/dev/null; done
+same "older than the ones kept: a gap" \
+    "$(SOCK=$RO raw "APPLIES $epoch 1\n")" \
+    "OK epoch=$epoch generation=66 gap=1 n=0"
+same "the one before the oldest kept: all 64" \
+    "$(SOCK=$RO raw "APPLIES $epoch 2\n" | head -1)" \
+    "OK epoch=$epoch generation=66 gap=0 n=64"
+same "every one kept" "$(SOCK=$RO raw 'APPLIES\n' | head -1)" \
+    "OK epoch=$epoch generation=66 gap=0 n=64"
+out=$(ro applies)
+same "mfw applies: 64 lines and 2 of heading" "$(echo "$out" | wc -l)" 66
+has "mfw applies: the epoch" "$(echo "$out" | head -1)" \
+    "epoch $epoch, generation 66"
+has "mfw applies: the last one" "$(echo "$out" | tail -1)" "  apply"
+# a restart draws another epoch, and the generation starts again
+stop
+expect fail "the read-only socket goes too" test -e "$RO"
+start -r "$RO"
+same "group root without -R" "$(stat -c '%a %G' "$RO")" "660 root"
+out=$(SOCK=$RO raw "APPLIES $epoch 66\n")
+[[ $out =~ ^OK\ epoch=([0-9a-f]{16})\ generation=1\ gap=1\ n=0$ \
+   && ${BASH_REMATCH[1]} != "$epoch" ]] \
+    && ok "restarted: another epoch, a gap" || bad "restarted: $out"
+out=$(timeout 5 nsenter --net=/var/run/netns/$NS "$MFWD" \
+      -s "$TMP/g.sock" -d "$TMP/run2" -r "$TMP/g-ro.sock" \
+      -R sw-no-such-group 2>&1)
+same "-R, an unknown group: exit 1" "$?" 1
+has "says why" "$out" 'no group "sw-no-such-group"'
+expect fail "no socket left" test -e "$TMP/g.sock"
+expect fail "no read-only socket left" test -e "$TMP/g-ro.sock"
+
 echo "== purge"
 stop
 # in the interfaces' namespace: a classic TC filter is removed there

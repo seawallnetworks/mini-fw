@@ -607,12 +607,14 @@ case-sensitive.
 | `MISSES` | `OK <n>` then n lines, newest first, of reply_miss's samples: `time=<Unix ms> if=<name> proto=N src=A sport=N dst=A dport=N tcp_flags=N icmp_type=N icmp_code=N` |
 | `SHOW` | `OK <n>` then the applied policy, n lines, canonical form |
 | `APPLY`, the policy lines, `END` | `OK <generation>[ missing=a,b]` |
+| `APPLIES [<epoch> <gen>]` | `OK epoch=<16 hex> generation=N gap=0\|1 n=<n>`, then n lines, oldest first: `generation=N time=<Unix ms> uid=N source=apply\|restart`. The last 64 applies, or those after generation gen of that epoch; another epoch (mfwd restarted), a generation not reached yet, or one older than those kept is a gap: none sent |
 
 Errors are one line, `ERR <code> <message>`:
 
 | Code | When |
 |------|------|
 | `badreq` | unknown request, no complete request within 3 s, more than 1 MiB, a NUL byte |
+| `denied` | a request other than `PING`, `STATUS`, `STATS`, `MISSES`, `APPLIES` on the read-only socket |
 | `invalid` | the policy was refused; the message starts with `line N:` |
 | `kernel` | an attach, a map update or a counter read failed |
 | `internal` | out of memory |
@@ -804,6 +806,10 @@ netfilter SYNPROXY/conntrack or `bpf_sk_assign_tcp_reqsk` (kernel 6.9+).
   one group. The shipped unit uses `-g mfw -m 0660`: the group `mfw`
   (declared by the seawall repo), which sw_configd runs in, so that it
   needn't run as root. Membership is as good as root over the firewall.
+- **The read-only socket** (`-r`, `-R`) answers only `PING`, `STATUS`,
+  `STATS`, `MISSES` and `APPLIES`. The shipped unit gives it to the group
+  `sw_monitor` (Seawall proposal 0012): its members read counters and who
+  applied when, and can neither apply nor read the policy.
 - mfwd parses only the line protocol and the policy grammar; it has no JSON
   or other complex input.
 - **Fail-open by default.** With nothing bound, everything passes. A bound

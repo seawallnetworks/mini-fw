@@ -771,11 +771,14 @@ mfw [-s socket] <command>
 | `mfw status` | Generation, attached, missing and degraded interfaces, fragment setting, whether replies are read from sw_flowd's table. |
 | `mfw stats [--json]` | Print counters. |
 | `mfw misses` | The last packets that looked like replies but matched no connection of the VM's, and that the extended list dropped, newest first (§8.1). |
+| `mfw applies` | The last 64 applies, oldest first: generation, time, the caller's uid, and `restart` for the saved policy applied again at start. Who changed the firewall, and when. |
 | `mfw ping` | Check that mfwd answers. |
 | `mfw version` | Print version. |
 | `mfw help` | Print usage. |
 
-The socket is `-s`, else `$MFW_SOCKET`, else `/run/mfwd.sock`.
+The socket is `-s`, else `$MFW_SOCKET`, else `/run/mfwd.sock`. The
+read-only socket, `/run/mfwd-monitor.sock`, answers `status`, `stats`,
+`misses`, `applies` and `ping` (`mfw -s /run/mfwd-monitor.sock status`).
 
 Exit status: **0** success, **1** refused by mfwd (an invalid policy, a
 kernel error), **2** usage, file or connection error.
@@ -783,7 +786,8 @@ kernel error), **2** usage, file or connection error.
 ### 9.2 `mfwd`
 
 ```text
-mfwd [-v] [-s socket] [-m mode] [-g group] [-d rundir]
+mfwd [-v] [-s socket] [-m mode] [-g group] [-r socket] [-R group]
+     [-d rundir]
 mfwd -P [-d rundir]
 mfwd -V
 ```
@@ -794,6 +798,8 @@ mfwd -V
 | `-s socket` | `/run/mfwd.sock` | where to listen; refused if another mfwd answers there |
 | `-m mode` | `0600` | socket permissions, octal, at most `0777` |
 | `-g group` | | socket group, from `/etc/group`; with `-m 0660`, that group may use `mfw` without root. An unknown group stops mfwd |
+| `-r socket` | `/run/mfwd-monitor.sock`, with `-R` | also listen here, read-only (mode `0660`): `PING`, `STATUS`, `STATS`, `MISSES`, `APPLIES` |
+| `-R group` | | the read-only socket's group; the shipped unit's is `sw_monitor` |
 | `-d rundir` | `/run/mfwd` | where the running policy is saved; the shipped unit lets mfwd write only under `/run` and `/sys/fs/bpf`, so a rundir elsewhere also needs `ReadWritePaths=` (`systemctl edit mfwd`) |
 | `-P` | | detach every interface, remove all pins and the saved policy, then exit |
 | `-V` | | print the version |

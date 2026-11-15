@@ -126,6 +126,7 @@ sudo mfw show                  # the running policy, normalized
 sudo mfw status                # generation, attached and missing interfaces
 sudo mfw stats [--json]
 sudo mfw misses                # the last replies dropped for want of a flow
+sudo mfw applies               # the last applies: when, and whose
 sudo mfw apply /dev/null       # unbind everything, detach every interface
 sudo mfwd -P                   # remove mini-fw completely (pins, saved policy)
 ```
@@ -148,12 +149,22 @@ One request per connection on the Unix socket; mfwd replies and closes.
 | `MISSES` | `OK <n>`, then n lines, newest first: `time=<Unix ms> if=<name> proto=N src=A sport=N dst=A dport=N tcp_flags=N icmp_type=N icmp_code=N` |
 | `SHOW` | `OK <n>`, then the running policy in n lines |
 | `APPLY`, policy lines, `END` | `OK <generation>[ missing=a,b]` |
+| `APPLIES [<epoch> <gen>]` | `OK epoch=<16 hex> generation=N gap=0\|1 n=<n>`, then n lines, oldest first: `generation=N time=<Unix ms> uid=N source=apply\|restart`. The last 64 applies, or those after generation gen of that epoch; another epoch (mfwd restarted), a generation not reached yet, or one older than those kept is a gap: none sent |
 
 Errors are `ERR <code> <message>`, with code `badreq` (malformed request),
-`invalid` (the policy was refused; the message names the line), `kernel`
-or `internal`. A request must arrive within 3 s and be at most 1 MiB.
+`invalid` (the policy was refused; the message names the line), `kernel`,
+`internal` or `denied` (not on the read-only socket). A request must arrive within 3 s and be at most 1 MiB.
 mfwd's socket is root-only by default (`-m`, `-g` to change that).
 The shipped unit gives it to the group `mfw`, mode `0660`.
+
+**The read-only socket** (`-r`, `-R`; Seawall proposal 0012 §2):
+`/run/mfwd-monitor.sock`, mode `0660`, answers `PING`, `STATUS`, `STATS`,
+`MISSES` and `APPLIES`, and refuses `SHOW` and `APPLY` (`ERR denied`).
+Monitoring reads the firewall there without the power to change it; the
+shipped unit gives it to the group `sw_monitor`. Each apply is recorded
+with its caller's uid (`source=apply`), and the saved policy applied again
+at start with mfwd's (`source=restart`); the epoch, drawn at each start,
+tells a restart, after which the generation may start again.
 
 ## Stateless caveats (until conntrack lands)
 

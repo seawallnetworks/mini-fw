@@ -23,8 +23,11 @@
 
 
 #define MFW_SOCKET       "/run/mfwd.sock"
+/* read-only: PING, STATUS, STATS, MISSES, APPLIES (Seawall proposal 0012) */
+#define MFW_MONITOR_SOCKET  "/run/mfwd-monitor.sock"
 #define MFW_TIMEOUT_MS   5000
 #define MFW_REQUEST_MAX  (1024 * 1024)   /* bytes, APPLY block included */
+#define MFW_APPLIES      64              /* applies mfwd keeps a record of */
 
 
 /* Every call returns mfw_ok or one of these; mfw_strerror() names it. */
@@ -36,6 +39,7 @@ enum mfw_rc {
     mfw_err_invalid  = -4,   /* ERR invalid: the policy was refused */
     mfw_err_kernel   = -5,   /* ERR kernel: a BPF or XDP operation failed */
     mfw_err_internal = -6,   /* ERR internal */
+    mfw_err_denied   = -7,   /* ERR denied: not on the read-only socket */
 };
 
 
@@ -109,6 +113,36 @@ struct mfw_miss {
 /* At most MFW_MISS_SAMPLES into out; *n says how many. */
 int mfw_misses(const mfw_client_t *c, struct mfw_miss out[MFW_MISS_SAMPLES],
     int *n);
+
+/*
+ * APPLIES: the applies after a cursor (Seawall proposal 0012 §2), each
+ * with its generation, time, caller and source. epoch is drawn at each
+ * mfwd start; generation only grows within one.
+ */
+struct mfw_apply {
+    __u32               generation;
+    unsigned long long  time_ms;      /* Unix time in ms */
+    unsigned            uid;          /* the caller's; mfwd's for restart */
+    int                 restart;      /* the saved policy, applied again at
+                                         start; else an APPLY */
+};
+
+struct mfw_applies {
+    unsigned long long  epoch;        /* mfwd's, now */
+    __u32               generation;   /* now; 0 if no policy */
+    int                 gap;          /* applies missed: another epoch, or
+                                         older than the ones kept */
+    int                 n;
+    struct mfw_apply    a[MFW_APPLIES];   /* oldest first */
+};
+
+/*
+ * The applies after generation `after` of epoch `epoch`; epoch 0 asks for
+ * every one kept, with the cursor. On a gap, none are given: carry on
+ * from out->epoch and out->generation.
+ */
+int mfw_applies(const mfw_client_t *c, unsigned long long epoch,
+    __u32 after, struct mfw_applies *out);
 
 /* The applied policy in canonical form; malloc'd, free() it. */
 int mfw_show(const mfw_client_t *c, char **policy);

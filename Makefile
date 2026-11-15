@@ -125,12 +125,14 @@ smoke: mfwd mfw
 install: install-runtime install-static-lib
 
 # what runs on the machine. The unit gives the socket to the group mfw,
-# from the seawall repo; without it (checked unless staging into DESTDIR)
-# mfwd couldn't start, so nothing is installed.
+# and the read-only one to sw_monitor, from the seawall repo; without them
+# (checked unless staging into DESTDIR) mfwd couldn't start, so nothing is
+# installed.
 install-runtime: mfwd mfw
-	[ -n "$(DESTDIR)" ] || getent group mfw >/dev/null || { \
-	    echo "group mfw missing: install seawall first" >&2; \
-	    exit 1; }
+	[ -n "$(DESTDIR)" ] || for g in mfw sw_monitor; do \
+	    getent group $$g >/dev/null || { \
+	    echo "group $$g missing: install seawall first" >&2; \
+	    exit 1; }; done
 	install -D -m 0755 mfwd $(DESTDIR)$(PREFIX)/sbin/mfwd
 	install -D -m 0755 mfw $(DESTDIR)$(PREFIX)/bin/mfw
 	install -D -m 0644 mfwd.service $(DESTDIR)/etc/systemd/system/mfwd.service

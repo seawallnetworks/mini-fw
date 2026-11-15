@@ -42,6 +42,9 @@ static int request_line(const mfw_client_t *c, const char *req, char **reply,
     char **fields);
 static int field(const char *fields, const char *key, char *out,
     size_t len);
+static int field_ull(const char *fields, const char *key, int base,
+    unsigned long long max, unsigned long long *out);
+static int apply_parse(const char *line, struct mfw_apply *a);
 
 
 static const char *const  mfw_stat_names[MFW_STAT_MAX] = {
@@ -67,6 +70,7 @@ static const mfw_err_code_t  mfw_err_codes[] = {
     { "invalid",  mfw_err_invalid },
     { "kernel",   mfw_err_kernel },
     { "internal", mfw_err_internal },
+    { "denied",   mfw_err_denied },
 };
 
 
@@ -101,6 +105,9 @@ mfw_strerror(int rc)
 
     case mfw_err_internal:
         return "mfwd internal error";
+
+    case mfw_err_denied:
+        return "not allowed on mfwd's read-only socket";
 
     default:
         return "unknown error";
@@ -578,6 +585,132 @@ mfw_misses(const mfw_client_t *c, struct mfw_miss out[MFW_MISS_SAMPLES],
     }
 
     return rc;
+}
+
+
+/* A number field, digits only, at most max. */
+static int
+field_ull(const char *fields, const char *key, int base,
+    unsigned long long max, unsigned long long *out)
+{
+    char  v[24], *end;
+
+    if (field(fields, key, v, sizeof(v)) != 0 || v[0] == '\0'
+        || v[0] == '-' || v[0] == '+' || v[0] == ' ')
+    {
+        return -1;
+    }
+
+    errno = 0;
+    *out = strtoull(v, &end, base);
+
+    return *end == '\0' && errno == 0 && *out <= max ? 0 : -1;
+}
+
+
+static int
+apply_parse(const char *line, struct mfw_apply *a)
+{
+    char                src[16];
+    unsigned long long  gen, uid;
+
+    if (field_ull(line, "generation", 10, 0xffffffffULL, &gen) != 0
+        || field_ull(line, "time", 10, ~0ULL, &a->time_ms) != 0
+        || field_ull(line, "uid", 10, 0xffffffffULL, &uid) != 0
+        || field(line, "source", src, sizeof(src)) != 0)
+    {
+        return -1;
+    }
+
+    if (strcmp(src, "apply") == 0) {
+        a->restart = 0;
+
+    } else if (strcmp(src, "restart") == 0) {
+        a->restart = 1;
+
+    } else {
+        return -1;
+    }
+
+    a->generation = (__u32) gen;
+    a->uid = (unsigned) uid;
+
+    return 0;
+}
+
+
+int
+mfw_applies(const mfw_client_t *c, unsigned long long epoch, __u32 after,
+    struct mfw_applies *out)
+{
+    int                  rc;
+    char                *line, *nl, *reply, req[64];
+    unsigned long long   gen, gap, n;
+
+    memset(out, 0, sizeof(*out));
+
+    if (epoch == 0) {
+        snprintf(req, sizeof(req), "APPLIES\n");
+
+    } else {
+        snprintf(req, sizeof(req), "APPLIES %016llx %u\n", epoch, after);
+    }
+
+    rc = mfw_request(c, req, &reply, NULL, 0);
+    if (rc != 0) {
+        return rc;
+    }
+
+    /* OK epoch=E generation=N gap=G n=K\n then K lines */
+    nl = strchr(reply, '\n');
+
+    if (nl == NULL || reply[2] != ' ') {
+        goto bad;
+    }
+
+    *nl = '\0';
+
+    if (field_ull(reply + 3, "epoch", 16, ~0ULL, &out->epoch) != 0
+        || field_ull(reply + 3, "generation", 10, 0xffffffffULL, &gen) != 0
+        || field_ull(reply + 3, "gap", 10, 1, &gap) != 0
+        || field_ull(reply + 3, "n", 10, MFW_APPLIES, &n) != 0)
+    {
+        goto bad;
+    }
+
+    out->generation = (__u32) gen;
+    out->gap = (int) gap;
+
+    for (line = nl + 1; *line != '\0'; line = nl + 1) {
+        nl = strchr(line, '\n');
+
+        if (nl == NULL || (unsigned long long) out->n == n) {
+            goto bad;
+        }
+
+        *nl = '\0';
+
+        if (apply_parse(line, &out->a[out->n]) != 0) {
+            goto bad;
+        }
+
+        out->n++;
+    }
+
+    if ((unsigned long long) out->n != n) {
+        goto bad;
+    }
+
+    free(reply);
+
+    return mfw_ok;
+
+bad:
+
+    free(reply);
+    memset(out, 0, sizeof(*out));
+
+    return mfw_err_reply;
 }
 
 

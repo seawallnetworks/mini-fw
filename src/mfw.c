@@ -38,6 +38,7 @@ static int cmd_show(const mfw_client_t *c);
 static int cmd_status(const mfw_client_t *c);
 static int cmd_stats(const mfw_client_t *c, int argc, char **argv);
 static int cmd_misses(const mfw_client_t *c);
+static int cmd_applies(const mfw_client_t *c);
 
 
 static void
@@ -58,6 +59,9 @@ usage(FILE *f)
         "  misses             the last packets that looked like replies but\n"
         "                     matched no flow of sw_flowd's, and that the\n"
         "                     extended list dropped (counter reply_miss)\n"
+        "  applies            the last applies: generation, time, caller's\n"
+        "                     uid, and whether it was the saved policy\n"
+        "                     applied again at start\n"
         "  ping\n"
         "  version\n"
         "\n"
@@ -80,6 +84,9 @@ usage(FILE *f)
         "mfwd attaches every bound interface and detaches the others. Only\n"
         "inbound traffic is filtered. Socket: -s, else $MFW_SOCKET, else "
         MFW_SOCKET ".\n"
+        "The read-only socket, " MFW_MONITOR_SOCKET ", answers status, "
+        "stats,\n"
+        "misses, applies and ping.\n"
         "Exit status: 0 ok, 1 refused by mfwd, 2 usage, file or connection\n"
         "error.\n"
         "\n"
@@ -335,6 +342,52 @@ cmd_stats(const mfw_client_t *c, int argc, char **argv)
 }
 
 
+/* The applies mfwd keeps, oldest first: who changed the firewall, when. */
+static int
+cmd_applies(const mfw_client_t *c)
+{
+    int                  i, rc;
+    char                 when[48];
+    time_t               t;
+    struct tm            tm;
+    struct mfw_applies  *a;
+
+    a = malloc(sizeof(*a));
+    if (a == NULL) {
+        fprintf(stderr, "mfw: out of memory\n");
+        return MFW_EXIT_ERROR;
+    }
+
+    rc = mfw_applies(c, 0, 0, a);
+    if (rc != 0) {
+        free(a);
+        return failed(rc, NULL);
+    }
+
+    printf("epoch %016llx, generation %u\n", a->epoch, a->generation);
+
+    if (a->n > 0) {
+        printf("%-10s  %-23s  %-6s  %s\n", "generation", "time", "uid",
+               "source");
+    }
+
+    for (i = 0; i < a->n; i++) {
+        t = (time_t) (a->a[i].time_ms / 1000);
+        localtime_r(&t, &tm);
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+        snprintf(when + strlen(when), sizeof(when) - strlen(when), ".%03u",
+                 (unsigned) (a->a[i].time_ms % 1000));
+
+        printf("%-10u  %-23s  %-6u  %s\n", a->a[i].generation, when,
+               a->a[i].uid, a->a[i].restart ? "restart" : "apply");
+    }
+
+    free(a);
+
+    return MFW_EXIT_OK;
+}
+
+
 /* reply_miss's samples, newest first: when a tool stopped working,
  * whether replies are why */
 static int
@@ -474,6 +527,10 @@ main(int argc, char **argv)
 
     if (strcmp(cmd, "misses") == 0 && n == 0) {
         return cmd_misses(&c);
+    }
+
+    if (strcmp(cmd, "applies") == 0 && n == 0) {
+        return cmd_applies(&c);
     }
 
     if (strcmp(cmd, "ping") == 0 && n == 0) {
