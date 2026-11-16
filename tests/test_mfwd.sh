@@ -284,6 +284,11 @@ if [[ -z ${MFW_NO_XDP:-} ]]; then
 echo "== sharing the XDP hook"
 # dummy interfaces have no native XDP: mfwd fell back to skb
 same "d0 in its dispatcher" "$(xdp_in d0)" 1
+# the attach is tried quietly, but a real refusal still says the
+# kernel's reason, before mfwd's own line
+logged "native refusal: the kernel's reason" \
+    "Kernel error message: Underlying driver does not support XDP"
+logged "native refusal: mfwd's line" "d0: native XDP refused"
 expect fail "not at TC on d0" tc_on d0
 stop
 start

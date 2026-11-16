@@ -10,6 +10,7 @@
 #include "dp_attach.h"
 #include "mfw.skel.h"
 
+#include <sw/bpf.h>
 #include <sw/bpffs.h>
 #include <sw/log.h>
 #include <sw/netif.h>
@@ -284,7 +285,16 @@ xdp_load(const char *root, const char *ifname, int ifindex,
      */
     xdp_program__set_xdp_frags_support(xp, true);
 
+    /*
+     * Quiet: an attach racing another libxdp user's (voidgate starting
+     * with mfwd) fails or is retried by libxdp, and works, but libbpf has
+     * already printed the kernel's refusal. mfw_xdp_attach() replays what
+     * it printed when the attach really failed.
+     */
+    sw_bpf_quiet(1);
     e = xdp_program__attach(xp, ifindex, mode, 0);
+    sw_bpf_quiet(0);
+
     if (e != 0) {
         goto done;
     }
@@ -370,6 +380,7 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
             && e != -EBUSY
             && e != -EEXIST)
         {
+            sw_bpf_quiet_replay();
             sw_log_warn("%s: native XDP refused: %s; trying skb (generic) "
                         "mode", ifname, strerror(-e));
 
@@ -378,6 +389,11 @@ mfw_xdp_attach(const char *root, const char *ifname, int ifindex,
         }
 
         if (e != -EBUSY && e != -EEXIST) {
+            /* a real failure: the kernel's reason, or the verifier's log */
+            if (e != 0) {
+                sw_bpf_quiet_replay();
+            }
+
             return e;
         }
 
